@@ -80,6 +80,10 @@ async def create_ftp_account(
     if exists.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="FTP username already exists.")
 
+    # Default home_dir if not provided
+    if not body.home_dir:
+        body.home_dir = f"/home/{current_user.username}/"
+
     # Sanitize home_dir: must be under /home/{username}/
     expected_prefix = f"/home/{current_user.username}/"
     if not _is_admin(current_user) and not body.home_dir.startswith(expected_prefix):

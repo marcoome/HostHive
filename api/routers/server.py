@@ -44,26 +44,32 @@ async def server_stats(
     request: Request,
     admin: User = Depends(_admin),
 ):
+    _DEFAULTS = {
+        "cpu_percent": 0.0,
+        "memory_percent": 0.0,
+        "memory_used_mb": 0,
+        "memory_total_mb": 0,
+        "disk_percent": 0.0,
+        "disk_used_gb": 0.0,
+        "disk_total_gb": 0.0,
+        "load_avg_1": 0.0,
+        "load_avg_5": 0.0,
+        "load_avg_15": 0.0,
+        "network_rx_bytes": 0,
+        "network_tx_bytes": 0,
+        "active_connections": 0,
+    }
     agent = request.app.state.agent
     try:
         result = await agent.get_server_stats()
     except Exception:
-        return {
-            "cpu_percent": 0.0,
-            "memory_percent": 0.0,
-            "memory_used_mb": 0,
-            "memory_total_mb": 0,
-            "disk_percent": 0.0,
-            "disk_used_gb": 0.0,
-            "disk_total_gb": 0.0,
-            "load_avg_1": 0.0,
-            "load_avg_5": 0.0,
-            "load_avg_15": 0.0,
-            "network_rx_bytes": 0,
-            "network_tx_bytes": 0,
-            "active_connections": 0,
-            "_agent_down": True,
-        }
+        return {**_DEFAULTS, "_agent_down": True}
+
+    # Ensure all numeric fields are never None (prevents NaN% in the frontend)
+    if isinstance(result, dict):
+        for key, default in _DEFAULTS.items():
+            if result.get(key) is None:
+                result[key] = default
     return result
 
 
@@ -114,15 +120,40 @@ async def list_services(
     request: Request,
     admin: User = Depends(_admin),
 ):
+    _DISPLAY_NAMES = {
+        "nginx": "Nginx",
+        "postgresql": "PostgreSQL",
+        "redis-server": "Redis",
+        "hosthive-api": "NovaPanel API",
+        "hosthive-agent": "NovaPanel Agent",
+        "hosthive-worker": "NovaPanel Worker",
+        "exim4": "Exim4 (Mail)",
+        "dovecot": "Dovecot (IMAP)",
+        "proftpd": "ProFTPD",
+        "fail2ban": "Fail2ban",
+        "docker": "Docker",
+    }
     agent = request.app.state.agent
     try:
         result = await agent._request("GET", "/system/services")
+        # Normalise: if the agent returns {"services": [...]}, unwrap to array
+        if isinstance(result, dict) and "services" in result:
+            services = result["services"]
+        elif isinstance(result, list):
+            services = result
+        else:
+            services = []
+        # Ensure each entry has display_name
+        for svc in services:
+            if isinstance(svc, dict) and "display_name" not in svc:
+                svc["display_name"] = _DISPLAY_NAMES.get(svc.get("name", ""), svc.get("name", ""))
+        return services
     except Exception:
-        known_services = ["nginx", "postgresql", "redis-server", "hosthive-api", "hosthive-agent",
-                          "hosthive-worker", "exim4", "dovecot", "proftpd", "fail2ban", "docker"]
-        return {"services": [{"name": s, "status": "unknown", "enabled": False} for s in known_services],
-                "_agent_down": True}
-    return result
+        known_services = list(_DISPLAY_NAMES.keys())
+        return [
+            {"name": s, "display_name": _DISPLAY_NAMES[s], "status": "unknown", "enabled": False}
+            for s in known_services
+        ]
 
 
 # --------------------------------------------------------------------------

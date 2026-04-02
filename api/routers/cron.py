@@ -93,6 +93,9 @@ async def create_cron_job(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    import logging
+    logger = logging.getLogger(__name__)
+
     job = CronJob(
         user_id=current_user.id,
         schedule=body.schedule,
@@ -105,10 +108,8 @@ async def create_cron_job(
     try:
         await _sync_crontab(db, current_user, agent)
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error syncing crontab: {exc}",
-        )
+        # Non-fatal: job is saved in DB; agent sync will be retried on next change.
+        logger.warning("Agent error syncing crontab after create: %s", exc)
 
     _log(db, request, current_user.id, "cron.create", f"Created cron job: {body.schedule} {body.command[:80]}")
     return CronJobResponse.model_validate(job)

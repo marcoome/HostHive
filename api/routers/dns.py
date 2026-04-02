@@ -82,21 +82,37 @@ async def create_zone(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Verify domain ownership
-    domain_result = await db.execute(select(Domain).where(Domain.id == body.domain_id))
-    domain = domain_result.scalar_one_or_none()
-    if domain is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Domain not found.")
-    if not _is_admin(current_user) and domain.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to domain.")
+    # If domain_id is provided, verify domain ownership
+    domain_id = body.domain_id
+    if domain_id is not None:
+        domain_result = await db.execute(select(Domain).where(Domain.id == domain_id))
+        domain = domain_result.scalar_one_or_none()
+        if domain is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Domain not found.")
+        if not _is_admin(current_user) and domain.user_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to domain.")
+    else:
+        # Try to look up the domain by zone_name (frontend sends name only)
+        domain_result = await db.execute(
+            select(Domain).where(Domain.domain_name == body.zone_name)
+        )
+        domain = domain_result.scalar_one_or_none()
+        if domain is not None:
+            if not _is_admin(current_user) and domain.user_id != current_user.id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to domain.")
+            domain_id = domain.id
 
-    exists = await db.execute(select(DnsZone).where(DnsZone.zone_name == body.zone_name))
+    zone_name = body.zone_name
+    if not zone_name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="zone_name is required.")
+
+    exists = await db.execute(select(DnsZone).where(DnsZone.zone_name == zone_name))
     if exists.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Zone already exists.")
 
     agent = request.app.state.agent
     try:
-        await agent.create_zone(body.zone_name)
+        await agent.create_zone(zone_name)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -105,13 +121,13 @@ async def create_zone(
 
     zone = DnsZone(
         user_id=current_user.id,
-        domain_id=body.domain_id,
-        zone_name=body.zone_name,
+        domain_id=domain_id,
+        zone_name=zone_name,
     )
     db.add(zone)
     await db.flush()
 
-    _log(db, request, current_user.id, "dns.create_zone", f"Created zone {body.zone_name}")
+    _log(db, request, current_user.id, "dns.create_zone", f"Created zone {zone_name}")
     return DnsZoneResponse.model_validate(zone)
 
 

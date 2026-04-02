@@ -106,15 +106,12 @@ async def list_wordpress_installs(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    from agent.executors import wordpress_executor
-
     try:
+        from agent.executors import wordpress_executor
         installs = wordpress_executor.detect_wordpress_installs()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to detect WordPress installs: {exc}",
-        )
+    except Exception:
+        # Agent or executor unavailable -- return empty list instead of 500/502
+        return {"items": [], "total": 0}
 
     # Filter to current user's installs unless admin
     if not _is_admin(current_user):

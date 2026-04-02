@@ -122,6 +122,24 @@ async def create_domain(
 
 
 # --------------------------------------------------------------------------
+# GET /{id} -- single domain detail
+# --------------------------------------------------------------------------
+@router.get("/{domain_id}", status_code=status.HTTP_200_OK)
+async def get_domain(
+    domain_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Domain).where(Domain.id == domain_id))
+    domain = result.scalar_one_or_none()
+    if not domain:
+        raise HTTPException(status_code=404, detail="Domain not found.")
+    if not _is_admin(current_user) and domain.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+    return DomainResponse.model_validate(domain)
+
+
+# --------------------------------------------------------------------------
 # PUT /{id} -- update domain config
 # --------------------------------------------------------------------------
 @router.put("/{domain_id}", response_model=DomainResponse, status_code=status.HTTP_200_OK)

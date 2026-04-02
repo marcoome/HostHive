@@ -5,18 +5,30 @@ from __future__ import annotations
 import uuid
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class DnsZoneCreate(BaseModel):
-    domain_id: uuid.UUID
-    zone_name: str = Field(..., min_length=1, max_length=255)
+    domain_id: Optional[uuid.UUID] = None
+    zone_name: str = Field(default="", min_length=0, max_length=255)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_frontend_field_names(cls, data):
+        """Accept ``name`` as alias for ``zone_name`` and ``domain`` as alias
+        for ``domain_id``.  The frontend sends ``{name, primary_ip}``."""
+        if isinstance(data, dict):
+            if "name" in data and "zone_name" not in data:
+                data["zone_name"] = data.pop("name")
+            if "domain" in data and "domain_id" not in data:
+                data["domain_id"] = data.pop("domain")
+        return data
 
 
 class DnsZoneResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
-    domain_id: uuid.UUID
+    domain_id: Optional[uuid.UUID] = None
     zone_name: str
     is_active: bool
 
@@ -24,7 +36,7 @@ class DnsZoneResponse(BaseModel):
 
 
 class DnsRecordCreate(BaseModel):
-    zone_id: uuid.UUID
+    zone_id: Optional[uuid.UUID] = None  # Optional: comes from URL path parameter
     record_type: str = Field(..., pattern=r"^(A|AAAA|CNAME|MX|TXT|NS|SRV|CAA|PTR)$")
     name: str = Field(..., min_length=1, max_length=255)
     value: str = Field(..., min_length=1, max_length=1024)

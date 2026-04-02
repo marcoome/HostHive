@@ -398,6 +398,25 @@ async def compose_deploy(
 
 
 # ---------------------------------------------------------------------------
+# POST /compose — alias for frontend compatibility
+# Frontend sends { yaml } instead of { compose_yaml, project_name }.
+# ---------------------------------------------------------------------------
+
+@router.post("/compose", status_code=status.HTTP_201_CREATED)
+async def compose_deploy_alias(
+    body: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Normalise payload: frontend sends {yaml} while backend expects {compose_yaml, project_name}
+    compose_yaml = body.get("yaml") or body.get("compose_yaml") or ""
+    project_name = body.get("project_name") or "compose-project"
+    normalised = ComposeDeploy(compose_yaml=compose_yaml, project_name=project_name)
+    return await compose_deploy(body=normalised, request=request, db=db, current_user=current_user)
+
+
+# ---------------------------------------------------------------------------
 # POST /compose/validate — validate compose file
 # ---------------------------------------------------------------------------
 
