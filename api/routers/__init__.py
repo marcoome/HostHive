@@ -35,6 +35,7 @@ from api.routers.apps import router as apps_router
 from api.routers.email_auth import router as email_auth_router
 from api.routers.settings import router as settings_router
 from api.routers.mcp import router as mcp_router
+from api.routers.dashboard import router as dashboard_router
 
 __all__ = [
     "ai_router",
@@ -72,4 +73,5 @@ __all__ = [
     "email_auth_router",
     "settings_router",
     "mcp_router",
+    "dashboard_router",
 ]

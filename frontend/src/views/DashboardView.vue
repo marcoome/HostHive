@@ -391,7 +391,7 @@ function formatBytes(bytes) {
 async function refreshAll() {
   loading.value = true
   try {
-    const { data } = await client.get('/admin/dashboard')
+    const { data } = await client.get('/dashboard')
     dashboardData.value = data
     await fetchActivity()
   } catch {

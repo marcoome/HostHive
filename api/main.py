@@ -225,6 +225,7 @@ from api.routers import (  # noqa: E402
     wordpress_router,
     settings_router,
     mcp_router,
+    dashboard_router,
 )
 
 _v1 = "/api/v1"
@@ -262,6 +263,7 @@ app.include_router(docker_router,        prefix=f"{_v1}/docker",       tags=["Do
 app.include_router(wordpress_router,     prefix=f"{_v1}/wordpress",    tags=["WordPress"])
 app.include_router(settings_router,      prefix=f"{_v1}/settings",     tags=["Settings"])
 app.include_router(mcp_router,           prefix=f"{_v1}/mcp",          tags=["MCP"])
+app.include_router(dashboard_router,     prefix=f"{_v1}/dashboard",     tags=["Dashboard"])
 app.include_router(metrics_router,       prefix="/metrics",             tags=["Metrics"])
 
 

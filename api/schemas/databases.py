@@ -55,6 +55,7 @@ class DatabaseResponse(BaseModel):
     name: Optional[str] = None
     username: Optional[str] = None
     type: Optional[str] = None
+    size: int = 0
 
     model_config = {"from_attributes": True}
 

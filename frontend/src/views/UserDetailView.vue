@@ -275,7 +275,7 @@ async function fetchUser() {
 async function fetchUserDomains() {
   try {
     const { data } = await client.get(`/users/${route.params.id}/domains`)
-    userDomains.value = data
+    userDomains.value = data.items || data
   } catch {
     userDomains.value = []
   }
@@ -284,7 +284,7 @@ async function fetchUserDomains() {
 async function fetchUserDatabases() {
   try {
     const { data } = await client.get(`/users/${route.params.id}/databases`)
-    userDatabases.value = data
+    userDatabases.value = data.items || data
   } catch {
     userDatabases.value = []
   }
