@@ -337,6 +337,11 @@ async function save() {
     delete data.apiKey
   }
   await ai.updateSettings(data)
+
+  // Auto-load models after saving (if we have a real key)
+  if (form.value.apiKey && !form.value.apiKey.startsWith('••')) {
+    await loadModels()
+  }
 }
 
 // When the provider changes, clear fetched models and reset model selection
@@ -356,6 +361,15 @@ onMounted(async () => {
     // API key is never returned for security - show placeholder if configured
     if (ai.settings.hasApiKey && !form.value.apiKey) {
       form.value.apiKey = '••••••••••••••••••••••••••••••••'
+    }
+    // Auto-load models if configured
+    if (ai.settings.hasApiKey) {
+      try {
+        const { data } = await client.get('/ai/models')
+        if (data.models && data.models.length > 0) {
+          fetchedModels.value = data.models.map(m => m.id || m)
+        }
+      } catch {}
     }
   } catch {}
 
