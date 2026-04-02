@@ -24,7 +24,7 @@ export const useIntegrationsStore = defineStore('integrations', () => {
   async function updateIntegration(name, config) {
     const notify = useNotificationsStore()
     try {
-      const { data } = await client.put(`/integrations/${name}`, config)
+      const { data } = await client.put(`/integrations/${name}`, { config })
       const idx = integrations.value.findIndex(i => i.name === name)
       if (idx !== -1) integrations.value[idx] = data
       notify.success(`${name} configuration updated`)

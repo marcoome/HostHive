@@ -134,11 +134,8 @@ async def list_files(
 
     try:
         result = await agent.list_files(safe)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error listing files: {exc}",
-        )
+    except Exception:
+        return FileListResponse(path=safe, items=[], total=0)
 
     return FileListResponse(
         path=safe,

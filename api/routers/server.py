@@ -47,11 +47,23 @@ async def server_stats(
     agent = request.app.state.agent
     try:
         result = await agent.get_server_stats()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error: {exc}",
-        )
+    except Exception:
+        return {
+            "cpu_percent": 0.0,
+            "memory_percent": 0.0,
+            "memory_used_mb": 0,
+            "memory_total_mb": 0,
+            "disk_percent": 0.0,
+            "disk_used_gb": 0.0,
+            "disk_total_gb": 0.0,
+            "load_avg_1": 0.0,
+            "load_avg_5": 0.0,
+            "load_avg_15": 0.0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0,
+            "active_connections": 0,
+            "_agent_down": True,
+        }
     return result
 
 
@@ -105,11 +117,8 @@ async def list_services(
     agent = request.app.state.agent
     try:
         result = await agent._request("GET", "/system/services")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error: {exc}",
-        )
+    except Exception:
+        return {"services": [], "_agent_down": True}
     return result
 
 
@@ -198,11 +207,8 @@ async def firewall_rules(
     agent = request.app.state.agent
     try:
         result = await agent._request("GET", "/system/firewall")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error: {exc}",
-        )
+    except Exception:
+        return {"rules": [], "_agent_down": True}
     return result
 
 
@@ -257,11 +263,8 @@ async def fail2ban_jails(
     agent = request.app.state.agent
     try:
         result = await agent._request("GET", "/system/fail2ban")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error: {exc}",
-        )
+    except Exception:
+        return {"jails": [], "_agent_down": True}
     return result
 
 

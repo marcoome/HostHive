@@ -248,11 +248,8 @@ async def mail_queue(
     agent = request.app.state.agent
     try:
         result = await agent._request("GET", "/mail/queue")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error fetching mail queue: {exc}",
-        )
+    except Exception:
+        return {"queue": [], "_agent_down": True}
     return result
 
 
