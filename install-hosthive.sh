@@ -38,6 +38,8 @@ INSTALL_DIR="/opt/hosthive"
 CONFIG_DIR="${INSTALL_DIR}/config"
 LOG_FILE="${INSTALL_DIR}/logs/install.log"
 
+mkdir -p "${INSTALL_DIR}/logs"
+
 # ─── Helpers ───
 print_header() {
     clear
@@ -114,10 +116,10 @@ fi
 # Check Debian 12
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
-    if [[ "$ID" != "debian" ]] || [[ ! "$VERSION_ID" =~ ^12 ]]; then
-        fail "HostHive requires Debian 12 (Bookworm). Detected: ${PRETTY_NAME:-unknown}"
+    if [[ "$ID" != "debian" ]] || [[ ! "$VERSION_ID" =~ ^1[23] ]]; then
+        fail "HostHive requires Debian 12+ (Bookworm/Trixie). Detected: ${PRETTY_NAME:-unknown}"
     fi
-    success "OS: Debian 12 (Bookworm)"
+    success "OS: ${PRETTY_NAME}"
 else
     fail "Cannot detect OS. /etc/os-release not found."
 fi
