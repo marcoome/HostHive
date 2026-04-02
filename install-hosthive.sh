@@ -318,9 +318,9 @@ if [[ -f "${INSTALL_DIR}/requirements.txt" ]]; then
 else
     pip install \
         fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg \
-        celery redis pydantic pydantic-settings "passlib[bcrypt]" "python-jose[cryptography]" \
+        celery redis "pydantic[email]" pydantic-settings "passlib[bcrypt]" "python-jose[cryptography]" \
         python-multipart aiofiles paramiko dnspython slowapi jinja2 httpx \
-        cryptography alembic psutil >> "$LOG_FILE" 2>&1 &
+        cryptography alembic psutil email-validator >> "$LOG_FILE" 2>&1 &
     spinner $! "Installing Python packages"
 fi
 success "Python environment ready"
