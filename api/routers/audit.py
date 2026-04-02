@@ -15,7 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.database import get_db
-from api.core.security import require_role
+from api.core.security import get_current_user, require_role
 from api.models.activity_log import ActivityLog
 from api.models.users import User
 
@@ -98,10 +98,15 @@ async def list_audit_entries(
     date_to: Optional[datetime] = None,
     ip_address: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(_admin),
+    current_user: User = Depends(get_current_user),
 ):
     query = select(ActivityLog)
     count_query = select(func.count()).select_from(ActivityLog)
+
+    # Non-admin users can only see their own activity
+    if current_user.role.value != "admin":
+        query = query.where(ActivityLog.user_id == current_user.id)
+        count_query = count_query.where(ActivityLog.user_id == current_user.id)
 
     query, count_query = _apply_filters(query, count_query, user_id, action, date_from, date_to, ip_address)
 

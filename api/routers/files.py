@@ -53,8 +53,12 @@ def _safe_path(username: str, path: str) -> str:
     Raises HTTPException 403 on traversal attempt.
     """
     sandbox = f"/home/{username}"
-    # Normalize: collapse .., resolve ~, strip trailing slashes
-    normalized = posixpath.normpath(posixpath.join(sandbox, path.lstrip("/")))
+    # If path already starts with the sandbox, use it directly
+    if path.startswith(sandbox + "/") or path == sandbox:
+        normalized = posixpath.normpath(path)
+    else:
+        # Normalize: collapse .., resolve ~, strip trailing slashes
+        normalized = posixpath.normpath(posixpath.join(sandbox, path.lstrip("/")))
     # Ensure the final path starts with the sandbox
     if not (normalized == sandbox or normalized.startswith(sandbox + "/")):
         raise HTTPException(
