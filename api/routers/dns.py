@@ -75,73 +75,85 @@ async def list_zones(
     }
 
 
-@router.post("/zones", response_model=DnsZoneResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/zones", status_code=status.HTTP_201_CREATED)
 async def create_zone(
     body: DnsZoneCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # If domain_id is provided, verify domain ownership
-    domain_id = body.domain_id
-    if domain_id is not None:
-        domain_result = await db.execute(select(Domain).where(Domain.id == domain_id))
-        domain = domain_result.scalar_one_or_none()
-        if domain is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Domain not found.")
-        if not _is_admin(current_user) and domain.user_id != current_user.id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to domain.")
-    else:
-        # Try to look up the domain by zone_name (frontend sends name only)
-        domain_result = await db.execute(
-            select(Domain).where(Domain.domain_name == body.zone_name)
-        )
-        domain = domain_result.scalar_one_or_none()
-        if domain is not None:
+    import logging
+    _dns_logger = logging.getLogger("hosthive.dns")
+
+    try:
+        # If domain_id is provided, verify domain ownership
+        domain_id = body.domain_id
+        if domain_id is not None:
+            domain_result = await db.execute(select(Domain).where(Domain.id == domain_id))
+            domain = domain_result.scalar_one_or_none()
+            if domain is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Domain not found.")
             if not _is_admin(current_user) and domain.user_id != current_user.id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to domain.")
-            domain_id = domain.id
+        else:
+            # Try to look up the domain by zone_name (frontend sends name only)
+            domain_result = await db.execute(
+                select(Domain).where(Domain.domain_name == body.zone_name)
+            )
+            domain = domain_result.scalar_one_or_none()
+            if domain is not None:
+                if not _is_admin(current_user) and domain.user_id != current_user.id:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to domain.")
+                domain_id = domain.id
 
-    zone_name = body.zone_name
-    if not zone_name:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="zone_name is required.")
+        zone_name = body.zone_name
+        if not zone_name:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="zone_name is required.")
 
-    exists = await db.execute(select(DnsZone).where(DnsZone.zone_name == zone_name))
-    if exists.scalar_one_or_none() is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Zone already exists.")
+        exists = await db.execute(select(DnsZone).where(DnsZone.zone_name == zone_name))
+        if exists.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Zone already exists.")
 
-    agent = request.app.state.agent
-    agent_ok = True
-    try:
-        await agent.create_zone(zone_name)
-    except Exception as exc:
-        # Log the agent error but still create the zone record in the database.
-        # The zone can be synced to the agent later.
-        agent_ok = False
-        import logging
-        logging.getLogger("hosthive.dns").warning(
-            "Agent error creating zone %s (will create DB record anyway): %s",
-            zone_name, exc,
+        agent = request.app.state.agent
+        agent_ok = True
+        try:
+            await agent.create_zone(zone_name)
+        except Exception as exc:
+            # Log the agent error but still create the zone record in the database.
+            # The zone can be synced to the agent later.
+            agent_ok = False
+            _dns_logger.warning(
+                "Agent error creating zone %s (will create DB record anyway): %s",
+                zone_name, exc,
+            )
+
+        zone = DnsZone(
+            user_id=current_user.id,
+            domain_id=domain_id,
+            zone_name=zone_name,
         )
+        db.add(zone)
+        await db.flush()
 
-    zone = DnsZone(
-        user_id=current_user.id,
-        domain_id=domain_id,
-        zone_name=zone_name,
-    )
-    db.add(zone)
-    await db.flush()
+        _log(db, request, current_user.id, "dns.create_zone", f"Created zone {zone_name}")
 
-    _log(db, request, current_user.id, "dns.create_zone", f"Created zone {zone_name}")
+        response = DnsZoneResponse.model_validate(zone)
+        # If agent failed, still return 201 but include a warning
+        if not agent_ok:
+            return {
+                **response.model_dump(mode="json"),
+                "warning": "Zone created in database but agent provisioning failed. It may need manual sync.",
+            }
+        return response
 
-    response = DnsZoneResponse.model_validate(zone)
-    # If agent failed, still return 201 but include a warning
-    if not agent_ok:
-        return {
-            **response.model_dump(mode="json"),
-            "warning": "Zone created in database but agent provisioning failed. It may need manual sync.",
-        }
-    return response
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _dns_logger.exception("Unexpected error creating DNS zone: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create DNS zone: {exc}",
+        )
 
 
 @router.get("/zones/{zone_id}", response_model=DnsZoneDetailResponse, status_code=status.HTTP_200_OK)

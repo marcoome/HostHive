@@ -234,9 +234,9 @@ const form = ref({
 })
 
 const providers = [
-  { value: 'openai', label: 'OpenAI', icon: '&#9679;', description: 'GPT-4, GPT-3.5' },
-  { value: 'anthropic', label: 'Anthropic', icon: '&#9830;', description: 'Claude 3 family' },
-  { value: 'ollama', label: 'Ollama', icon: '&#9881;', description: 'Local models' }
+  { value: 'openai', label: 'OpenAI', icon: '\u{1F916}', description: 'GPT-4, GPT-3.5' },
+  { value: 'anthropic', label: 'Anthropic', icon: '\u{1F537}', description: 'Claude 3 family' },
+  { value: 'ollama', label: 'Ollama', icon: '\u26A1', description: 'Local models' }
 ]
 
 const modelsByProvider = {

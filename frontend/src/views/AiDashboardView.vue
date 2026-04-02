@@ -5,9 +5,9 @@
         <h1 class="text-2xl font-bold" :style="{ color: 'var(--text-primary)' }">AI Assistant</h1>
         <p class="text-sm mt-1" :style="{ color: 'var(--text-muted)' }">Chat with AI and view intelligent insights</p>
       </div>
-      <button class="btn-secondary" @click="showSettings = true">
+      <router-link to="/settings/ai" class="btn-secondary">
         <span>&#9881;</span> Settings
-      </button>
+      </router-link>
     </div>
 
     <div class="flex gap-6" style="height: calc(100vh - 180px);">
@@ -181,137 +181,20 @@
       </div>
     </div>
 
-    <!-- Settings Modal -->
-    <Modal v-model="showSettings" title="AI Settings" size="lg">
-      <div class="space-y-5">
-        <!-- Provider -->
-        <div>
-          <label class="input-label">AI Provider</label>
-          <div class="grid grid-cols-3 gap-3">
-            <button
-              v-for="p in providers"
-              :key="p.value"
-              class="glass rounded-xl p-4 text-center cursor-pointer transition-all"
-              :class="localSettings.provider === p.value ? 'ring-2 ring-primary' : ''"
-              @click="localSettings.provider = p.value"
-            >
-              <div class="text-2xl mb-1">{{ p.icon }}</div>
-              <div class="text-sm font-medium" :style="{ color: 'var(--text-primary)' }">{{ p.label }}</div>
-            </button>
-          </div>
-        </div>
-
-        <!-- Model -->
-        <div>
-          <label class="input-label">Model</label>
-          <select v-model="localSettings.model" class="w-full">
-            <option v-for="m in filteredModels" :key="m" :value="m">{{ m }}</option>
-          </select>
-        </div>
-
-        <!-- API Key -->
-        <div>
-          <label class="input-label">API Key</label>
-          <input v-model="localSettings.apiKey" :type="showApiKey ? 'text' : 'password'" class="w-full" placeholder="sk-..." />
-          <button class="btn-ghost text-xs mt-1" @click="showApiKey = !showApiKey">
-            {{ showApiKey ? 'Hide' : 'Show' }}
-          </button>
-        </div>
-
-        <!-- Base URL (Ollama) -->
-        <div v-if="localSettings.provider === 'ollama'">
-          <label class="input-label">Base URL</label>
-          <input v-model="localSettings.baseUrl" class="w-full" placeholder="http://localhost:11434" />
-        </div>
-
-        <!-- Auto-fix -->
-        <div class="flex items-center justify-between">
-          <div>
-            <label class="input-label mb-0">Auto-fix</label>
-            <p class="text-xs" :style="{ color: 'var(--text-muted)' }">Automatically apply AI-suggested fixes</p>
-          </div>
-          <button
-            class="w-12 h-6 rounded-full transition-colors relative"
-            :style="{ background: localSettings.autoFix ? 'var(--primary)' : 'var(--border)' }"
-            @click="localSettings.autoFix = !localSettings.autoFix"
-          >
-            <span
-              class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
-              :style="{ left: localSettings.autoFix ? '28px' : '4px' }"
-            ></span>
-          </button>
-        </div>
-        <p v-if="localSettings.autoFix" class="text-xs" :style="{ color: 'var(--warning)' }">
-          Warning: Auto-fix will make changes to your server configuration without confirmation.
-        </p>
-
-        <!-- Log Analysis Interval -->
-        <div>
-          <label class="input-label">Log Analysis Interval</label>
-          <select v-model="localSettings.logAnalysisInterval" class="w-full">
-            <option value="1h">Every hour</option>
-            <option value="6h">Every 6 hours</option>
-            <option value="daily">Daily</option>
-            <option value="disabled">Disabled</option>
-          </select>
-        </div>
-
-        <!-- Token Limit -->
-        <div>
-          <label class="input-label">Token Limit: {{ localSettings.tokenLimit }}</label>
-          <input
-            v-model.number="localSettings.tokenLimit"
-            type="range"
-            min="500"
-            max="5000"
-            step="100"
-            class="w-full"
-            style="border: none; padding: 0; box-shadow: none;"
-          />
-          <div class="flex justify-between text-xs" :style="{ color: 'var(--text-muted)' }">
-            <span>500</span><span>5000</span>
-          </div>
-        </div>
-      </div>
-
-      <template #actions>
-        <button class="btn-secondary" @click="showSettings = false">Cancel</button>
-        <button class="btn-primary" @click="saveSettings">Save Settings</button>
-      </template>
-    </Modal>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useAiStore } from '@/stores/ai'
-import Modal from '@/components/Modal.vue'
 import GaugeChart from '@/components/GaugeChart.vue'
 
 const ai = useAiStore()
 
 const messageInput = ref('')
 const showSidebar = ref(true)
-const showSettings = ref(false)
-const showApiKey = ref(false)
 const messagesContainer = ref(null)
 const securityScore = ref(72)
-
-const localSettings = ref({ ...ai.settings })
-
-const providers = [
-  { value: 'openai', label: 'OpenAI', icon: '&#9679;' },
-  { value: 'anthropic', label: 'Anthropic', icon: '&#9830;' },
-  { value: 'ollama', label: 'Ollama', icon: '&#9881;' }
-]
-
-const modelsByProvider = {
-  openai: ['gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
-  anthropic: ['claude-3-opus', 'claude-3-sonnet', 'claude-3-haiku'],
-  ollama: ['llama3', 'mistral', 'codellama', 'phi3']
-}
-
-const filteredModels = computed(() => modelsByProvider[localSettings.value.provider] || [])
 
 const currentMessages = computed(() => ai.currentConversation?.messages || [])
 
@@ -358,11 +241,6 @@ function autoResize(e) {
   e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
 }
 
-async function saveSettings() {
-  await ai.updateSettings(localSettings.value)
-  showSettings.value = false
-}
-
 watch(() => ai.streamingText, () => {
   nextTick(scrollToBottom)
 })
@@ -375,10 +253,8 @@ onMounted(async () => {
   try {
     await Promise.all([
       ai.fetchConversations(),
-      ai.fetchInsights(),
-      ai.fetchSettings()
+      ai.fetchInsights()
     ])
-    localSettings.value = { ...ai.settings }
   } catch {}
 })
 </script>

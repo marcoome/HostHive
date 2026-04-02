@@ -63,9 +63,8 @@ export const useAiStore = defineStore('ai', () => {
           'Authorization': authHeader
         },
         body: JSON.stringify({
-          conversation_id: currentConversation.value.id,
           message,
-          context
+          context: context || {}
         })
       })
 
@@ -89,6 +88,9 @@ export const useAiStore = defineStore('ai', () => {
               const parsed = JSON.parse(payload)
               if (parsed.content) {
                 streamingText.value += parsed.content
+              }
+              if (parsed.conversation_id) {
+                currentConversation.value.id = parsed.conversation_id
               }
             } catch {
               streamingText.value += payload
