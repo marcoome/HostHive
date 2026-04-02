@@ -45,7 +45,7 @@ def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, de
 # --------------------------------------------------------------------------
 # GET / -- list databases
 # --------------------------------------------------------------------------
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def list_databases(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
@@ -72,7 +72,7 @@ async def list_databases(
 # --------------------------------------------------------------------------
 # POST / -- create database via agent
 # --------------------------------------------------------------------------
-@router.post("/", response_model=DatabaseResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=DatabaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_database(
     body: DatabaseCreate,
     request: Request,

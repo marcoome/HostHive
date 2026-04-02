@@ -101,7 +101,7 @@ _SERVICES = [
 # ---------------------------------------------------------------------------
 # GET / -- public status of all services
 # ---------------------------------------------------------------------------
-@router.get("/", response_model=StatusPageResponse, status_code=status.HTTP_200_OK)
+@router.get("", response_model=StatusPageResponse, status_code=status.HTTP_200_OK)
 async def public_status(
     db: AsyncSession = Depends(get_db),
 ):

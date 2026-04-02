@@ -81,7 +81,7 @@ class ApiKeyUsageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # GET / -- list user's API keys (prefix only)
 # ---------------------------------------------------------------------------
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def list_api_keys(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -98,7 +98,7 @@ async def list_api_keys(
 # ---------------------------------------------------------------------------
 # POST / -- generate new API key (returns full key ONCE)
 # ---------------------------------------------------------------------------
-@router.post("/", response_model=ApiKeyCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ApiKeyCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_api_key(
     body: ApiKeyCreateRequest,
     request: Request,

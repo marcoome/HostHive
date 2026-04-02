@@ -89,7 +89,7 @@ def _check_domain_access(domain: str, current_user: User) -> None:
 # GET / — list detected WordPress installations
 # ---------------------------------------------------------------------------
 
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def list_wordpress_installs(
     request: Request,
     current_user: User = Depends(get_current_user),

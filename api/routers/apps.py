@@ -36,7 +36,7 @@ def _is_admin(user: User) -> bool:
 # --------------------------------------------------------------------------
 
 
-@router.get("/", response_model=list[AppListEntry])
+@router.get("", response_model=list[AppListEntry])
 async def list_apps(
     request: Request,
     db: AsyncSession = Depends(get_db),

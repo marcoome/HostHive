@@ -101,7 +101,7 @@ class ToggleRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # GET / -- list all integrations with status
 # ---------------------------------------------------------------------------
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def list_integrations(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),

@@ -37,7 +37,7 @@ def _get_writable_path() -> Path:
 # --------------------------------------------------------------------------
 # GET / -- return branding config (public, no auth)
 # --------------------------------------------------------------------------
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def get_branding_config():
     branding = get_branding()
     return branding.model_dump()
@@ -46,7 +46,7 @@ async def get_branding_config():
 # --------------------------------------------------------------------------
 # PUT / -- update branding (admin only)
 # --------------------------------------------------------------------------
-@router.put("/", status_code=status.HTTP_200_OK)
+@router.put("", status_code=status.HTTP_200_OK)
 async def update_branding(
     body: BrandingConfig,
     request: Request,

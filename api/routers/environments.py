@@ -81,7 +81,7 @@ def _get_agent(request: Request):
 # GET / -- list all environments (admin)
 # ---------------------------------------------------------------------------
 
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def list_environments(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),

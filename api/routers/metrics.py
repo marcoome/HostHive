@@ -61,7 +61,7 @@ def _prom_line(name: str, value: float | int, help_text: str = "", ptype: str = 
 # ---------------------------------------------------------------------------
 # GET / -- Prometheus text format metrics
 # ---------------------------------------------------------------------------
-@router.get("/", response_class=PlainTextResponse, status_code=status.HTTP_200_OK)
+@router.get("", response_class=PlainTextResponse, status_code=status.HTTP_200_OK)
 async def prometheus_metrics(
     request: Request,
     db: AsyncSession = Depends(get_db),

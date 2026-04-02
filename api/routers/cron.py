@@ -61,7 +61,7 @@ async def _sync_crontab(
 # --------------------------------------------------------------------------
 # GET / -- list cron jobs
 # --------------------------------------------------------------------------
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def list_cron_jobs(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
@@ -86,7 +86,7 @@ async def list_cron_jobs(
 # --------------------------------------------------------------------------
 # POST / -- create cron job
 # --------------------------------------------------------------------------
-@router.post("/", response_model=CronJobResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=CronJobResponse, status_code=status.HTTP_201_CREATED)
 async def create_cron_job(
     body: CronJobCreate,
     request: Request,
