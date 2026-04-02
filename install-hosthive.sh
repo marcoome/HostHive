@@ -743,13 +743,14 @@ $dbtype='mysql';
 PMAEOF
 
         # Create blowfish secret and configure signon auth for SSO
-        PMA_SECRET=$(openssl rand -hex 16)
+        PMA_SECRET=$(openssl rand -hex 24)
         cat > /etc/phpmyadmin/conf.d/hosthive.php << PMACONF
 <?php
 \$cfg['blowfish_secret'] = '${PMA_SECRET}';
 \$cfg['Servers'][1]['auth_type'] = 'signon';
 \$cfg['Servers'][1]['SignonSession'] = 'SignonSession';
-\$cfg['Servers'][1]['SignonURL'] = '/phpmyadmin/sso.php';
+\$cfg['Servers'][1]['SignonURL'] = '/phpmyadmin/signon.php';
+\$cfg['Servers'][1]['LogoutURL'] = '/phpmyadmin/signon.php';
 \$cfg['Servers'][1]['host'] = 'localhost';
 \$cfg['Servers'][1]['compress'] = false;
 \$cfg['Servers'][1]['AllowNoPassword'] = false;
@@ -757,52 +758,39 @@ PMAEOF
 \$cfg['MaxRows'] = 50;
 \$cfg['UploadDir'] = '';
 \$cfg['SaveDir'] = '';
-\$cfg['ThemeDefault'] = 'pmahomme';
 PMACONF
 
-        # Set permissions
+        # Set permissions - www-data needs to read secrets for SSO
         chown -R www-data:www-data /etc/phpmyadmin
         chmod 640 /etc/phpmyadmin/config-db.php
         chmod 640 /etc/phpmyadmin/conf.d/hosthive.php
+        chmod 755 "${INSTALL_DIR}/config"
+        chmod 644 "${INSTALL_DIR}/config/secrets.env"
 
-        # Deploy SSO bridge script for phpMyAdmin auto-login from the panel
-        if [[ -f "${SCRIPT_DIR}/scripts/phpmyadmin-sso.php" ]]; then
-            cp "${SCRIPT_DIR}/scripts/phpmyadmin-sso.php" /usr/share/phpmyadmin/sso.php
-        else
-            cat > /usr/share/phpmyadmin/sso.php << 'SSOPHP'
-<?php
-session_name('SignonSession');
-session_start();
-$token = $_GET['token'] ?? '';
-if (empty($token) || !preg_match('/^[A-Za-z0-9_-]+$/', $token)) {
-    header('HTTP/1.1 400 Bad Request'); echo 'Invalid or missing SSO token.'; exit;
-}
-$redis = new Redis();
-$redis->connect('127.0.0.1', 6379);
-$sf = '/opt/hosthive/config/secrets.env';
-if (file_exists($sf)) {
-    $c = file_get_contents($sf);
-    if (preg_match('/REDIS_PASSWORD=(.+)/', $c, $m)) { $rp = trim($m[1]); if (!empty($rp)) $redis->auth($rp); }
-}
-$key = "hosthive:pma_sso:{$token}";
-$data = $redis->get($key);
-if ($data === false) { header('HTTP/1.1 403 Forbidden'); echo 'Token expired or invalid.'; exit; }
-$redis->del($key);
-$creds = json_decode($data, true);
-if (!$creds || empty($creds['user'])) { header('HTTP/1.1 500 Internal Server Error'); echo 'Invalid SSO payload.'; exit; }
-$_SESSION['PMA_single_signon_user'] = $creds['user'];
-$_SESSION['PMA_single_signon_password'] = $creds['password'];
-$_SESSION['PMA_single_signon_host'] = $creds['server'] ?? 'localhost';
-header('Location: /phpmyadmin/index.php'); exit;
-SSOPHP
-        fi
-        chown www-data:www-data /usr/share/phpmyadmin/sso.php
-        chmod 644 /usr/share/phpmyadmin/sso.php
+        # Deploy SSO + signon scripts
+        cp "${INSTALL_DIR}/scripts/phpmyadmin-sso.php" /usr/share/phpmyadmin/sso.php 2>/dev/null || true
+        cp "${INSTALL_DIR}/scripts/phpmyadmin-signon.php" /usr/share/phpmyadmin/signon.php 2>/dev/null || true
+        chown www-data:www-data /usr/share/phpmyadmin/sso.php /usr/share/phpmyadmin/signon.php 2>/dev/null || true
+        chmod 644 /usr/share/phpmyadmin/sso.php /usr/share/phpmyadmin/signon.php 2>/dev/null || true
 
-        # Grant phpMyAdmin user access to MariaDB
-        mysql -u root -e "CREATE USER IF NOT EXISTS 'phpmyadmin'@'localhost' IDENTIFIED BY '';" >> "$LOG_FILE" 2>&1 || true
-        mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'phpmyadmin'@'localhost' WITH GRANT OPTION;" >> "$LOG_FILE" 2>&1 || true
+        # Create phpMyAdmin configuration storage database
+        mysql -u root -e "CREATE DATABASE IF NOT EXISTS phpmyadmin;" >> "$LOG_FILE" 2>&1 || true
+        mysql -u root phpmyadmin < /usr/share/phpmyadmin/sql/create_tables.sql >> "$LOG_FILE" 2>&1 || true
+        mysql -u root -e "CREATE USER IF NOT EXISTS 'pma'@'localhost' IDENTIFIED BY '';" >> "$LOG_FILE" 2>&1 || true
+        mysql -u root -e "GRANT ALL PRIVILEGES ON phpmyadmin.* TO 'pma'@'localhost';" >> "$LOG_FILE" 2>&1 || true
         mysql -u root -e "FLUSH PRIVILEGES;" >> "$LOG_FILE" 2>&1 || true
+
+        # Update config-db.php with pma user
+        cat > /etc/phpmyadmin/config-db.php << 'PMADBEOF'
+<?php
+$dbuser='pma';
+$dbpass='';
+$basepath='';
+$dbname='phpmyadmin';
+$dbserver='localhost';
+$dbport='3306';
+$dbtype='mysql';
+PMADBEOF
 
         success "phpMyAdmin configured with SSO"
     else
