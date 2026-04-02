@@ -12,7 +12,7 @@ export const useDnsStore = defineStore('dns', () => {
     loading.value = true
     try {
       const { data } = await client.get('/dns/zones')
-      zones.value = Array.isArray(data) ? data : []
+      zones.value = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : [])
     } finally {
       loading.value = false
     }
