@@ -15,8 +15,16 @@ ALLOWED_SERVICES: list[str] = [
     "bind9",
     "proftpd",
     "php8.2-fpm",
+    "php8.3-fpm",
     "fail2ban",
     "clamav-freshclam",
+    "clamav-daemon",
+    "hosthive-api",
+    "hosthive-agent",
+    "hosthive-worker",
+    "docker",
+    "mariadb",
+    "named",
 ]
 
 # ---------------------------------------------------------------------------
