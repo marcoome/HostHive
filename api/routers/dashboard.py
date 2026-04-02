@@ -25,7 +25,7 @@ _BOOT_TIME = time.time()
 # ---------------------------------------------------------------------------
 # GET / -- dashboard stats for any authenticated user
 # ---------------------------------------------------------------------------
-@router.get("/", status_code=status.HTTP_200_OK)
+@router.get("", status_code=status.HTTP_200_OK)
 async def dashboard_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),

@@ -221,6 +221,11 @@ async def get_file_tree(
     current_user: User = Depends(get_current_user),
 ):
     """Return a one-level directory tree for the given path."""
+    # Default to user's home directory if path is root and user is not admin
+    if path == "/" and not _is_admin(current_user):
+        path = f"/home/{current_user.username}"
+    elif path == "/" and _is_admin(current_user):
+        path = "/home"
     safe = _resolve_path(current_user, path)
     tree: list[dict] = []
     try:
