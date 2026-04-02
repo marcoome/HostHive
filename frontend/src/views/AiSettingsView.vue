@@ -53,13 +53,31 @@
                 <button class="btn-ghost text-xs px-3" @click="showApiKey = !showApiKey">
                   {{ showApiKey ? 'Hide' : 'Show' }}
                 </button>
+                <button
+                  class="btn-secondary text-xs px-3"
+                  :disabled="fetchingModels || (!form.apiKey && form.provider !== 'ollama')"
+                  @click="loadModels"
+                >
+                  <span v-if="fetchingModels" class="animate-spin inline-block mr-1">&#8635;</span>
+                  {{ fetchingModels ? 'Loading...' : 'Load Models' }}
+                </button>
               </div>
             </div>
 
             <!-- Base URL (Ollama) -->
             <div v-if="form.provider === 'ollama'">
               <label class="input-label">Base URL</label>
-              <input v-model="form.baseUrl" class="w-full" placeholder="http://localhost:11434" />
+              <div class="flex gap-2">
+                <input v-model="form.baseUrl" class="flex-1" placeholder="http://localhost:11434" />
+                <button
+                  class="btn-secondary text-xs px-3"
+                  :disabled="fetchingModels"
+                  @click="loadModels"
+                >
+                  <span v-if="fetchingModels" class="animate-spin inline-block mr-1">&#8635;</span>
+                  {{ fetchingModels ? 'Loading...' : 'Load Models' }}
+                </button>
+              </div>
             </div>
 
             <!-- Test Connection -->
@@ -250,6 +268,37 @@ async function fetchModels() {
   }
 }
 
+async function loadModels() {
+  fetchingModels.value = true
+  connectionResult.value = null
+  try {
+    // First save the current provider/key to Redis config so /ai/models can read it
+    await client.post('/ai/config', {
+      provider: form.value.provider,
+      api_key: form.value.apiKey || 'ollama',
+      default_model: form.value.model
+    })
+    // Then fetch models
+    const { data } = await client.get('/ai/models')
+    if (data.models && data.models.length > 0) {
+      fetchedModels.value = data.models.map(m => m.id || m)
+      // Auto-select first model if current selection is not in the list
+      if (!fetchedModels.value.includes(form.value.model)) {
+        form.value.model = fetchedModels.value[0]
+      }
+      notify.success(`Loaded ${data.models.length} models from ${form.value.provider}`)
+    } else {
+      fetchedModels.value = []
+      notify.warning('No models returned. Using default list.')
+    }
+  } catch (err) {
+    fetchedModels.value = []
+    notify.error(err.response?.data?.detail || 'Failed to load models.')
+  } finally {
+    fetchingModels.value = false
+  }
+}
+
 const totalTokens = computed(() => tokenUsage.value.reduce((sum, d) => sum + d.tokens, 0))
 const avgTokensPerDay = computed(() => {
   if (!tokenUsage.value.length) return 0
@@ -267,9 +316,10 @@ async function testConnection() {
       base_url: form.value.baseUrl,
       model: form.value.model
     })
-    connectionResult.value = { success: true, message: data.message || 'Connection successful' }
+    const ok = data.status === 'ok'
+    connectionResult.value = { success: ok, message: data.message || (ok ? 'Connection successful' : 'Connection failed') }
   } catch (err) {
-    connectionResult.value = { success: false, message: err.response?.data?.detail || 'Connection failed' }
+    connectionResult.value = { success: false, message: err.response?.data?.message || err.response?.data?.detail || 'Connection failed' }
   } finally {
     testingConnection.value = false
   }
@@ -291,8 +341,7 @@ watch(() => form.value.provider, (newProvider) => {
   if (defaults && defaults.length > 0) {
     form.value.model = defaults[0]
   }
-  // Try to fetch fresh models from the backend
-  fetchModels()
+  connectionResult.value = null
 })
 
 onMounted(async () => {
@@ -300,9 +349,6 @@ onMounted(async () => {
     await ai.fetchSettings()
     form.value = { ...ai.settings }
   } catch {}
-
-  // Try to auto-fetch models from backend
-  fetchModels()
 
   try {
     const { data } = await client.get('/ai/usage')

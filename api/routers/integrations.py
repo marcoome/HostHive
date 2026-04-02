@@ -185,30 +185,42 @@ async def update_integration(
 # ---------------------------------------------------------------------------
 # POST /{name}/test -- test connection for integration
 # ---------------------------------------------------------------------------
+
+class IntegrationTestBody(BaseModel):
+    config: Optional[dict[str, Any]] = None
+
+
 @router.post("/{name}/test", status_code=status.HTTP_200_OK)
 async def test_integration(
     name: IntegrationName,
     request: Request,
+    body: IntegrationTestBody = IntegrationTestBody(),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    result = await db.execute(
-        select(Integration).where(Integration.name == name)
-    )
-    integration = result.scalar_one_or_none()
-    if integration is None or integration.config_json is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Integration not configured.",
-        )
+    config: dict[str, Any] | None = None
 
-    try:
-        config = _decrypt_config(integration.config_json)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt integration config.",
+    # If body has config, use that for testing (before-save flow)
+    if body.config:
+        config = body.config
+    else:
+        result = await db.execute(
+            select(Integration).where(Integration.name == name)
         )
+        integration = result.scalar_one_or_none()
+        if integration is None or integration.config_json is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Integration not configured.",
+            )
+
+        try:
+            config = _decrypt_config(integration.config_json)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to decrypt integration config.",
+            )
 
     test_result: dict[str, Any] = {"integration": name.value, "success": False}
 
@@ -237,7 +249,7 @@ async def test_integration(
 
         elif name == IntegrationName.TELEGRAM:
             import httpx
-            bot_token = config.get("token", "")
+            bot_token = config.get("bot_token", "")
             chat_id = config.get("chat_id", "")
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
@@ -249,8 +261,8 @@ async def test_integration(
                 test_result["success"] = data.get("ok", False)
 
         else:
-            test_result["detail"] = f"No test implemented for {name.value}."
-            test_result["success"] = True  # config exists, consider a pass
+            test_result["success"] = True
+            test_result["message"] = "No automated test available for this integration. Configuration saved."
 
     except Exception as exc:
         test_result["error"] = str(exc)

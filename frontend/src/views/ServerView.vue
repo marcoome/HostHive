@@ -28,7 +28,7 @@
                 :class="svc.status === 'running' ? 'bg-success shadow-[0_0_8px_var(--success)]' : 'bg-error shadow-[0_0_8px_var(--error)]'"
               ></span>
               <div>
-                <h3 class="text-sm font-semibold text-[var(--text-primary)]">{{ svc.display_name || svc.name }}</h3>
+                <h3 class="text-sm font-semibold text-[var(--text-primary)]">{{ svc.display_name || svc.name || 'Unknown Service' }}</h3>
                 <p class="text-xs text-[var(--text-muted)]">{{ svc.status === 'running' ? `Up ${svc.uptime || '--'}` : 'Stopped' }}</p>
               </div>
             </div>

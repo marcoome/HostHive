@@ -19,7 +19,7 @@ export const useAiStore = defineStore('ai', () => {
   const streaming = ref(false)
   const streamingText = ref('')
 
-  const notify = useNotificationsStore
+  const notify = useNotificationsStore()
 
   async function fetchConversations() {
     const { data } = await client.get('/ai/conversations')
@@ -54,11 +54,13 @@ export const useAiStore = defineStore('ai', () => {
 
     try {
       const tokens = JSON.parse(localStorage.getItem('hosthive_tokens') || '{}')
+      const authHeader = tokens.access ? `Bearer ${tokens.access}` : ''
       const response = await fetch('/api/v1/ai/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${tokens.access}`
+          'Accept': 'text/event-stream',
+          'Authorization': authHeader
         },
         body: JSON.stringify({
           conversation_id: currentConversation.value.id,

@@ -380,6 +380,7 @@ async def delete_conversation(
     _log(db, request, current_user.id, "ai.delete_conversation", f"Deleted conversation {conversation_id}")
     await db.delete(conversation)
     await db.flush()
+    await db.commit()
 
 
 # --------------------------------------------------------------------------
@@ -867,21 +868,60 @@ async def list_ai_models(request: Request, admin: User = Depends(_admin)):
 # --------------------------------------------------------------------------
 # POST /test-connection -- test AI provider connectivity
 # --------------------------------------------------------------------------
+
+class AiTestRequest(BaseModel):
+    provider: str = "openai"
+    api_key: str = ""
+    model: str = "gpt-4o"
+    base_url: Optional[str] = None
+
+
 @router.post("/test-connection", status_code=status.HTTP_200_OK)
 async def test_ai_connection(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    body: AiTestRequest = AiTestRequest(),
+    admin: User = Depends(_admin),
 ):
-    """Test the configured AI provider connection."""
+    """Test AI provider connection using credentials from the request body."""
+    if not body.api_key:
+        return {"status": "error", "message": "No API key provided."}
+
     try:
-        ai_client = await _get_ai_client(db)
-        response = await ai_client.chat(
-            [{"role": "user", "content": "Say hello in one word."}],
-            system_prompt="Respond with a single word.",
-            max_tokens=10,
-        )
-        return {"status": "ok", "message": "AI connection successful.", "response": str(response)[:100]}
-    except HTTPException:
-        return {"status": "error", "message": "AI features are not configured."}
-    except Exception as exc:
-        return {"status": "error", "message": f"Connection failed: {exc}"}
+        import httpx
+        if body.provider == "openai" or body.provider == "openrouter":
+            base_url = body.base_url or (
+                "https://openrouter.ai/api/v1" if body.provider == "openrouter"
+                else "https://api.openai.com/v1"
+            )
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{base_url}/models",
+                    headers={"Authorization": f"Bearer {body.api_key}"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    return {"status": "ok", "message": f"Connected to {body.provider}. Models available."}
+                else:
+                    return {"status": "error", "message": f"API returned {resp.status_code}: {resp.text[:200]}"}
+        elif body.provider == "anthropic":
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    "https://api.anthropic.com/v1/models",
+                    headers={"x-api-key": body.api_key, "anthropic-version": "2023-06-01"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    return {"status": "ok", "message": "Connected to Anthropic. Models available."}
+                else:
+                    return {"status": "error", "message": f"API returned {resp.status_code}: {resp.text[:200]}"}
+        elif body.provider == "ollama":
+            base_url = body.base_url or "http://localhost:11434"
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{base_url}/api/tags", timeout=10)
+                if resp.status_code == 200:
+                    return {"status": "ok", "message": "Connected to Ollama."}
+                else:
+                    return {"status": "error", "message": f"Ollama returned {resp.status_code}"}
+        else:
+            return {"status": "error", "message": f"Unknown provider: {body.provider}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
