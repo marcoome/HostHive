@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.agent = AgentClient()
 
     # Create tables if they don't exist yet (first run)
-    from api.models import *  # noqa: F401,F403  — ensure all models are registered
+    import api.models  # noqa: F401 - ensure all models are registered
     from api.core.database import Base as _Base
     async with engine.begin() as conn:
         await conn.run_sync(_Base.metadata.create_all)
