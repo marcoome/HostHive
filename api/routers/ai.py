@@ -80,15 +80,33 @@ async def _check_ai_rate_limit(request: Request, user_id: uuid.UUID) -> None:
         )
 
 
-async def _get_ai_client(db: AsyncSession) -> AIClient:
-    """Get configured AI client or raise 503."""
-    client = await get_ai_client_from_settings(db)
-    if client is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI features are not enabled. Configure AI settings first.",
-        )
-    return client
+async def _get_ai_client(db: AsyncSession, request: Request = None) -> AIClient:
+    """Get configured AI client. Tries DB settings first, then Redis config."""
+    try:
+        client = await get_ai_client_from_settings(db)
+        if client is not None:
+            return client
+    except Exception as exc:
+        logger.warning("Failed to get AI client from DB settings: %s", exc)
+
+    # Fallback: try Redis config (saved via POST /ai/config)
+    if request:
+        try:
+            redis = request.app.state.redis
+            config = await redis.hgetall("hosthive:ai:config")
+            if config and config.get("api_key"):
+                return AIClient(
+                    provider=config.get("provider", "openai"),
+                    api_key=config["api_key"],
+                    model=config.get("default_model") or "gpt-4o",
+                )
+        except Exception as exc:
+            logger.warning("Failed to get AI client from Redis: %s", exc)
+
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="AI is not configured. Go to Settings → AI to enter your API key.",
+    )
 
 
 def _build_system_prompt(context: dict[str, Any]) -> str:
@@ -135,7 +153,7 @@ async def ai_chat(
     current_user: User = Depends(get_current_user),
 ):
     await _check_ai_rate_limit(request, current_user.id)
-    ai_client = await _get_ai_client(db)
+    ai_client = await _get_ai_client(db, request)
 
     # Get or create conversation
     conversation: AiConversation | None = None
@@ -162,11 +180,20 @@ async def ai_chat(
         db.add(conversation)
         await db.flush()
 
-    # Build messages history from conversation
+    # Build messages history from conversation (explicit query to avoid lazy load)
     history: list[dict[str, str]] = []
-    if conversation.messages:
-        for msg in conversation.messages[-20:]:  # Last 20 messages for context
+    try:
+        msg_result = await db.execute(
+            select(AiMessage)
+            .where(AiMessage.conversation_id == conversation.id)
+            .order_by(AiMessage.created_at.asc())
+            .limit(20)
+        )
+        prev_messages = msg_result.scalars().all()
+        for msg in prev_messages:
             history.append({"role": msg.role.value, "content": msg.content})
+    except Exception:
+        pass  # New conversation, no messages yet
 
     # Add current user message
     history.append({"role": "user", "content": body.message})
@@ -701,15 +728,13 @@ async def update_settings(
 
     update_data = body.model_dump(exclude_unset=True)
 
-    # Validate provider/model combo
-    if "provider" in update_data or "model" in update_data:
-        provider = update_data.get("provider", ai_settings.provider)
-        model = update_data.get("model", ai_settings.model)
-        if provider in SUPPORTED_MODELS and model not in SUPPORTED_MODELS[provider]:
+    # Validate provider (model validation is lenient - providers add new models often)
+    if "provider" in update_data:
+        provider = update_data["provider"]
+        if provider not in ("openai", "anthropic", "openrouter", "ollama"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Model '{model}' not supported for provider '{provider}'. "
-                       f"Supported: {SUPPORTED_MODELS[provider]}",
+                detail=f"Unknown provider '{provider}'. Supported: openai, anthropic, openrouter, ollama",
             )
 
     # Encrypt API key if provided
@@ -727,6 +752,24 @@ async def update_settings(
     db.add(ai_settings)
 
     _log(db, request, current_user.id, "ai.update_settings", "Updated AI settings")
+    await db.commit()
+
+    # Also sync to Redis for fast access by chat endpoint
+    try:
+        redis = request.app.state.redis
+        redis_data = {
+            "provider": ai_settings.provider,
+            "default_model": ai_settings.model or "",
+        }
+        # Store decrypted key in Redis for chat (Redis is local, not exposed)
+        if ai_settings.api_key_encrypted:
+            try:
+                redis_data["api_key"] = decrypt_value(ai_settings.api_key_encrypted, settings.SECRET_KEY)
+            except Exception:
+                pass
+        await redis.hset("hosthive:ai:config", mapping=redis_data)
+    except Exception as exc:
+        logger.warning("Failed to sync AI settings to Redis: %s", exc)
 
     return AiSettingsResponse(
         provider=ai_settings.provider,
@@ -812,19 +855,43 @@ async def get_usage(
 # --------------------------------------------------------------------------
 
 class AiConfigRequest(BaseModel):
-    provider: str = Field(..., pattern="^(openrouter|openai|anthropic)$")
+    provider: str = Field(..., pattern="^(openrouter|openai|anthropic|ollama)$")
     api_key: str = Field(..., min_length=1)
     default_model: Optional[str] = None
 
 
 @router.post("/config", status_code=status.HTTP_200_OK)
-async def save_ai_config(body: AiConfigRequest, request: Request, admin: User = Depends(_admin)):
+async def save_ai_config(
+    body: AiConfigRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    # Save to Redis for fast access
     redis = request.app.state.redis
     await redis.hset("hosthive:ai:config", mapping={
         "provider": body.provider,
         "api_key": body.api_key,
         "default_model": body.default_model or "",
     })
+
+    # Also save to DB (AiSettings table)
+    try:
+        result = await db.execute(select(AiSettings).limit(1))
+        ai_settings = result.scalar_one_or_none()
+        if ai_settings is None:
+            ai_settings = AiSettings()
+            db.add(ai_settings)
+
+        ai_settings.provider = body.provider
+        ai_settings.model = body.default_model or "gpt-4o"
+        ai_settings.api_key_encrypted = encrypt_value(body.api_key, settings.SECRET_KEY)
+        ai_settings.is_enabled = True
+        db.add(ai_settings)
+        await db.commit()
+    except Exception as exc:
+        logger.warning("Failed to save AI config to DB: %s", exc)
+
     return {"detail": "AI configuration saved.", "provider": body.provider}
 
 
