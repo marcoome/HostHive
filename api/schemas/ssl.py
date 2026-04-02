@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 class SslCertificateResponse(BaseModel):
     id: uuid.UUID
     domain_id: uuid.UUID
+    domain_name: Optional[str] = None
     cert_path: str
     key_path: str
     issued_at: Optional[datetime] = None
@@ -22,7 +23,6 @@ class SslCertificateResponse(BaseModel):
 
 
 class CustomCertInstall(BaseModel):
-    domain_id: uuid.UUID
     certificate: str = Field(..., min_length=1, description="PEM-encoded certificate.")
     private_key: str = Field(..., min_length=1, description="PEM-encoded private key.")
     chain: Optional[str] = Field(default=None, description="PEM-encoded CA chain.")

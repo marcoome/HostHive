@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -88,6 +89,21 @@ async def issue_certificate(
 
     try:
         result = await agent.issue_ssl(domain.domain_name, current_user.email)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 400:
+            try:
+                body = exc.response.json()
+                detail = body.get("detail", body.get("error", str(exc)))
+            except Exception:
+                detail = exc.response.text or str(exc)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"SSL issuance failed: {detail}",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error issuing SSL: {exc}",
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

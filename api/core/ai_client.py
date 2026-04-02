@@ -18,9 +18,10 @@ from api.core.config import settings
 logger = logging.getLogger("hosthive.ai")
 
 SUPPORTED_MODELS: dict[str, list[str]] = {
-    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-    "anthropic": ["claude-opus-4-5", "claude-sonnet-4-5"],
-    "ollama": ["llama3", "mistral", "codellama", "phi3"],
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+    "anthropic": ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001", "claude-opus-4-20250514"],
+    "openrouter": ["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro"],
+    "ollama": ["llama3", "llama3.1", "mistral", "codellama", "phi3", "gemma2"],
 }
 
 # Cost per 1K tokens (input, output) in USD — rough estimates for tracking
@@ -28,8 +29,9 @@ _COST_PER_1K: dict[str, tuple[float, float]] = {
     "gpt-4o": (0.005, 0.015),
     "gpt-4o-mini": (0.00015, 0.0006),
     "gpt-4-turbo": (0.01, 0.03),
-    "claude-opus-4-5": (0.015, 0.075),
-    "claude-sonnet-4-5": (0.003, 0.015),
+    "claude-opus-4-20250514": (0.015, 0.075),
+    "claude-sonnet-4-20250514": (0.003, 0.015),
+    "claude-haiku-4-5-20251001": (0.001, 0.005),
     "llama3": (0.0, 0.0),
     "mistral": (0.0, 0.0),
     "codellama": (0.0, 0.0),
@@ -184,7 +186,7 @@ class AIClient:
         max_tokens: int,
         json_mode: bool,
     ) -> str:
-        if self.provider == "openai":
+        if self.provider in ("openai", "openrouter"):
             return await self._openai_request(messages, system, max_tokens, json_mode, stream=False)
         elif self.provider == "anthropic":
             return await self._anthropic_request(messages, system, max_tokens, json_mode, stream=False)
@@ -199,7 +201,7 @@ class AIClient:
         max_tokens: int,
         json_mode: bool,
     ) -> AsyncGenerator[str, None]:
-        if self.provider == "openai":
+        if self.provider in ("openai", "openrouter"):
             return self._openai_stream(messages, system, max_tokens, json_mode)
         elif self.provider == "anthropic":
             return self._anthropic_stream(messages, system, max_tokens, json_mode)

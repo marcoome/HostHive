@@ -27,5 +27,7 @@ class CronJobResponse(BaseModel):
     command: str
     is_active: bool
     last_run: Optional[datetime] = None
+    status: Optional[str] = "active"
+    last_exit_code: Optional[int] = None
 
     model_config = {"from_attributes": True}

@@ -233,6 +233,8 @@ async def ai_chat(
 
     _log(db, request, current_user.id, "ai.chat", f"AI chat in conversation {conversation.id}")
 
+    await db.commit()
+
     return AiChatResponse(
         response=response_text,
         conversation_id=conversation.id,
@@ -259,6 +261,32 @@ def _stream_response(
                 full_response += chunk
                 yield f"data: {json.dumps({'content': chunk})}\n\n"
 
+            # Save assistant message and track usage after streaming completes
+            tokens_used = AIClient.count_tokens(full_response)
+            assistant_msg = AiMessage(
+                conversation_id=conversation.id,
+                role=AiMessageRole.ASSISTANT,
+                content=full_response,
+                tokens_used=tokens_used,
+            )
+            db.add(assistant_msg)
+
+            usage = AiTokenUsage(
+                user_id=current_user.id,
+                provider=ai_client.provider,
+                model=ai_client.model,
+                tokens_in=AIClient.count_tokens(history[-1]["content"]) if history else 0,
+                tokens_out=tokens_used,
+                cost_usd=ai_client.estimate_cost(
+                    AIClient.count_tokens(history[-1]["content"]) if history else 0,
+                    tokens_used,
+                ),
+            )
+            db.add(usage)
+
+            _log(db, request, current_user.id, "ai.chat.stream", f"AI streamed chat in conversation {conversation.id}")
+            await db.commit()
+
             yield f"data: {json.dumps({'done': True, 'conversation_id': str(conversation.id)})}\n\n"
 
         except Exception as exc:
@@ -267,7 +295,7 @@ def _stream_response(
 
     return StreamingResponse(
         event_generator(),
-        media_type="text/event-stream",
+        media_type="text/event-stream; charset=utf-8",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

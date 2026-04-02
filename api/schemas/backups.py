@@ -7,7 +7,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from api.models.backups import BackupType
+from api.models.backups import BackupStatus, BackupType
 
 
 class BackupCreate(BaseModel):
@@ -21,5 +21,6 @@ class BackupResponse(BaseModel):
     size_bytes: int
     created_at: datetime
     backup_type: BackupType
+    status: BackupStatus = BackupStatus.PENDING
 
     model_config = {"from_attributes": True}
