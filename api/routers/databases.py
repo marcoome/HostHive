@@ -521,23 +521,41 @@ async def database_sso(
     """Generate a one-time SSO token for phpMyAdmin auto-login."""
     record = await _get_db_or_404(db_id, db, current_user)
 
-    if record.db_type != DbType.MYSQL:
+    if record.db_type not in (DbType.MYSQL, DbType.POSTGRESQL):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="phpMyAdmin SSO is only available for MySQL databases.",
+            detail="Database SSO is only available for MySQL and PostgreSQL.",
         )
 
     # Decrypt the stored password
     import json as _json
     from api.core.config import settings
 
-    try:
-        password = decrypt_value(record.db_password_encrypted, settings.SECRET_KEY)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to recover database credentials. Password may need to be reset.",
-        )
+    password = None
+
+    # Try to decrypt stored password
+    if record.db_password_encrypted:
+        try:
+            password = decrypt_value(record.db_password_encrypted, settings.SECRET_KEY)
+        except (ValueError, Exception):
+            password = None
+
+    # If no encrypted password available, generate new one and reset
+    if not password:
+        import string
+        import random
+        new_password = ''.join(random.choices(string.ascii_letters + string.digits, k=20))
+        try:
+            await _run_async(_direct_reset_password, record.db_name, record.db_user, new_password, record.db_type)
+            record.db_password_encrypted = encrypt_value(new_password, settings.SECRET_KEY)
+            db.add(record)
+            await db.commit()
+            password = new_password
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not reset database password for SSO: {exc}",
+            )
 
     # Generate one-time token stored in Redis (expires 30s)
     token = secrets.token_urlsafe(32)
