@@ -8,8 +8,8 @@ from typing import Any, Optional
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,15 +20,15 @@ from api.core.database import get_db
 # Password hashing
 # ---------------------------------------------------------------------------
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__truncate_error=False)
-
-
 def hash_password(plain: str) -> str:
-    return _pwd_ctx.hash(plain[:72])
+    return bcrypt.hashpw(plain[:72].encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(plain[:72], hashed)
+    try:
+        return bcrypt.checkpw(plain[:72].encode(), hashed.encode())
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
