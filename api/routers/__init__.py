@@ -33,6 +33,7 @@ from api.routers.waf import router as waf_router
 from api.routers.resources import router as resources_router
 from api.routers.apps import router as apps_router
 from api.routers.email_auth import router as email_auth_router
+from api.routers.settings import router as settings_router
 
 __all__ = [
     "ai_router",
@@ -68,4 +69,5 @@ __all__ = [
     "resources_router",
     "apps_router",
     "email_auth_router",
+    "settings_router",
 ]

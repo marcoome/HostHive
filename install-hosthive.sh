@@ -374,14 +374,64 @@ fi
 mkdir -p /home/hosthive/.postgresql
 chown -R hosthive:hosthive /home/hosthive
 
-# ─── Step 4: Verify application source code ───
+# ─── Step 4: Clone/update application source code ───
 step 4 $TOTAL_STEPS "Verifying application source code"
 
-# The bootstrap installer (install.sh) clones the repo directly into /opt/hosthive,
-# so all source files are already in place. Just verify key dirs exist.
-for component in api agent config data frontend; do
+REPO_URL="https://github.com/marcoome/HostHive.git"
+
+# Clone the repo if source code is missing, otherwise pull latest
+if [[ ! -d "${INSTALL_DIR}/api" ]] || [[ ! -d "${INSTALL_DIR}/frontend/src" ]]; then
+    log "Source code missing, cloning from GitHub..."
+    # Save existing config if any
+    if [[ -f "${CONFIG_DIR}/secrets.env" ]]; then
+        cp "${CONFIG_DIR}/secrets.env" /tmp/hosthive-secrets.env.bak
+    fi
+
+    # Clone into a temp dir and copy over (preserves existing data/logs/venv)
+    TMPDIR=$(mktemp -d)
+    git clone --depth 1 "${REPO_URL}" "${TMPDIR}" >> "$LOG_FILE" 2>&1 &
+    spinner $! "Cloning HostHive from GitHub"
+
+    # Copy source directories from repo
+    for src_dir in api agent frontend config scripts tests novapanel; do
+        if [[ -d "${TMPDIR}/${src_dir}" ]]; then
+            rm -rf "${INSTALL_DIR}/${src_dir}"
+            cp -r "${TMPDIR}/${src_dir}" "${INSTALL_DIR}/${src_dir}"
+        fi
+    done
+
+    # Copy root-level files
+    for root_file in requirements.txt package.json install-hosthive.sh; do
+        if [[ -f "${TMPDIR}/${root_file}" ]]; then
+            cp "${TMPDIR}/${root_file}" "${INSTALL_DIR}/${root_file}"
+        fi
+    done
+
+    rm -rf "${TMPDIR}"
+
+    # Restore secrets if backed up
+    if [[ -f /tmp/hosthive-secrets.env.bak ]]; then
+        cp /tmp/hosthive-secrets.env.bak "${CONFIG_DIR}/secrets.env"
+        rm -f /tmp/hosthive-secrets.env.bak
+    fi
+
+    success "Source code cloned from GitHub"
+else
+    # Try to pull latest if it's a git repo
+    if [[ -d "${INSTALL_DIR}/.git" ]]; then
+        cd "${INSTALL_DIR}"
+        git pull origin main >> "$LOG_FILE" 2>&1 &
+        spinner $! "Pulling latest updates"
+        success "Source code updated from GitHub"
+    else
+        success "Application source verified in ${INSTALL_DIR}"
+    fi
+fi
+
+# Final verification
+for component in api agent config frontend; do
     if [[ ! -d "${INSTALL_DIR}/${component}" ]]; then
-        fail "Missing ${component}/ directory. Re-run the bootstrap installer."
+        fail "Missing ${component}/ directory after clone. Check ${LOG_FILE}"
     fi
 done
 

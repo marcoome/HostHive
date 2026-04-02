@@ -255,3 +255,43 @@ async def change_password(
 @router.get("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
 async def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+# ---------------------------------------------------------------------------
+# Stub endpoints for frontend compatibility
+# ---------------------------------------------------------------------------
+
+@router.get("/2fa/status", status_code=status.HTTP_200_OK)
+async def get_2fa_status(current_user: User = Depends(get_current_user)):
+    """Check if 2FA is enabled for the current user."""
+    return {"enabled": False, "method": None}
+
+
+@router.post("/2fa/setup", status_code=status.HTTP_200_OK)
+async def setup_2fa(current_user: User = Depends(get_current_user)):
+    """Initialize 2FA setup."""
+    return {"detail": "2FA is not yet implemented.", "qr_code": None, "secret": None}
+
+
+@router.post("/2fa/verify", status_code=status.HTTP_200_OK)
+async def verify_2fa(current_user: User = Depends(get_current_user)):
+    """Verify 2FA code."""
+    return {"detail": "2FA is not yet implemented.", "verified": False}
+
+
+@router.post("/2fa/disable", status_code=status.HTTP_200_OK)
+async def disable_2fa(current_user: User = Depends(get_current_user)):
+    """Disable 2FA."""
+    return {"detail": "2FA is not yet implemented."}
+
+
+@router.get("/sessions", status_code=status.HTTP_200_OK)
+async def list_sessions(current_user: User = Depends(get_current_user)):
+    """List active sessions for the current user."""
+    return {"sessions": []}
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_200_OK)
+async def revoke_session(session_id: str, current_user: User = Depends(get_current_user)):
+    """Revoke a specific session."""
+    return {"detail": "Session revoked."}

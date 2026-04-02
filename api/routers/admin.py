@@ -276,7 +276,7 @@ async def dashboard_stats(
     disk_percent = int(disk_percent_str.replace("%", "")) if isinstance(disk_percent_str, str) else 0
 
     # Fetch historical stats from last 24 hours
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    since = datetime.now() - timedelta(hours=24)
     historical = (await db.execute(
         select(ServerStat)
         .where(ServerStat.created_at >= since)
