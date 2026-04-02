@@ -1,5 +1,5 @@
 <template>
-  <Modal v-model="modelValue" :title="title" size="sm">
+  <Modal :modelValue="modelValue" @update:modelValue="v => emit('update:modelValue', v)" :title="title" size="sm">
     <p class="text-sm text-text-muted">{{ message }}</p>
 
     <template #actions>
