@@ -18,7 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.core.config import settings
 from api.core.database import get_db
+from api.core.encryption import decrypt_value, encrypt_value
 from api.core.security import get_current_user, hash_password, require_role
 from api.models.activity_log import ActivityLog
 from api.models.domains import Domain
@@ -216,12 +218,13 @@ async def create_mailbox(
     if exists.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email address already exists.")
 
-    # 1. Save to DB first
+    # 1. Save to DB first (store both bcrypt hash for system auth and Fernet-encrypted for SSO)
     acct = EmailAccount(
         user_id=current_user.id,
         domain_id=body.domain_id,
         address=body.address,
         password_hash=hash_password(body.password),
+        password_encrypted=encrypt_value(body.password, settings.SECRET_KEY),
         quota_mb=body.quota_mb,
     )
     db.add(acct)
@@ -500,6 +503,61 @@ async def flush_mail_queue_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to flush mail queue: {exc}",
         )
+
+
+# ==========================================================================
+# POST /{id}/sso -- generate SSO token for Roundcube auto-login
+# MUST be before /{email_id} catch-all to avoid path conflicts.
+# ==========================================================================
+
+@router.post("/{email_id}/sso", status_code=status.HTTP_200_OK)
+async def email_sso(
+    email_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a one-time SSO token for Roundcube webmail auto-login."""
+    import json as _json
+    import secrets
+
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    if not acct.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email account is inactive.",
+        )
+
+    # Decrypt the stored password
+    if not acct.password_encrypted:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No recoverable password stored. Re-set the mailbox password to enable SSO.",
+        )
+
+    try:
+        password = decrypt_value(acct.password_encrypted, settings.SECRET_KEY)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to recover email credentials. Password may need to be reset.",
+        )
+
+    # Generate one-time token stored in Redis (expires 30s)
+    token = secrets.token_urlsafe(32)
+    redis = request.app.state.redis
+    await redis.setex(
+        f"hosthive:rc_sso:{token}",
+        30,
+        _json.dumps({
+            "user": acct.address,
+            "password": password,
+        }),
+    )
+
+    _log(db, request, current_user.id, "email.sso", f"SSO login to Roundcube for {acct.address}")
+    return {"sso_url": f"/roundcube/sso.php?token={token}"}
 
 
 # ==========================================================================

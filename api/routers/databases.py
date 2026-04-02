@@ -21,7 +21,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.database import get_db
-from api.core.security import get_current_user, hash_password
+from api.core.encryption import decrypt_value, encrypt_value
+from api.core.security import get_current_user
 from api.models.activity_log import ActivityLog
 from api.models.databases import Database, DbType
 from api.models.users import User
@@ -324,12 +325,13 @@ async def create_database(
     if exists.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Database name already exists.")
 
-    # 1. Save to app DB first
+    # 1. Save to app DB first (Fernet-encrypted so password is recoverable for SSO)
+    from api.core.config import settings
     record = Database(
         user_id=current_user.id,
         db_name=body.db_name,
         db_user=body.db_user,
-        db_password_encrypted=hash_password(body.db_password),
+        db_password_encrypted=encrypt_value(body.db_password, settings.SECRET_KEY),
         db_type=body.db_type,
     )
     db.add(record)
@@ -497,9 +499,58 @@ async def reset_database_password(
                 detail=f"Failed to reset password: {detail}",
             )
 
-    record.db_password_encrypted = hash_password(new_password)
+    from api.core.config import settings
+    record.db_password_encrypted = encrypt_value(new_password, settings.SECRET_KEY)
     db.add(record)
     await db.flush()
 
     _log(db, request, current_user.id, "databases.reset_password", f"Reset password for {record.db_name}")
     return {"db_name": record.db_name, "new_password": new_password}
+
+
+# --------------------------------------------------------------------------
+# POST /{id}/sso -- generate SSO token for phpMyAdmin auto-login
+# --------------------------------------------------------------------------
+@router.post("/{db_id}/sso", status_code=status.HTTP_200_OK)
+async def database_sso(
+    db_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a one-time SSO token for phpMyAdmin auto-login."""
+    record = await _get_db_or_404(db_id, db, current_user)
+
+    if record.db_type != DbType.MYSQL:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="phpMyAdmin SSO is only available for MySQL databases.",
+        )
+
+    # Decrypt the stored password
+    import json as _json
+    from api.core.config import settings
+
+    try:
+        password = decrypt_value(record.db_password_encrypted, settings.SECRET_KEY)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to recover database credentials. Password may need to be reset.",
+        )
+
+    # Generate one-time token stored in Redis (expires 30s)
+    token = secrets.token_urlsafe(32)
+    redis = request.app.state.redis
+    await redis.setex(
+        f"hosthive:pma_sso:{token}",
+        30,
+        _json.dumps({
+            "user": record.db_user,
+            "password": password,
+            "server": "localhost",
+        }),
+    )
+
+    _log(db, request, current_user.id, "databases.sso", f"SSO login to phpMyAdmin for {record.db_name}")
+    return {"sso_url": f"/phpmyadmin/sso.php?token={token}"}

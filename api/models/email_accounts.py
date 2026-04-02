@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+from typing import Optional
+
 from sqlalchemy import Boolean, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,5 +26,6 @@ class EmailAccount(Base):
     )
     address: Mapped[str] = mapped_column(String(255), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    password_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, default=None)
     quota_mb: Mapped[int] = mapped_column(Integer, default=1024)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

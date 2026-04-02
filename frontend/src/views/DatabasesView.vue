@@ -4,15 +4,6 @@
     <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
       <h1 class="text-2xl font-semibold text-[var(--text-primary)]">Databases</h1>
       <div class="flex items-center gap-3">
-        <a
-          href="/phpmyadmin"
-          target="_blank"
-          rel="noopener"
-          class="btn-secondary inline-flex items-center gap-2 text-sm"
-        >
-          phpMyAdmin
-          <span class="text-xs">&#8599;</span>
-        </a>
         <button class="btn-primary inline-flex items-center gap-2" @click="openAddModal">
           <span class="text-lg leading-none">+</span>
           Add Database
@@ -75,6 +66,15 @@
 
           <template #actions="{ row }">
             <div class="flex items-center justify-end gap-2">
+              <button
+                v-if="row.type === 'mysql'"
+                class="btn-ghost text-xs px-2 py-1 text-primary hover:text-primary"
+                :disabled="ssoLoading === row.id"
+                @click="openPhpMyAdmin(row)"
+              >
+                <span v-if="ssoLoading === row.id" class="inline-block w-3 h-3 border-2 border-primary/30 border-t-primary rounded-full animate-spin mr-1"></span>
+                phpMyAdmin
+              </button>
               <button class="btn-ghost text-xs px-2 py-1" @click="confirmResetPassword(row)">
                 Reset Password
               </button>
@@ -231,6 +231,7 @@ import { useNotificationsStore } from '@/stores/notifications'
 import DataTable from '@/components/DataTable.vue'
 import Modal from '@/components/Modal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import client from '@/api/client'
 
 const store = useDatabasesStore()
 const auth = useAuthStore()
@@ -258,6 +259,7 @@ const newPassword = ref('')
 const dbToDelete = ref(null)
 const dbToReset = ref(null)
 const submitting = ref(false)
+const ssoLoading = ref(null)
 
 const usernamePrefix = computed(() => auth.user?.username || 'user')
 
@@ -311,6 +313,20 @@ async function copyToClipboard(text) {
     notifications.success('Copied to clipboard.')
   } catch {
     notifications.error('Failed to copy.')
+  }
+}
+
+async function openPhpMyAdmin(row) {
+  ssoLoading.value = row.id
+  try {
+    const { data } = await client.post(`/databases/${row.id}/sso`)
+    if (data.sso_url) {
+      window.open(data.sso_url, '_blank', 'noopener,noreferrer')
+    }
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Failed to open phpMyAdmin. Try resetting the database password.')
+  } finally {
+    ssoLoading.value = null
   }
 }
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from tests.conftest import auth_header
 
+from api.core.config import settings
+from api.core.encryption import encrypt_value
 from api.core.security import hash_password
 from api.models.databases import Database, DbType
 
@@ -52,7 +54,7 @@ class TestCreateDatabase:
             user_id=regular_user.id,
             db_name="existing_db",
             db_user="existing_user",
-            db_password_encrypted=hash_password("password"),
+            db_password_encrypted=encrypt_value("password", settings.SECRET_KEY),
             db_type=DbType.MYSQL,
         )
         db_session.add(existing)
@@ -78,7 +80,7 @@ class TestDeleteDatabase:
             user_id=regular_user.id,
             db_name="todelete_db",
             db_user="del_user",
-            db_password_encrypted=hash_password("password"),
+            db_password_encrypted=encrypt_value("password", settings.SECRET_KEY),
             db_type=DbType.MYSQL,
         )
         db_session.add(db_record)
@@ -101,7 +103,7 @@ class TestResetPassword:
             user_id=regular_user.id,
             db_name="resetpw_db",
             db_user="rp_user",
-            db_password_encrypted=hash_password("oldpassword"),
+            db_password_encrypted=encrypt_value("oldpassword", settings.SECRET_KEY),
             db_type=DbType.MYSQL,
         )
         db_session.add(db_record)

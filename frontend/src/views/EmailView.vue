@@ -81,6 +81,14 @@
 
           <template #actions="{ row }">
             <div class="flex items-center justify-end gap-2">
+              <button
+                class="btn-ghost text-xs px-2 py-1 text-primary hover:text-primary"
+                :disabled="ssoLoading === row.id"
+                @click="openWebmail(row)"
+              >
+                <span v-if="ssoLoading === row.id" class="inline-block w-3 h-3 border-2 border-primary/30 border-t-primary rounded-full animate-spin mr-1"></span>
+                Open Webmail
+              </button>
               <button class="btn-ghost text-xs px-2 py-1" @click="editMailbox(row)">
                 Edit
               </button>
@@ -356,6 +364,9 @@ const queueColumns = [
 const activeTab = ref('mailboxes')
 const search = ref('')
 
+// SSO state
+const ssoLoading = ref(null)
+
 // Mailbox state
 const showMailboxModal = ref(false)
 const editingMailbox = ref(null)
@@ -423,6 +434,21 @@ function formatTimeAgo(dateStr) {
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.floor(hours / 24)}d ago`
+}
+
+// SSO -- open webmail via Roundcube auto-login
+async function openWebmail(row) {
+  ssoLoading.value = row.id
+  try {
+    const { data } = await client.post(`/email/${row.id}/sso`)
+    if (data.sso_url) {
+      window.open(data.sso_url, '_blank', 'noopener,noreferrer')
+    }
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Failed to open webmail. The mailbox password may need to be re-set.')
+  } finally {
+    ssoLoading.value = null
+  }
 }
 
 // Mailbox CRUD

@@ -188,7 +188,7 @@ debconf-set-selections <<< "roundcube roundcube/dbconfig-install boolean false" 
 # Install packages in groups for better error handling
 PACKAGES_CORE="nginx postgresql redis-server python3 python3-venv python3-pip git curl wget unzip htop openssl"
 PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav opendkim opendkim-tools rspamd roundcube roundcube-plugins roundcube-pgsql"
-PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-pgsql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl php${PHP_VERSION}-soap php${PHP_VERSION}-bcmath php${PHP_VERSION}-readline php${PHP_VERSION}-opcache phpmyadmin"
+PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-pgsql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl php${PHP_VERSION}-soap php${PHP_VERSION}-bcmath php${PHP_VERSION}-readline php${PHP_VERSION}-opcache php${PHP_VERSION}-redis phpmyadmin"
 PACKAGES_DNS="bind9 bind9utils"
 PACKAGES_FTP="proftpd-basic"
 PACKAGES_SEC="fail2ban ufw"
@@ -364,6 +364,45 @@ server {
     location ~ ^/(config|temp|logs)/ { deny all; }
 }
 NGEOF
+
+    # Deploy SSO bridge script for Roundcube auto-login from the panel
+    if [[ -d /usr/share/roundcube ]]; then
+        if [[ -f "${SCRIPT_DIR}/scripts/roundcube-sso.php" ]]; then
+            cp "${SCRIPT_DIR}/scripts/roundcube-sso.php" /usr/share/roundcube/sso.php
+        else
+            cat > /usr/share/roundcube/sso.php << 'RCSSOPHP'
+<?php
+$token = $_GET['token'] ?? '';
+if (empty($token) || !preg_match('/^[A-Za-z0-9_-]+$/', $token)) {
+    header('HTTP/1.1 400 Bad Request'); echo 'Invalid or missing SSO token.'; exit;
+}
+$redis = new Redis();
+$redis->connect('127.0.0.1', 6379);
+$sf = '/opt/hosthive/config/secrets.env';
+if (file_exists($sf)) {
+    $c = file_get_contents($sf);
+    if (preg_match('/REDIS_PASSWORD=(.+)/', $c, $m)) { $rp = trim($m[1]); if (!empty($rp)) $redis->auth($rp); }
+}
+$key = "hosthive:rc_sso:{$token}";
+$data = $redis->get($key);
+if ($data === false) { header('HTTP/1.1 403 Forbidden'); echo 'Token expired or invalid.'; exit; }
+$redis->del($key);
+$creds = json_decode($data, true);
+if (!$creds || empty($creds['user']) || empty($creds['password'])) {
+    header('HTTP/1.1 500 Internal Server Error'); echo 'Invalid SSO payload.'; exit;
+}
+define('INSTALL_PATH', '/usr/share/roundcube/');
+require_once INSTALL_PATH . 'program/include/iniset.php';
+$rcmail = rcmail::get_instance(0, 'web');
+$auth = $rcmail->login($creds['user'], $creds['password'], 'localhost', false);
+if ($auth) { header('Location: /roundcube/?_task=mail'); exit; }
+else { header('HTTP/1.1 401 Unauthorized'); echo 'Roundcube login failed.'; exit; }
+RCSSOPHP
+        fi
+        chown www-data:www-data /usr/share/roundcube/sso.php
+        chmod 644 /usr/share/roundcube/sso.php
+        success "Roundcube SSO bridge deployed"
+    fi
 
     success "Roundcube webmail configured"
 }
@@ -703,12 +742,14 @@ $dbport='3306';
 $dbtype='mysql';
 PMAEOF
 
-        # Create blowfish secret for cookie auth
+        # Create blowfish secret and configure signon auth for SSO
         PMA_SECRET=$(openssl rand -hex 16)
         cat > /etc/phpmyadmin/conf.d/hosthive.php << PMACONF
 <?php
 \$cfg['blowfish_secret'] = '${PMA_SECRET}';
-\$cfg['Servers'][1]['auth_type'] = 'cookie';
+\$cfg['Servers'][1]['auth_type'] = 'signon';
+\$cfg['Servers'][1]['SignonSession'] = 'SignonSession';
+\$cfg['Servers'][1]['SignonURL'] = '/phpmyadmin/sso.php';
 \$cfg['Servers'][1]['host'] = 'localhost';
 \$cfg['Servers'][1]['compress'] = false;
 \$cfg['Servers'][1]['AllowNoPassword'] = false;
@@ -724,12 +765,46 @@ PMACONF
         chmod 640 /etc/phpmyadmin/config-db.php
         chmod 640 /etc/phpmyadmin/conf.d/hosthive.php
 
+        # Deploy SSO bridge script for phpMyAdmin auto-login from the panel
+        if [[ -f "${SCRIPT_DIR}/scripts/phpmyadmin-sso.php" ]]; then
+            cp "${SCRIPT_DIR}/scripts/phpmyadmin-sso.php" /usr/share/phpmyadmin/sso.php
+        else
+            cat > /usr/share/phpmyadmin/sso.php << 'SSOPHP'
+<?php
+session_name('SignonSession');
+session_start();
+$token = $_GET['token'] ?? '';
+if (empty($token) || !preg_match('/^[A-Za-z0-9_-]+$/', $token)) {
+    header('HTTP/1.1 400 Bad Request'); echo 'Invalid or missing SSO token.'; exit;
+}
+$redis = new Redis();
+$redis->connect('127.0.0.1', 6379);
+$sf = '/opt/hosthive/config/secrets.env';
+if (file_exists($sf)) {
+    $c = file_get_contents($sf);
+    if (preg_match('/REDIS_PASSWORD=(.+)/', $c, $m)) { $rp = trim($m[1]); if (!empty($rp)) $redis->auth($rp); }
+}
+$key = "hosthive:pma_sso:{$token}";
+$data = $redis->get($key);
+if ($data === false) { header('HTTP/1.1 403 Forbidden'); echo 'Token expired or invalid.'; exit; }
+$redis->del($key);
+$creds = json_decode($data, true);
+if (!$creds || empty($creds['user'])) { header('HTTP/1.1 500 Internal Server Error'); echo 'Invalid SSO payload.'; exit; }
+$_SESSION['PMA_single_signon_user'] = $creds['user'];
+$_SESSION['PMA_single_signon_password'] = $creds['password'];
+$_SESSION['PMA_single_signon_host'] = $creds['server'] ?? 'localhost';
+header('Location: /phpmyadmin/index.php'); exit;
+SSOPHP
+        fi
+        chown www-data:www-data /usr/share/phpmyadmin/sso.php
+        chmod 644 /usr/share/phpmyadmin/sso.php
+
         # Grant phpMyAdmin user access to MariaDB
         mysql -u root -e "CREATE USER IF NOT EXISTS 'phpmyadmin'@'localhost' IDENTIFIED BY '';" >> "$LOG_FILE" 2>&1 || true
         mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'phpmyadmin'@'localhost' WITH GRANT OPTION;" >> "$LOG_FILE" 2>&1 || true
         mysql -u root -e "FLUSH PRIVILEGES;" >> "$LOG_FILE" 2>&1 || true
 
-        success "phpMyAdmin configured"
+        success "phpMyAdmin configured with SSO"
     else
         warn "phpMyAdmin not found at /usr/share/phpmyadmin"
     fi
