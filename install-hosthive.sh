@@ -199,11 +199,13 @@ done
 step 3 $TOTAL_STEPS "Creating system user"
 
 if ! id -u hosthive &>/dev/null; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin hosthive
+    useradd --system --home-dir /home/hosthive --create-home --shell /usr/sbin/nologin hosthive
     success "System user 'hosthive' created"
 else
     success "System user 'hosthive' already exists"
 fi
+mkdir -p /home/hosthive/.postgresql
+chown -R hosthive:hosthive /home/hosthive
 
 # ─── Step 4: Verify application source code ───
 step 4 $TOTAL_STEPS "Verifying application source code"

@@ -26,7 +26,7 @@ RestartSec=5
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 ReadWritePaths=/opt/hosthive /var/log/hosthive
 PrivateTmp=true
 ProtectKernelTunables=true
