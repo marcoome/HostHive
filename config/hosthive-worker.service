@@ -12,12 +12,13 @@ WorkingDirectory=/opt/hosthive
 EnvironmentFile=/opt/hosthive/config/secrets.env
 
 ExecStart=/opt/hosthive/venv/bin/celery \
-    -A app.worker \
+    -A api.tasks \
     worker \
     --loglevel=info \
     --concurrency=2 \
     --max-tasks-per-child=100 \
-    -Q default,emails,backups,dns
+    -B \
+    -Q default,emails,backups,dns,monitoring,ssl,mail,notifications,maintenance,ai
 
 Restart=always
 RestartSec=10

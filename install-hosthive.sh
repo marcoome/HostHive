@@ -9,7 +9,7 @@
 #   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚══════╝
 #
 #   HostHive — Modern Hosting Control Panel
-#   One-command installer for Debian 12 (Bookworm)
+#   One-command installer for Debian 12/13 (Bookworm/Trixie)
 #
 #   Usage:
 #     wget https://get.hosthive.io/install.sh && sudo bash install.sh
@@ -31,14 +31,21 @@ NC='\033[0m'
 BOLD='\033[1m'
 DIM='\033[2m'
 
-# ─── Branding (loaded from config if available) ───
+# ─── Branding ───
 PRODUCT_NAME="HostHive"
 PRODUCT_VERSION="1.0.0"
 INSTALL_DIR="/opt/hosthive"
 CONFIG_DIR="${INSTALL_DIR}/config"
-LOG_FILE="${INSTALL_DIR}/logs/install.log"
+LOG_DIR="${INSTALL_DIR}/logs"
+LOG_FILE="${LOG_DIR}/install.log"
 
-mkdir -p "${INSTALL_DIR}/logs"
+# Resolve the directory where this script lives (for copying source files)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Create base dirs early so logging works ───
+mkdir -p "${LOG_DIR}"
+mkdir -p "${CONFIG_DIR}"
+touch "$LOG_FILE"
 
 # ─── Helpers ───
 print_header() {
@@ -102,7 +109,7 @@ generate_password() {
 }
 
 # ─── Pre-flight checks ───
-TOTAL_STEPS=12
+TOTAL_STEPS=13
 
 print_header
 
@@ -113,11 +120,11 @@ if [[ $EUID -ne 0 ]]; then
     fail "This installer must be run as root. Use: sudo bash install-hosthive.sh"
 fi
 
-# Check Debian 12
+# Check Debian 12/13
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
-    if [[ "$ID" != "debian" ]] || [[ ! "$VERSION_ID" =~ ^1[23] ]]; then
-        fail "HostHive requires Debian 12+ (Bookworm/Trixie). Detected: ${PRETTY_NAME:-unknown}"
+    if [[ "$ID" != "debian" ]] || [[ ! "$VERSION_ID" =~ ^1[23]$ ]]; then
+        fail "HostHive requires Debian 12 or 13 (Bookworm/Trixie). Detected: ${PRETTY_NAME:-unknown}"
     fi
     success "OS: ${PRETTY_NAME}"
 else
@@ -144,22 +151,26 @@ fi
 SERVER_IP=$(hostname -I | awk '{print $1}')
 success "Server IP: ${SERVER_IP}"
 
+# Detect PHP version available for this Debian release
+PHP_VERSION="8.2"
+if [[ "$VERSION_ID" == "13" ]]; then
+    PHP_VERSION="8.3"
+fi
+
 echo ""
 
-# ─── Create directory structure ───
+# ─── Step 1: Create directory structure ───
 step 1 $TOTAL_STEPS "Creating directory structure"
 
 mkdir -p "${INSTALL_DIR}"/{api/{routers,services,models,schemas,tasks,core},agent/executors,frontend/{src/{views,components,stores,api},dist},scripts/{modules,hooks},config,data/templates,logs,backups,tests}
 mkdir -p /home/hosthive-users
+mkdir -p /var/log/hosthive
 success "Directory structure created"
 
-# Initialize log
-mkdir -p "${INSTALL_DIR}/logs"
-touch "$LOG_FILE"
 log "=== HostHive Installation Started ==="
 log "Server IP: ${SERVER_IP}"
 
-# ─── Update system & install packages ───
+# ─── Step 2: Update system & install packages ───
 step 2 $TOTAL_STEPS "Installing system packages (this may take a few minutes)"
 
 export DEBIAN_FRONTEND=noninteractive
@@ -171,7 +182,7 @@ success "Package lists updated"
 # Install packages in groups for better error handling
 PACKAGES_CORE="nginx postgresql redis-server python3 python3-venv python3-pip git curl wget unzip htop openssl"
 PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav"
-PACKAGES_WEB="certbot python3-certbot-nginx php8.2-fpm php8.2-cli php8.2-mysql php8.2-curl php8.2-mbstring php8.2-xml php8.2-zip php8.2-gd php8.2-intl"
+PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl"
 PACKAGES_DNS="bind9 bind9utils"
 PACKAGES_FTP="proftpd-basic"
 PACKAGES_SEC="fail2ban ufw"
@@ -184,7 +195,7 @@ for group_name in CORE MAIL WEB DNS FTP SEC DB; do
     success "${group_name,,} packages installed"
 done
 
-# ─── Create system user ───
+# ─── Step 3: Create system user ───
 step 3 $TOTAL_STEPS "Creating system user"
 
 if ! id -u hosthive &>/dev/null; then
@@ -194,8 +205,29 @@ else
     success "System user 'hosthive' already exists"
 fi
 
-# ─── Generate secrets ───
-step 4 $TOTAL_STEPS "Generating secrets"
+# ─── Step 4: Deploy application source code ───
+step 4 $TOTAL_STEPS "Deploying application source code"
+
+# Copy project source from the repository into /opt/hosthive.
+# The installer script lives inside the repo, so SCRIPT_DIR points to the repo root.
+for component in api agent config data scripts tests frontend; do
+    if [[ -d "${SCRIPT_DIR}/${component}" ]]; then
+        cp -a "${SCRIPT_DIR}/${component}" "${INSTALL_DIR}/"
+        success "Deployed ${component}/"
+    else
+        warn "${component}/ not found in source, skipping"
+    fi
+done
+
+# Copy pyproject.toml if present (needed for tooling config)
+if [[ -f "${SCRIPT_DIR}/pyproject.toml" ]]; then
+    cp "${SCRIPT_DIR}/pyproject.toml" "${INSTALL_DIR}/"
+fi
+
+success "Application source deployed to ${INSTALL_DIR}"
+
+# ─── Step 5: Generate secrets ───
+step 5 $TOTAL_STEPS "Generating secrets"
 
 DB_PASSWORD=$(generate_password)
 REDIS_PASSWORD=$(generate_password)
@@ -207,18 +239,23 @@ cat > "${CONFIG_DIR}/secrets.env" << SECRETS
 # HostHive Secrets — AUTO-GENERATED, DO NOT COMMIT
 # Generated: $(date -Iseconds)
 
+# ── Database ──
 DATABASE_URL=postgresql+asyncpg://hosthive:${DB_PASSWORD}@localhost:5432/hosthive
 DATABASE_PASSWORD=${DB_PASSWORD}
 
+# ── Redis ──
 REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
 REDIS_PASSWORD=${REDIS_PASSWORD}
 
+# ── Secrets / Keys ──
 SECRET_KEY=${SECRET_KEY}
 AGENT_SECRET=${AGENT_SECRET}
 
+# ── Initial admin ──
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
 
+# ── Network ──
 SERVER_IP=${SERVER_IP}
 PANEL_PORT=8083
 SECRETS
@@ -227,18 +264,21 @@ chmod 600 "${CONFIG_DIR}/secrets.env"
 chown hosthive:hosthive "${CONFIG_DIR}/secrets.env"
 success "Secrets generated and stored"
 
-# ─── Setup PostgreSQL ───
-step 5 $TOTAL_STEPS "Configuring PostgreSQL"
+# ─── Step 6: Setup PostgreSQL ───
+step 6 $TOTAL_STEPS "Configuring PostgreSQL"
 
 systemctl enable --now postgresql >> "$LOG_FILE" 2>&1
 
 # Create database and user (idempotent)
 su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='hosthive'\" | grep -q 1 || psql -c \"CREATE ROLE hosthive WITH LOGIN PASSWORD '${DB_PASSWORD}'\"" >> "$LOG_FILE" 2>&1
 su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='hosthive'\" | grep -q 1 || psql -c \"CREATE DATABASE hosthive OWNER hosthive\"" >> "$LOG_FILE" 2>&1
+
+# Grant privileges explicitly
+su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE hosthive TO hosthive\"" >> "$LOG_FILE" 2>&1
 success "PostgreSQL configured"
 
-# ─── Setup Redis ───
-step 6 $TOTAL_STEPS "Configuring Redis"
+# ─── Step 7: Setup Redis ───
+step 7 $TOTAL_STEPS "Configuring Redis"
 
 # Set Redis password
 if ! grep -q "^requirepass" /etc/redis/redis.conf 2>/dev/null; then
@@ -251,8 +291,8 @@ systemctl enable --now redis-server >> "$LOG_FILE" 2>&1
 systemctl restart redis-server >> "$LOG_FILE" 2>&1
 success "Redis configured with password"
 
-# ─── Setup Python environment ───
-step 7 $TOTAL_STEPS "Setting up Python environment"
+# ─── Step 8: Setup Python environment ───
+step 8 $TOTAL_STEPS "Setting up Python environment"
 
 python3 -m venv "${INSTALL_DIR}/venv" >> "$LOG_FILE" 2>&1
 source "${INSTALL_DIR}/venv/bin/activate"
@@ -260,19 +300,26 @@ source "${INSTALL_DIR}/venv/bin/activate"
 pip install --upgrade pip >> "$LOG_FILE" 2>&1 &
 spinner $! "Upgrading pip"
 
-pip install \
-    fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg \
-    celery redis pydantic pydantic-settings "passlib[bcrypt]" "python-jose[cryptography]" \
-    python-multipart aiofiles paramiko dnspython slowapi jinja2 httpx \
-    cryptography alembic psutil >> "$LOG_FILE" 2>&1 &
-spinner $! "Installing Python packages"
+# Install Python dependencies
+# Prefer requirements.txt if it exists, otherwise install known packages
+if [[ -f "${INSTALL_DIR}/requirements.txt" ]]; then
+    pip install -r "${INSTALL_DIR}/requirements.txt" >> "$LOG_FILE" 2>&1 &
+    spinner $! "Installing Python packages from requirements.txt"
+else
+    pip install \
+        fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg \
+        celery redis pydantic pydantic-settings "passlib[bcrypt]" "python-jose[cryptography]" \
+        python-multipart aiofiles paramiko dnspython slowapi jinja2 httpx \
+        cryptography alembic psutil >> "$LOG_FILE" 2>&1 &
+    spinner $! "Installing Python packages"
+fi
 success "Python environment ready"
 
-# ─── Setup Node.js & build frontend ───
-step 8 $TOTAL_STEPS "Setting up Node.js & building frontend"
+# ─── Step 9: Setup Node.js & build frontend ───
+step 9 $TOTAL_STEPS "Setting up Node.js & building frontend"
 
 # Install Node 20 LTS via NodeSource
-if ! command -v node &>/dev/null || [[ ! "$(node -v)" =~ ^v20 ]]; then
+if ! command -v node &>/dev/null || [[ ! "$(node -v)" =~ ^v2[0-9] ]]; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >> "$LOG_FILE" 2>&1
     apt-get install -y -qq nodejs >> "$LOG_FILE" 2>&1
 fi
@@ -291,75 +338,12 @@ else
 fi
 cd "${INSTALL_DIR}"
 
-# ─── Configure Nginx ───
-step 9 $TOTAL_STEPS "Configuring Nginx"
+# ─── Step 10: Configure Nginx ───
+step 10 $TOTAL_STEPS "Configuring Nginx"
 
-cat > /etc/nginx/sites-available/hosthive << 'NGINX_CONF'
-# HostHive Panel — Nginx Configuration
-server {
-    listen 8083 ssl http2;
-    listen [::]:8083 ssl http2;
-    server_name _;
-
-    # SSL (self-signed initially, certbot later)
-    ssl_certificate /etc/ssl/hosthive/panel.crt;
-    ssl_certificate_key /etc/ssl/hosthive/panel.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' wss:;" always;
-
-    # Frontend (Vue SPA)
-    root /opt/hosthive/frontend/dist;
-    index index.html;
-
-    # SPA fallback
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # API proxy
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 300s;
-        client_max_body_size 512M;
-    }
-
-    # WebSocket proxy
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 86400s;
-    }
-
-    # Logs
-    access_log /opt/hosthive/logs/nginx-panel.access.log;
-    error_log /opt/hosthive/logs/nginx-panel.error.log;
-}
-
-# HTTP redirect to HTTPS
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name _;
-    return 301 https://$host:8083$request_uri;
-}
-NGINX_CONF
+# Create log directory for nginx used by the config file
+mkdir -p /var/log/hosthive
+chown www-data:adm /var/log/hosthive
 
 # Generate self-signed cert for panel (replaced by Let's Encrypt later)
 mkdir -p /etc/ssl/hosthive
@@ -371,6 +355,68 @@ if [[ ! -f /etc/ssl/hosthive/panel.crt ]]; then
     success "Self-signed SSL certificate generated"
 fi
 
+# Use the nginx config from the repo if available, otherwise generate inline
+if [[ -f "${INSTALL_DIR}/config/nginx-panel.conf" ]]; then
+    cp "${INSTALL_DIR}/config/nginx-panel.conf" /etc/nginx/sites-available/hosthive
+    success "Nginx config copied from config/nginx-panel.conf"
+else
+    # Fallback: generate a basic config with SSL
+    cat > /etc/nginx/sites-available/hosthive << 'NGINX_CONF'
+# HostHive Panel — Nginx Configuration
+server {
+    listen 8083 ssl http2;
+    listen [::]:8083 ssl http2;
+    server_name _;
+
+    ssl_certificate /etc/ssl/hosthive/panel.crt;
+    ssl_certificate_key /etc/ssl/hosthive/panel.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    root /opt/hosthive/frontend/dist;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        client_max_body_size 512M;
+    }
+
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400s;
+    }
+
+    access_log /var/log/hosthive/nginx-access.log;
+    error_log /var/log/hosthive/nginx-error.log;
+
+    client_max_body_size 256m;
+    server_tokens off;
+}
+NGINX_CONF
+    success "Nginx config generated inline (fallback)"
+fi
+
 # Enable site
 ln -sf /etc/nginx/sites-available/hosthive /etc/nginx/sites-enabled/hosthive
 rm -f /etc/nginx/sites-enabled/default
@@ -380,82 +426,26 @@ systemctl enable --now nginx >> "$LOG_FILE" 2>&1
 systemctl reload nginx >> "$LOG_FILE" 2>&1
 success "Nginx configured on port 8083"
 
-# ─── Create systemd services ───
-step 10 $TOTAL_STEPS "Creating systemd services"
+# ─── Step 11: Install systemd services ───
+step 11 $TOTAL_STEPS "Creating systemd services"
 
-# API service
-cat > /etc/systemd/system/hosthive-api.service << 'EOF'
-[Unit]
-Description=HostHive API Server
-After=network.target postgresql.service redis-server.service
-Wants=postgresql.service redis-server.service
-
-[Service]
-Type=exec
-User=hosthive
-Group=hosthive
-WorkingDirectory=/opt/hosthive
-EnvironmentFile=/opt/hosthive/config/secrets.env
-ExecStart=/opt/hosthive/venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000 --workers 4 --log-level info
-Restart=always
-RestartSec=5
-StandardOutput=append:/opt/hosthive/logs/api.log
-StandardError=append:/opt/hosthive/logs/api.error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Agent service (runs as root)
-cat > /etc/systemd/system/hosthive-agent.service << 'EOF'
-[Unit]
-Description=HostHive System Agent
-After=network.target
-
-[Service]
-Type=exec
-User=root
-WorkingDirectory=/opt/hosthive
-EnvironmentFile=/opt/hosthive/config/secrets.env
-ExecStart=/opt/hosthive/venv/bin/uvicorn agent.agent:app --host 127.0.0.1 --port 7080 --log-level info
-Restart=always
-RestartSec=5
-StandardOutput=append:/opt/hosthive/logs/agent.log
-StandardError=append:/opt/hosthive/logs/agent.error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Celery worker
-cat > /etc/systemd/system/hosthive-worker.service << 'EOF'
-[Unit]
-Description=HostHive Celery Worker
-After=network.target redis-server.service
-Wants=redis-server.service
-
-[Service]
-Type=exec
-User=hosthive
-Group=hosthive
-WorkingDirectory=/opt/hosthive
-EnvironmentFile=/opt/hosthive/config/secrets.env
-ExecStart=/opt/hosthive/venv/bin/celery -A api.tasks worker -l info -B --scheduler celery.beat:PersistentScheduler
-Restart=always
-RestartSec=10
-StandardOutput=append:/opt/hosthive/logs/worker.log
-StandardError=append:/opt/hosthive/logs/worker.error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# Copy service files from the repo config/ directory.
+# These files contain the correct module paths and security hardening.
+for svc in hosthive-api hosthive-agent hosthive-worker; do
+    if [[ -f "${INSTALL_DIR}/config/${svc}.service" ]]; then
+        cp "${INSTALL_DIR}/config/${svc}.service" "/etc/systemd/system/${svc}.service"
+        success "Installed ${svc}.service from config/"
+    else
+        warn "${svc}.service not found in config/, skipping"
+    fi
+done
 
 systemctl daemon-reload
 systemctl enable hosthive-api hosthive-agent hosthive-worker >> "$LOG_FILE" 2>&1
 success "Systemd services created and enabled"
 
-# ─── Firewall ───
-step 11 $TOTAL_STEPS "Configuring firewall & security"
+# ─── Step 12: Firewall & security ───
+step 12 $TOTAL_STEPS "Configuring firewall & security"
 
 # UFW
 ufw --force reset >> "$LOG_FILE" 2>&1
@@ -494,19 +484,31 @@ systemctl enable --now fail2ban >> "$LOG_FILE" 2>&1
 systemctl restart fail2ban >> "$LOG_FILE" 2>&1
 success "Fail2ban configured"
 
-# ─── Initialize database & start services ───
-step 12 $TOTAL_STEPS "Starting HostHive services"
+# ─── Step 13: Set permissions & start services ───
+step 13 $TOTAL_STEPS "Starting HostHive services"
 
 # Set permissions
 chown -R hosthive:hosthive "${INSTALL_DIR}"
 chmod -R 750 "${INSTALL_DIR}"
-# Agent needs root-owned dirs
-chown root:root "${INSTALL_DIR}/agent" -R
+
+# Agent directory needs root ownership (it runs as root for privileged ops)
+chown -R root:root "${INSTALL_DIR}/agent"
+
+# Logs dir needs to be writable by hosthive user and root (for agent)
+chown hosthive:hosthive "${INSTALL_DIR}/logs"
+chmod 770 "${INSTALL_DIR}/logs"
+
+# Ensure venv is accessible
+chmod -R 755 "${INSTALL_DIR}/venv"
+
+# Ensure /var/log/hosthive exists for nginx
+mkdir -p /var/log/hosthive
+chown www-data:adm /var/log/hosthive
 
 # Start services
-systemctl start hosthive-api >> "$LOG_FILE" 2>&1 || warn "API service failed to start (will work after code deploy)"
-systemctl start hosthive-agent >> "$LOG_FILE" 2>&1 || warn "Agent service failed to start (will work after code deploy)"
-systemctl start hosthive-worker >> "$LOG_FILE" 2>&1 || warn "Worker service failed to start (will work after code deploy)"
+systemctl start hosthive-api >> "$LOG_FILE" 2>&1 || warn "API service failed to start (check: journalctl -u hosthive-api)"
+systemctl start hosthive-agent >> "$LOG_FILE" 2>&1 || warn "Agent service failed to start (check: journalctl -u hosthive-agent)"
+systemctl start hosthive-worker >> "$LOG_FILE" 2>&1 || warn "Worker service failed to start (check: journalctl -u hosthive-worker)"
 
 success "Services started"
 
@@ -530,7 +532,7 @@ echo -e "    hosthive-api      $(systemctl is-active hosthive-api 2>/dev/null ||
 echo -e "    hosthive-agent    $(systemctl is-active hosthive-agent 2>/dev/null || echo 'pending')"
 echo -e "    hosthive-worker   $(systemctl is-active hosthive-worker 2>/dev/null || echo 'pending')"
 echo ""
-echo -e "  ${PURPLE}Thank you for choosing HostHive! 🐝${NC}"
+echo -e "  ${PURPLE}Thank you for choosing HostHive!${NC}"
 echo ""
 
 log "=== HostHive Installation Completed ==="

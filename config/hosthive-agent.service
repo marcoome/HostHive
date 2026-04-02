@@ -14,7 +14,7 @@ WorkingDirectory=/opt/hosthive
 EnvironmentFile=/opt/hosthive/config/secrets.env
 
 ExecStart=/opt/hosthive/venv/bin/uvicorn \
-    agent.main:app \
+    agent.agent:app \
     --host 127.0.0.1 \
     --port 7080 \
     --workers 1 \

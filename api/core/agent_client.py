@@ -39,7 +39,7 @@ class AgentClient:
 
     def _sign(self, timestamp: str, nonce: str, body: bytes) -> str:
         body_hash = hashlib.sha256(body).hexdigest()
-        message = f"{timestamp}:{nonce}:{body_hash}".encode()
+        message = f"{timestamp}{nonce}{body_hash}".encode()
         return hmac.new(self._secret, message, hashlib.sha256).hexdigest()
 
     def _auth_headers(self, body: bytes) -> dict[str, str]:
