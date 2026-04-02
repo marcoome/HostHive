@@ -1,0 +1,37 @@
+[Unit]
+Description=HostHive System Agent (root-level operations)
+Documentation=https://hosthive.dev
+After=network.target novapanel-api.service
+Wants=novapanel-api.service
+
+[Service]
+Type=simple
+# The agent runs as root because it performs privileged system operations
+# (creating users, managing services, editing configs, etc.)
+User=root
+Group=root
+WorkingDirectory=/opt/novapanel
+EnvironmentFile=/opt/novapanel/config/secrets.env
+
+ExecStart=/opt/novapanel/venv/bin/uvicorn \
+    agent.main:app \
+    --host 127.0.0.1 \
+    --port 7080 \
+    --workers 1 \
+    --log-level info
+
+Restart=always
+RestartSec=5
+
+# The agent binds to localhost only — Nginx restricts external access.
+# Even though it runs as root, limit exposure where possible.
+NoNewPrivileges=false
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=novapanel-agent
+
+[Install]
+WantedBy=multi-user.target

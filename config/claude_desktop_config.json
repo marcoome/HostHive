@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "hosthive": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "http://SERVER_IP:8765/mcp",
+        "--header",
+        "Authorization: Bearer MCP_TOKEN"
+      ]
+    }
+  }
+}

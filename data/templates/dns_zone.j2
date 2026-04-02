@@ -1,0 +1,29 @@
+$TTL    3600
+@       IN      SOA     ns1.{{ domain }}. admin.{{ domain }}. (
+                        {{ serial }}    ; Serial
+                        3600            ; Refresh
+                        900             ; Retry
+                        1209600         ; Expire
+                        86400 )         ; Negative Cache TTL
+
+; Name servers
+@       IN      NS      ns1.{{ domain }}.
+@       IN      NS      ns2.{{ domain }}.
+
+; A records
+@       IN      A       {{ ip }}
+ns1     IN      A       {{ ip }}
+ns2     IN      A       {{ ip }}
+
+; AAAA record (placeholder — update with real IPv6)
+; @     IN      AAAA    ::1
+
+; Mail
+@       IN      MX      10      mail.{{ domain }}.
+mail    IN      A       {{ ip }}
+
+; SPF
+@       IN      TXT     "v=spf1 mx a ip4:{{ ip }} ~all"
+
+; WWW alias
+www     IN      CNAME   {{ domain }}.
