@@ -1,42 +1,26 @@
 <?php
 /**
- * HostHive SSO bridge for phpMyAdmin.
- *
- * Accepts a one-time token issued by the HostHive API, validates it
- * against Redis, and sets up a phpMyAdmin SignonSession so the user
- * is automatically logged in.
- *
- * phpMyAdmin must be configured with:
- *   $cfg['Servers'][1]['auth_type'] = 'signon';
- *   $cfg['Servers'][1]['SignonSession'] = 'SignonSession';
- *   $cfg['Servers'][1]['SignonURL'] = '/phpmyadmin/sso.php';
+ * HostHive SSO bridge for phpMyAdmin (cookie auth mode).
+ * Accepts a one-time token from Redis, renders auto-submit login form.
  */
 
-// Start the named session that phpMyAdmin expects for signon auth
-session_name('SignonSession');
-session_start();
-
 $token = $_GET['token'] ?? '';
-
-// No token -- redirect to phpMyAdmin (will show login page via SignonURL loop)
 if (empty($token) || !preg_match('/^[A-Za-z0-9_-]+$/', $token)) {
-    header('HTTP/1.1 400 Bad Request');
-    echo 'Invalid or missing SSO token.';
-    exit;
+    die('Invalid or missing SSO token.');
 }
 
 // Connect to Redis
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 
-// Authenticate with Redis using the password from secrets.env
+// Auth Redis with password from secrets
 $secretsFile = '/opt/hosthive/config/secrets.env';
 if (file_exists($secretsFile)) {
     $contents = file_get_contents($secretsFile);
     if (preg_match('/REDIS_PASSWORD=(.+)/', $contents, $matches)) {
         $redisPass = trim($matches[1]);
         if (!empty($redisPass)) {
-            $redis->auth($redisPass);
+            try { $redis->auth($redisPass); } catch (Exception $e) {}
         }
     }
 }
@@ -46,9 +30,7 @@ $key = "hosthive:pma_sso:{$token}";
 $data = $redis->get($key);
 
 if ($data === false) {
-    header('HTTP/1.1 403 Forbidden');
-    echo 'SSO token expired or invalid. Please try again from the panel.';
-    exit;
+    die('Token expired or invalid. Please try again from the panel.');
 }
 
 // Delete immediately -- one-time use
@@ -56,16 +38,26 @@ $redis->del($key);
 
 $creds = json_decode($data, true);
 if (!$creds || empty($creds['user'])) {
-    header('HTTP/1.1 500 Internal Server Error');
-    echo 'Invalid SSO payload.';
-    exit;
+    die('Invalid SSO payload.');
 }
 
-// Set the session variables that phpMyAdmin signon auth expects
-$_SESSION['PMA_single_signon_user']     = $creds['user'];
-$_SESSION['PMA_single_signon_password'] = $creds['password'];
-$_SESSION['PMA_single_signon_host']     = $creds['server'] ?? 'localhost';
-
-// Redirect to phpMyAdmin -- it will pick up credentials from the session
-header('Location: /phpmyadmin/index.php');
-exit;
+$user = htmlspecialchars($creds['user'], ENT_QUOTES, 'UTF-8');
+$pass = htmlspecialchars($creds['password'], ENT_QUOTES, 'UTF-8');
+$server = htmlspecialchars($creds['server'] ?? 'localhost', ENT_QUOTES, 'UTF-8');
+?>
+<!DOCTYPE html>
+<html>
+<head><title>Logging into phpMyAdmin...</title></head>
+<body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;">
+<div>
+<p>Logging into phpMyAdmin as <strong><?= $user ?></strong>...</p>
+<form id="sso_form" method="post" action="/phpmyadmin/index.php">
+    <input type="hidden" name="pma_username" value="<?= $user ?>">
+    <input type="hidden" name="pma_password" value="<?= $pass ?>">
+    <input type="hidden" name="pma_servername" value="<?= $server ?>">
+    <noscript><button type="submit">Click to login</button></noscript>
+</form>
+</div>
+<script>document.getElementById('sso_form').submit();</script>
+</body>
+</html>
