@@ -109,7 +109,7 @@ generate_password() {
 }
 
 # ─── Pre-flight checks ───
-TOTAL_STEPS=13
+TOTAL_STEPS=14
 
 print_header
 
@@ -181,7 +181,7 @@ success "Package lists updated"
 
 # Install packages in groups for better error handling
 PACKAGES_CORE="nginx postgresql redis-server python3 python3-venv python3-pip git curl wget unzip htop openssl"
-PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav"
+PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav opendkim opendkim-tools rspamd roundcube roundcube-plugins roundcube-pgsql"
 PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl"
 PACKAGES_DNS="bind9 bind9utils"
 PACKAGES_FTP="proftpd-basic"
@@ -194,6 +194,173 @@ for group_name in CORE MAIL WEB DNS FTP SEC DB; do
     spinner $! "Installing ${group_name,,} packages"
     success "${group_name,,} packages installed"
 done
+
+# ─── Email server & Roundcube configuration functions ───
+configure_email_server() {
+    log "Configuring email server..."
+
+    # Exim4 — internet site configuration
+    debconf-set-selections <<< "exim4-config exim4/dc_eximconfig_configtype select internet site; mail is sent and received directly using SMTP"
+    debconf-set-selections <<< "exim4-config exim4/dc_other_hostnames string ${SERVER_HOSTNAME:-$(hostname -f)}"
+    debconf-set-selections <<< "exim4-config exim4/dc_local_interfaces string 0.0.0.0 ; ::0"
+    debconf-set-selections <<< "exim4-config exim4/use_split_config boolean true"
+    dpkg-reconfigure -f noninteractive exim4-config
+
+    # Create virtual mailbox directories
+    mkdir -p /var/mail/vhosts
+    groupadd -g 5000 vmail 2>/dev/null || true
+    useradd -u 5000 -g vmail -s /usr/sbin/nologin -d /var/mail/vhosts -m vmail 2>/dev/null || true
+    chown -R vmail:vmail /var/mail/vhosts
+
+    # Dovecot — configure for virtual users
+    cat > /etc/dovecot/conf.d/10-mail.conf <<'DOVEOF'
+mail_location = maildir:/var/mail/vhosts/%d/%n
+namespace inbox {
+  inbox = yes
+}
+mail_privileged_group = vmail
+DOVEOF
+
+    cat > /etc/dovecot/conf.d/10-auth.conf <<'DOVEOF'
+disable_plaintext_auth = yes
+auth_mechanisms = plain login
+!include auth-passwdfile.conf.ext
+DOVEOF
+
+    cat > /etc/dovecot/conf.d/auth-passwdfile.conf.ext <<'DOVEOF'
+passdb {
+  driver = passwd-file
+  args = scheme=SHA512-CRYPT /etc/dovecot/virtual_users
+}
+userdb {
+  driver = static
+  args = uid=vmail gid=vmail home=/var/mail/vhosts/%d/%n
+}
+DOVEOF
+
+    # Create empty virtual users file
+    touch /etc/dovecot/virtual_users
+    chown dovecot:dovecot /etc/dovecot/virtual_users
+    chmod 600 /etc/dovecot/virtual_users
+
+    # Dovecot SSL
+    cat > /etc/dovecot/conf.d/10-ssl.conf <<DOVEOF
+ssl = required
+ssl_cert = </etc/ssl/hosthive/panel.crt
+ssl_key = </etc/ssl/hosthive/panel.key
+ssl_min_protocol = TLSv1.2
+DOVEOF
+
+    # Create Exim4 virtual aliases file
+    mkdir -p /etc/exim4
+    touch /etc/exim4/virtual_aliases
+
+    # OpenDKIM
+    mkdir -p /etc/opendkim/keys
+    cat > /etc/opendkim.conf <<'DKIMEOF'
+Syslog          yes
+UMask           007
+Mode            sv
+SubDomains      no
+AutoRestart     yes
+AutoRestartRate 10/1M
+Background      yes
+DNSTimeout      5
+SignatureAlgorithm rsa-sha256
+OversignHeaders From
+KeyTable        /etc/opendkim/key.table
+SigningTable    refile:/etc/opendkim/signing.table
+ExternalIgnoreList  /etc/opendkim/trusted.hosts
+InternalHosts       /etc/opendkim/trusted.hosts
+DKIMEOF
+
+    touch /etc/opendkim/key.table
+    touch /etc/opendkim/signing.table
+    cat > /etc/opendkim/trusted.hosts <<'EOF'
+127.0.0.1
+::1
+localhost
+EOF
+
+    # Enable and start services
+    systemctl enable --now dovecot exim4 opendkim 2>/dev/null || true
+    systemctl restart dovecot exim4 2>/dev/null || true
+
+    success "Email server configured"
+}
+
+configure_roundcube() {
+    log "Configuring Roundcube webmail..."
+
+    # Generate Roundcube DB password
+    RC_DB_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+
+    # Create Roundcube database
+    sudo -u postgres psql -c "CREATE ROLE roundcube WITH LOGIN PASSWORD '${RC_DB_PASS}';" 2>/dev/null || \
+    sudo -u postgres psql -c "ALTER ROLE roundcube WITH PASSWORD '${RC_DB_PASS}';"
+    sudo -u postgres psql -c "CREATE DATABASE roundcube OWNER roundcube;" 2>/dev/null || true
+
+    # Initialize Roundcube DB schema
+    if [ -f /usr/share/roundcube/SQL/postgres.initial.sql ]; then
+        PGPASSWORD="${RC_DB_PASS}" psql -U roundcube -d roundcube -f /usr/share/roundcube/SQL/postgres.initial.sql 2>/dev/null || true
+    fi
+
+    # Roundcube config
+    RC_DES_KEY=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+    cat > /etc/roundcube/config.inc.php <<RCEOF
+<?php
+\$config = [];
+\$config['db_dsnw'] = 'pgsql://roundcube:${RC_DB_PASS}@localhost/roundcube';
+\$config['imap_host'] = 'ssl://localhost:993';
+\$config['smtp_host'] = 'tls://localhost:587';
+\$config['smtp_user'] = '%u';
+\$config['smtp_pass'] = '%p';
+\$config['support_url'] = '';
+\$config['product_name'] = 'HostHive Webmail';
+\$config['des_key'] = '${RC_DES_KEY}';
+\$config['plugins'] = ['archive', 'zipdownload', 'managesieve'];
+\$config['skin'] = 'elastic';
+\$config['language'] = 'en_US';
+\$config['spellcheck_engine'] = 'pspell';
+\$config['mime_param_folding'] = 0;
+\$config['draft_autosave'] = 60;
+\$config['login_autocomplete'] = 2;
+RCEOF
+
+    chown www-data:www-data /etc/roundcube/config.inc.php
+    chmod 640 /etc/roundcube/config.inc.php
+
+    # Roundcube webmail nginx config (dedicated vhost for webmail.*/mail.*)
+    cat > /etc/nginx/conf.d/roundcube.conf <<'NGEOF'
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name webmail.* mail.*;
+
+    ssl_certificate /etc/ssl/hosthive/panel.crt;
+    ssl_certificate_key /etc/ssl/hosthive/panel.key;
+
+    root /usr/share/roundcube;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\. { deny all; }
+    location ~ ^/(config|temp|logs)/ { deny all; }
+}
+NGEOF
+
+    success "Roundcube webmail configured"
+}
 
 # ─── Step 3: Create system user ───
 step 3 $TOTAL_STEPS "Creating system user"
@@ -432,6 +599,14 @@ systemctl enable --now nginx >> "$LOG_FILE" 2>&1
 systemctl reload nginx >> "$LOG_FILE" 2>&1
 success "Nginx configured on HTTPS port 8443"
 
+# Configure email server and Roundcube webmail
+configure_email_server
+configure_roundcube
+
+# Reload nginx to pick up Roundcube config
+nginx -t >> "$LOG_FILE" 2>&1 || warn "Nginx config test failed after Roundcube setup"
+systemctl reload nginx >> "$LOG_FILE" 2>&1
+
 # ─── Step 11: Install systemd services ───
 step 11 $TOTAL_STEPS "Creating systemd services"
 
@@ -490,8 +665,104 @@ systemctl enable --now fail2ban >> "$LOG_FILE" 2>&1
 systemctl restart fail2ban >> "$LOG_FILE" 2>&1
 success "Fail2ban configured"
 
-# ─── Step 13: Set permissions & start services ───
-step 13 $TOTAL_STEPS "Starting HostHive services"
+# ─── Step 13: Security hardening ───
+step 13 $TOTAL_STEPS "Applying security hardening"
+
+configure_security() {
+    log "Configuring security hardening..."
+
+    # SSH Hardening
+    if [ -f /etc/ssh/sshd_config ]; then
+        # Backup original
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.hosthive
+
+        # Apply hardening (don't disable password auth - user might not have keys)
+        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+        sed -i 's/^#\?MaxAuthTries.*/MaxAuthTries 5/' /etc/ssh/sshd_config
+        sed -i 's/^#\?ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+        sed -i 's/^#\?ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
+        sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+    fi
+
+    # ClamAV setup
+    if command -v freshclam &>/dev/null; then
+        # Stop freshclam if running, update virus definitions
+        systemctl stop clamav-freshclam 2>/dev/null || true
+        freshclam --quiet 2>/dev/null || true
+        systemctl enable --now clamav-freshclam 2>/dev/null || true
+        systemctl enable --now clamav-daemon 2>/dev/null || true
+
+        # Create scan script for uploaded files
+        mkdir -p /opt/hosthive/scripts
+        cat > /opt/hosthive/scripts/clamav-scan.sh <<'SCANEOF'
+#!/bin/bash
+# Scan a file or directory with ClamAV
+# Usage: clamav-scan.sh <path>
+if [ -z "$1" ]; then
+    echo '{"error": "No path specified"}'
+    exit 1
+fi
+RESULT=$(clamscan --no-summary --infected "$1" 2>&1)
+RC=$?
+if [ $RC -eq 0 ]; then
+    echo '{"clean": true, "threats": []}'
+elif [ $RC -eq 1 ]; then
+    THREATS=$(echo "$RESULT" | grep "FOUND" | awk -F: '{print $2}' | sed 's/ FOUND//' | tr '\n' ',' | sed 's/,$//')
+    echo "{\"clean\": false, \"threats\": [\"${THREATS}\"]}"
+else
+    echo "{\"error\": \"Scan failed: ${RESULT}\"}"
+fi
+SCANEOF
+        chmod +x /opt/hosthive/scripts/clamav-scan.sh
+    fi
+
+    # Kernel hardening via sysctl
+    cat > /etc/sysctl.d/99-hosthive-hardening.conf <<'SYSEOF'
+# HostHive Security Hardening
+net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.conf.all.log_martians = 1
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+kernel.randomize_va_space = 2
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+SYSEOF
+    sysctl --system >/dev/null 2>&1 || true
+
+    # Automatic security updates
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y -qq unattended-upgrades apt-listchanges >/dev/null 2>&1 || true
+        cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APTEOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+APTEOF
+    fi
+
+    # Secure /tmp
+    if ! mount | grep -q "on /tmp "; then
+        # Add noexec to /tmp if it's not a separate partition
+        echo "tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev 0 0" >> /etc/fstab 2>/dev/null || true
+    fi
+
+    success "Security hardening applied"
+}
+
+configure_security
+
+# ─── Step 14: Set permissions & start services ───
+step 14 $TOTAL_STEPS "Starting HostHive services"
 
 # Set permissions
 chown -R hosthive:hosthive "${INSTALL_DIR}"

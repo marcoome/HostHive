@@ -22,6 +22,7 @@ from api.core.security import (
     verify_token,
 )
 from api.core.config import settings
+from api.core.rate_limit import limiter
 from api.models.users import User
 from api.models.activity_log import ActivityLog
 from api.schemas.auth import (
@@ -43,6 +44,7 @@ _REFRESH_PREFIX = "hosthive:refresh:"
 # POST /login
 # --------------------------------------------------------------------------
 @router.post("/login", response_model=LoginResponse, status_code=status.HTTP_200_OK)
+@limiter.limit("10/minute")
 async def login(
     body: LoginRequest,
     request: Request,
@@ -106,6 +108,7 @@ async def login(
 # POST /refresh
 # --------------------------------------------------------------------------
 @router.post("/refresh", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+@limiter.limit("20/minute")
 async def refresh_token(
     body: RefreshRequest,
     request: Request,
@@ -178,8 +181,10 @@ async def logout(
 # POST /forgot-password
 # --------------------------------------------------------------------------
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
 async def forgot_password(
     body: ForgotPasswordRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Generate a new random password and store it. In production, email it."""

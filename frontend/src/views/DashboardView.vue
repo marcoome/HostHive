@@ -129,19 +129,23 @@
       <div class="card-static p-5">
         <h3 class="text-sm font-medium mb-4" :style="{ color: 'var(--text-primary)' }">CPU Usage (24h)</h3>
         <template v-if="loading">
-          <div class="skeleton w-full h-[200px] rounded-lg"></div>
+          <div class="skeleton w-full h-[250px] rounded-lg"></div>
         </template>
         <template v-else>
-          <Line :data="cpuChartData" :options="chartOptions" style="height: 200px" />
+          <div class="relative h-[250px] w-full overflow-hidden">
+            <Line :data="cpuChartData" :options="chartOptions" />
+          </div>
         </template>
       </div>
       <div class="card-static p-5">
         <h3 class="text-sm font-medium mb-4" :style="{ color: 'var(--text-primary)' }">RAM Usage (24h)</h3>
         <template v-if="loading">
-          <div class="skeleton w-full h-[200px] rounded-lg"></div>
+          <div class="skeleton w-full h-[250px] rounded-lg"></div>
         </template>
         <template v-else>
-          <Line :data="ramChartData" :options="chartOptions" style="height: 200px" />
+          <div class="relative h-[250px] w-full overflow-hidden">
+            <Line :data="ramChartData" :options="chartOptions" />
+          </div>
         </template>
       </div>
     </div>

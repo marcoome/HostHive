@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.database import get_db
+from api.core.rate_limit import limiter
 from api.core.security import get_current_user
 from api.models.activity_log import ActivityLog
 from api.models.users import User
@@ -137,6 +138,7 @@ async def list_files(
 # POST /upload -- multipart file upload
 # --------------------------------------------------------------------------
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
+@limiter.limit("30/minute")
 async def upload_file(
     file: UploadFile,
     path: str = Query(..., max_length=4096),

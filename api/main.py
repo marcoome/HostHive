@@ -10,24 +10,15 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from api.core.config import settings
 from api.core.agent_client import AgentClient
 from api.core.database import engine
 from api.core.middleware import SecurityHeadersMiddleware, AuditLogMiddleware
+from api.core.rate_limit import limiter
 from api.core.reseller_middleware import ResellerBrandingMiddleware
-
-# ---------------------------------------------------------------------------
-# Rate limiter (backed by Redis)
-# ---------------------------------------------------------------------------
-
-limiter = Limiter(
-    key_func=get_remote_address,
-    storage_uri=settings.REDIS_URL,
-)
 
 # ---------------------------------------------------------------------------
 # Lifespan: start-up / shutdown
@@ -156,11 +147,11 @@ async def permission_error_handler(_request: Request, exc: PermissionError) -> J
 
 @app.exception_handler(Exception)
 async def generic_error_handler(_request: Request, exc: Exception) -> JSONResponse:
-    # In production, never leak internal details.
-    detail = str(exc) if settings.DEBUG else "Internal server error."
+    import logging
+    logging.getLogger("hosthive.api").exception("Unhandled error: %s", exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": detail},
+        content={"detail": str(exc)},
     )
 
 
