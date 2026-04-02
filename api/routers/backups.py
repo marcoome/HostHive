@@ -240,6 +240,42 @@ async def list_backups(
 
 
 # --------------------------------------------------------------------------
+# PUT /schedule -- configure backup schedule
+# --------------------------------------------------------------------------
+@router.put("/schedule", status_code=status.HTTP_200_OK)
+async def update_backup_schedule(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Save backup schedule to Redis."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    redis = request.app.state.redis
+    import json as _json
+    await redis.set(
+        f"hosthive:backup_schedule:{current_user.id}",
+        _json.dumps(body),
+    )
+    return {"detail": "Backup schedule updated.", **body}
+
+
+@router.get("/schedule", status_code=status.HTTP_200_OK)
+async def get_backup_schedule(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Get backup schedule from Redis."""
+    redis = request.app.state.redis
+    import json as _json
+    data = await redis.get(f"hosthive:backup_schedule:{current_user.id}")
+    if data:
+        return _json.loads(data)
+    return {"enabled": False, "frequency": "daily", "retention": 7, "backup_type": "full"}
+
+
+# --------------------------------------------------------------------------
 # POST /create -- trigger backup (agent -> direct fallback)
 # --------------------------------------------------------------------------
 @router.post("/create", status_code=status.HTTP_202_ACCEPTED)
