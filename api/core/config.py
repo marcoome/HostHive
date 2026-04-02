@@ -18,6 +18,7 @@ class Settings(BaseSettings):
         env_file=str(_SECRETS_ENV) if _SECRETS_ENV.exists() else None,
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # ── Database ────────────────────────────────────────────────────────

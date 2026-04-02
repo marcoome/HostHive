@@ -250,7 +250,7 @@ cat > "${CONFIG_DIR}/secrets.env" << SECRETS
 
 # ── Database ──
 DATABASE_URL=postgresql+asyncpg://hosthive:${DB_PASSWORD}@localhost:5432/hosthive
-DATABASE_PASSWORD=${DB_PASSWORD}
+DB_PASSWORD=${DB_PASSWORD}
 
 # ── Redis ──
 REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
