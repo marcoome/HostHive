@@ -20,15 +20,15 @@ from api.core.database import get_db
 # Password hashing
 # ---------------------------------------------------------------------------
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__truncate_error=False)
 
 
 def hash_password(plain: str) -> str:
-    return _pwd_ctx.hash(plain)
+    return _pwd_ctx.hash(plain[:72])
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(plain, hashed)
+    return _pwd_ctx.verify(plain[:72], hashed)
 
 
 # ---------------------------------------------------------------------------
