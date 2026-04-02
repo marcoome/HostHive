@@ -53,8 +53,14 @@ export const useAiStore = defineStore('ai', () => {
     streamingText.value = ''
 
     try {
-      const tokens = JSON.parse(localStorage.getItem('hosthive_tokens') || '{}')
-      const authHeader = tokens.access ? `Bearer ${tokens.access}` : ''
+      // Get fresh token (may have been refreshed by interceptor)
+      const storedTokens = JSON.parse(localStorage.getItem('hosthive_tokens') || '{}')
+      const authHeader = storedTokens.access ? `Bearer ${storedTokens.access}` : ''
+
+      if (!authHeader) {
+        throw new Error('Not authenticated. Please log in again.')
+      }
+
       const response = await fetch('/api/v1/ai/chat', {
         method: 'POST',
         headers: {
@@ -67,6 +73,26 @@ export const useAiStore = defineStore('ai', () => {
           context: context || {}
         })
       })
+
+      // Handle auth errors
+      if (response.status === 401) {
+        // Try to refresh token
+        try {
+          const refreshResp = await fetch('/api/v1/auth/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: storedTokens.refresh })
+          })
+          if (refreshResp.ok) {
+            const refreshData = await refreshResp.json()
+            const newTokens = { access: refreshData.access_token, refresh: refreshData.refresh_token || storedTokens.refresh }
+            localStorage.setItem('hosthive_tokens', JSON.stringify(newTokens))
+            // Retry with new token
+            return sendMessage(message, context)
+          }
+        } catch {}
+        throw new Error('Session expired. Please log in again.')
+      }
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()

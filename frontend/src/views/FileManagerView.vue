@@ -875,7 +875,7 @@ function handleDeleteSelected() {
 async function executeDelete() {
   try {
     for (const file of deleteTargets.value) {
-      await client.delete('/files/delete', { data: { path: currentPath.value + '/' + file.name } })
+      await client.delete('/files/delete', { data: { path: file.path || (currentPath.value + '/' + file.name) } })
     }
     notifications.success(deleteTargets.value.length === 1 ? 'Deleted successfully.' : `${deleteTargets.value.length} items deleted.`)
     selectedFiles.value = []
