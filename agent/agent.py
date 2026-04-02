@@ -1047,6 +1047,128 @@ async def mail_rspamd_setup(body: DomainOnly):
 
 
 # ---------------------------------------------------------------------------
+# Service start / stop
+# ---------------------------------------------------------------------------
+
+
+class ServiceAction(BaseModel):
+    name: str
+    action: str = "restart"
+
+
+@app.post("/system/service/start")
+async def system_start_service(body: ServiceRestart):
+    return _exec(system_executor.start_service, body.name)
+
+
+@app.post("/system/service/stop")
+async def system_stop_service(body: ServiceRestart):
+    return _exec(system_executor.stop_service, body.name)
+
+
+# ---------------------------------------------------------------------------
+# Fail2ban enable / disable
+# ---------------------------------------------------------------------------
+
+
+class Fail2banJail(BaseModel):
+    jail: str
+
+
+@app.post("/system/fail2ban/enable")
+async def system_fail2ban_enable(body: Fail2banJail):
+    return _exec(system_executor.enable_fail2ban_jail, body.jail)
+
+
+@app.post("/system/fail2ban/disable")
+async def system_fail2ban_disable(body: Fail2banJail):
+    return _exec(system_executor.disable_fail2ban_jail, body.jail)
+
+
+# ---------------------------------------------------------------------------
+# Service logs
+# ---------------------------------------------------------------------------
+
+
+@app.get("/system/logs/{service}")
+async def system_service_logs(service: str, lines: int = 200):
+    return _exec(system_executor.get_service_logs, service, lines)
+
+
+@app.get("/system/logs/{service}/tail")
+async def system_service_logs_tail(service: str, lines: int = 20):
+    return _exec(system_executor.tail_service_logs, service, lines)
+
+
+# ---------------------------------------------------------------------------
+# Terminal execution
+# ---------------------------------------------------------------------------
+
+
+class TerminalCommand(BaseModel):
+    command: str
+
+
+@app.post("/terminal/exec")
+async def terminal_exec(body: TerminalCommand):
+    return _exec(system_executor.exec_terminal_command, body.command)
+
+
+# ---------------------------------------------------------------------------
+# File operations
+# ---------------------------------------------------------------------------
+
+
+class MkdirRequest(BaseModel):
+    path: str
+
+
+class RenameRequest(BaseModel):
+    old_path: str
+    new_path: str
+
+
+class ChmodRequest(BaseModel):
+    path: str
+    permissions: str
+
+
+class CompressRequest(BaseModel):
+    paths: list[str]
+    destination: str
+
+
+class ExtractRequest(BaseModel):
+    archive_path: str
+    destination: str
+
+
+@app.post("/files/mkdir")
+async def files_mkdir(body: MkdirRequest):
+    return _exec(system_executor.make_directory, body.path)
+
+
+@app.post("/files/rename")
+async def files_rename(body: RenameRequest):
+    return _exec(system_executor.rename_path, body.old_path, body.new_path)
+
+
+@app.post("/files/chmod")
+async def files_chmod(body: ChmodRequest):
+    return _exec(system_executor.chmod_path, body.path, body.permissions)
+
+
+@app.post("/files/compress")
+async def files_compress(body: CompressRequest):
+    return _exec(system_executor.compress_paths, body.paths, body.destination)
+
+
+@app.post("/files/extract")
+async def files_extract(body: ExtractRequest):
+    return _exec(system_executor.extract_archive, body.archive_path, body.destination)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

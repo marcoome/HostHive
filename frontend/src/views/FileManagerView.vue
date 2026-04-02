@@ -677,7 +677,7 @@ async function navigateTo(path) {
 async function fetchFiles() {
   loadingFiles.value = true
   try {
-    const { data } = await client.get('/files', { params: { path: currentPath.value } })
+    const { data } = await client.get('/files/list', { params: { path: currentPath.value } })
     files.value = data.files || data || []
   } catch (err) {
     notifications.error('Failed to load directory.')
@@ -744,7 +744,7 @@ async function uploadFiles(fileList) {
 async function createFolder() {
   if (!newItemName.value.trim()) return
   try {
-    await client.post('/files/directory', { path: currentPath.value + '/' + newItemName.value.trim() })
+    await client.post('/files/create-dir', { path: currentPath.value + '/' + newItemName.value.trim() })
     notifications.success(`Folder '${newItemName.value}' created.`)
     showNewFolderModal.value = false
     newItemName.value = ''
@@ -758,7 +758,7 @@ async function createFolder() {
 async function createFile() {
   if (!newItemName.value.trim()) return
   try {
-    await client.post('/files/create', { path: currentPath.value + '/' + newItemName.value.trim(), content: '' })
+    await client.put('/files/write', { path: currentPath.value + '/' + newItemName.value.trim(), content: '' })
     notifications.success(`File '${newItemName.value}' created.`)
     showNewFileModal.value = false
     newItemName.value = ''
@@ -850,7 +850,7 @@ async function compressFiles(targets) {
 async function extractFile(file) {
   try {
     await client.post('/files/extract', {
-      path: currentPath.value + '/' + file.name,
+      archive_path: currentPath.value + '/' + file.name,
       destination: currentPath.value
     })
     notifications.success('Extraction started.')
@@ -870,7 +870,7 @@ function handleDeleteSelected() {
 async function executeDelete() {
   try {
     for (const file of deleteTargets.value) {
-      await client.delete('/files', { data: { path: currentPath.value + '/' + file.name } })
+      await client.delete('/files/delete', { data: { path: currentPath.value + '/' + file.name } })
     }
     notifications.success(deleteTargets.value.length === 1 ? 'Deleted successfully.' : `${deleteTargets.value.length} items deleted.`)
     selectedFiles.value = []
@@ -897,7 +897,7 @@ async function openEditor(file) {
   editorDirty.value = false
   savingFile.value = false
   try {
-    const { data } = await client.get('/files/content', { params: { path: currentPath.value + '/' + file.name } })
+    const { data } = await client.get('/files/read', { params: { path: currentPath.value + '/' + file.name } })
     editorContent.value = typeof data === 'string' ? data : data.content || ''
   } catch {
     editorContent.value = ''
@@ -919,7 +919,7 @@ async function saveFile() {
   if (!editorFile.value) return
   savingFile.value = true
   try {
-    await client.put('/files/content', {
+    await client.put('/files/write', {
       path: currentPath.value + '/' + editorFile.value.name,
       content: editorContent.value
     })

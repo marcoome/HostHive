@@ -162,4 +162,5 @@ class ResellerService:
 
         self._db.add(branding)
         await self._db.flush()
+        await self._db.refresh(branding)
         return branding

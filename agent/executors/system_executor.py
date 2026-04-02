@@ -377,3 +377,226 @@ def run_command(cmd: str, args: list[str] | None = None) -> dict[str, Any]:
         "stdout": r.stdout,
         "stderr": r.stderr,
     }
+
+
+# ------------------------------------------------------------------
+# Start / Stop services
+# ------------------------------------------------------------------
+
+
+def start_service(name: str) -> dict[str, Any]:
+    """Start a systemd service (whitelisted only)."""
+    name = name.strip()
+    if name not in ALLOWED_SERVICES:
+        raise PermissionError(
+            f"service {name!r} is not in the allowed list: {sorted(ALLOWED_SERVICES)}"
+        )
+
+    r = subprocess.run(
+        ["systemctl", "start", name],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return {
+        "service": name,
+        "returncode": r.returncode,
+        "stdout": r.stdout,
+        "stderr": r.stderr,
+    }
+
+
+def stop_service(name: str) -> dict[str, Any]:
+    """Stop a systemd service (whitelisted only)."""
+    name = name.strip()
+    if name not in ALLOWED_SERVICES:
+        raise PermissionError(
+            f"service {name!r} is not in the allowed list: {sorted(ALLOWED_SERVICES)}"
+        )
+
+    r = subprocess.run(
+        ["systemctl", "stop", name],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return {
+        "service": name,
+        "returncode": r.returncode,
+        "stdout": r.stdout,
+        "stderr": r.stderr,
+    }
+
+
+# ------------------------------------------------------------------
+# Fail2ban enable / disable jails
+# ------------------------------------------------------------------
+
+
+def enable_fail2ban_jail(jail: str) -> dict[str, Any]:
+    """Start a fail2ban jail."""
+    if not re.match(r"^[a-zA-Z0-9_-]+$", jail):
+        raise ValueError(f"invalid jail name: {jail!r}")
+
+    r = subprocess.run(
+        ["fail2ban-client", "start", jail],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+
+
+def disable_fail2ban_jail(jail: str) -> dict[str, Any]:
+    """Stop a fail2ban jail."""
+    if not re.match(r"^[a-zA-Z0-9_-]+$", jail):
+        raise ValueError(f"invalid jail name: {jail!r}")
+
+    r = subprocess.run(
+        ["fail2ban-client", "stop", jail],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+
+
+# ------------------------------------------------------------------
+# Service logs
+# ------------------------------------------------------------------
+
+
+def get_service_logs(service: str, lines: int = 200) -> dict[str, Any]:
+    """Return the last N lines of a service's journal."""
+    service = service.strip()
+    if service not in ALLOWED_SERVICES:
+        raise PermissionError(
+            f"service {service!r} is not in the allowed list: {sorted(ALLOWED_SERVICES)}"
+        )
+
+    r = subprocess.run(
+        ["journalctl", "-u", service, "--no-pager", "-n", str(lines)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return {"stdout": r.stdout, "stderr": r.stderr}
+
+
+def tail_service_logs(service: str, lines: int = 20) -> dict[str, Any]:
+    """Return the last N lines of a service's journal (small default)."""
+    return get_service_logs(service, lines)
+
+
+# ------------------------------------------------------------------
+# Terminal execution (more permissive)
+# ------------------------------------------------------------------
+
+_TERMINAL_BLOCKLIST = [
+    "rm -rf /",
+    "reboot",
+    "shutdown",
+    "poweroff",
+    "init ",
+    "mkfs",
+    "dd if=",
+]
+
+
+def exec_terminal_command(command: str) -> dict[str, Any]:
+    """Execute a command via bash -c with a 30s timeout.
+
+    Blocks dangerous commands via a blocklist.
+    """
+    cmd_lower = command.strip().lower()
+    for blocked in _TERMINAL_BLOCKLIST:
+        if cmd_lower.startswith(blocked) or blocked in cmd_lower:
+            return {
+                "stdout": "",
+                "stderr": f"blocked: command matches dangerous pattern {blocked!r}",
+                "returncode": -1,
+            }
+
+    r = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return {
+        "stdout": r.stdout,
+        "stderr": r.stderr,
+        "returncode": r.returncode,
+    }
+
+
+# ------------------------------------------------------------------
+# File operations
+# ------------------------------------------------------------------
+
+
+def make_directory(path: str) -> dict[str, Any]:
+    """Create a directory tree. Path must be under /home/."""
+    if not path.startswith("/home/"):
+        raise PermissionError("path must start with /home/")
+    os.makedirs(path, exist_ok=True)
+    return {"path": path, "created": True}
+
+
+def rename_path(old_path: str, new_path: str) -> dict[str, Any]:
+    """Rename/move a file or directory. Both paths must be under /home/."""
+    if not old_path.startswith("/home/"):
+        raise PermissionError("old_path must start with /home/")
+    if not new_path.startswith("/home/"):
+        raise PermissionError("new_path must start with /home/")
+    os.rename(old_path, new_path)
+    return {"old_path": old_path, "new_path": new_path, "renamed": True}
+
+
+def chmod_path(path: str, permissions: str) -> dict[str, Any]:
+    """Change file permissions. Path must be under /home/."""
+    if not path.startswith("/home/"):
+        raise PermissionError("path must start with /home/")
+    if not re.match(r"^[0-7]{3,4}$", permissions):
+        raise ValueError(f"invalid permissions: {permissions!r}")
+
+    r = subprocess.run(
+        ["chmod", permissions, path],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+
+
+def compress_paths(paths: list[str], destination: str) -> dict[str, Any]:
+    """Create a tar.gz archive from paths. All paths must be under /home/."""
+    for p in paths:
+        if not p.startswith("/home/"):
+            raise PermissionError(f"path must start with /home/: {p!r}")
+    if not destination.startswith("/home/"):
+        raise PermissionError("destination must start with /home/")
+
+    r = subprocess.run(
+        ["tar", "-czf", destination] + paths,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+
+
+def extract_archive(archive_path: str, destination: str) -> dict[str, Any]:
+    """Extract a tar.gz archive. Both paths must be under /home/."""
+    if not archive_path.startswith("/home/"):
+        raise PermissionError("archive_path must start with /home/")
+    if not destination.startswith("/home/"):
+        raise PermissionError("destination must start with /home/")
+
+    r = subprocess.run(
+        ["tar", "-xzf", archive_path, "-C", destination],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}

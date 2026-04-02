@@ -38,10 +38,12 @@ export const useIntegrationsStore = defineStore('integrations', () => {
   async function toggleIntegration(name) {
     const notify = useNotificationsStore()
     try {
-      const { data } = await client.post(`/integrations/${name}/toggle`)
+      const current = integrations.value.find(i => i.name === name)
+      const newState = !(current?.is_enabled)
+      const { data } = await client.post(`/integrations/${name}/toggle`, { enabled: newState })
       const idx = integrations.value.findIndex(i => i.name === name)
       if (idx !== -1) integrations.value[idx] = data
-      notify.success(`${name} ${data.enabled ? 'enabled' : 'disabled'}`)
+      notify.success(`${name} ${data.is_enabled ? 'enabled' : 'disabled'}`)
       return data
     } catch (err) {
       notify.error(`Failed to toggle ${name}`)

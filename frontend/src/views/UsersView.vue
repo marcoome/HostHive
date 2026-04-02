@@ -295,7 +295,7 @@ async function fetchUsers() {
   loading.value = true
   try {
     const { data } = await client.get('/users')
-    users.value = data
+    users.value = data.items || data
   } catch {
     notifications.error('Failed to load users.')
   } finally {
@@ -306,7 +306,7 @@ async function fetchUsers() {
 async function fetchPackages() {
   try {
     const { data } = await client.get('/packages')
-    availablePackages.value = data
+    availablePackages.value = data.items || data
   } catch {
     // silent
   }

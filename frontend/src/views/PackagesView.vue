@@ -46,23 +46,23 @@
         <div class="space-y-3 flex-1">
           <div class="flex items-center justify-between text-sm">
             <span class="text-[var(--text-muted)]">Disk Space</span>
-            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.disk_limit === 0 ? 'Unlimited' : formatSize(pkg.disk_limit) }}</span>
+            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.disk_quota_mb === 0 ? 'Unlimited' : formatSize(pkg.disk_quota_mb) }}</span>
           </div>
           <div class="flex items-center justify-between text-sm">
             <span class="text-[var(--text-muted)]">Bandwidth</span>
-            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.bandwidth_limit === 0 ? 'Unlimited' : formatSize(pkg.bandwidth_limit) }}</span>
+            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.bandwidth_gb === 0 ? 'Unlimited' : pkg.bandwidth_gb + ' GB' }}</span>
           </div>
           <div class="flex items-center justify-between text-sm">
             <span class="text-[var(--text-muted)]">Domains</span>
-            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.domain_limit === 0 ? 'Unlimited' : pkg.domain_limit }}</span>
+            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.max_domains === 0 ? 'Unlimited' : pkg.max_domains }}</span>
           </div>
           <div class="flex items-center justify-between text-sm">
             <span class="text-[var(--text-muted)]">Databases</span>
-            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.db_limit === 0 ? 'Unlimited' : pkg.db_limit }}</span>
+            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.max_databases === 0 ? 'Unlimited' : pkg.max_databases }}</span>
           </div>
           <div class="flex items-center justify-between text-sm">
             <span class="text-[var(--text-muted)]">Email Accounts</span>
-            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.email_limit === 0 ? 'Unlimited' : pkg.email_limit }}</span>
+            <span class="text-[var(--text-primary)] font-medium font-mono">{{ pkg.max_email_accounts === 0 ? 'Unlimited' : pkg.max_email_accounts }}</span>
           </div>
         </div>
 
@@ -119,10 +119,10 @@
           <div>
             <div class="flex items-center justify-between mb-1">
               <label class="text-sm font-medium text-[var(--text-primary)]">Disk Space (MB)</label>
-              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.disk_limit === 0 ? 'Unlimited' : form.disk_limit + ' MB' }}</span>
+              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.disk_quota_mb === 0 ? 'Unlimited' : form.disk_quota_mb + ' MB' }}</span>
             </div>
             <input
-              v-model.number="form.disk_limit"
+              v-model.number="form.disk_quota_mb"
               type="range"
               min="0"
               max="102400"
@@ -138,20 +138,20 @@
           <!-- Bandwidth -->
           <div>
             <div class="flex items-center justify-between mb-1">
-              <label class="text-sm font-medium text-[var(--text-primary)]">Bandwidth (MB)</label>
-              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.bandwidth_limit === 0 ? 'Unlimited' : form.bandwidth_limit + ' MB' }}</span>
+              <label class="text-sm font-medium text-[var(--text-primary)]">Bandwidth (GB)</label>
+              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.bandwidth_gb === 0 ? 'Unlimited' : form.bandwidth_gb + ' GB' }}</span>
             </div>
             <input
-              v-model.number="form.bandwidth_limit"
+              v-model.number="form.bandwidth_gb"
               type="range"
               min="0"
-              max="1048576"
-              step="10240"
+              max="10240"
+              step="10"
               class="w-full accent-primary"
             />
             <div class="flex justify-between text-xs text-[var(--text-muted)] mt-0.5">
               <span>Unlimited</span>
-              <span>1 TB</span>
+              <span>10 TB</span>
             </div>
           </div>
 
@@ -159,10 +159,10 @@
           <div>
             <div class="flex items-center justify-between mb-1">
               <label class="text-sm font-medium text-[var(--text-primary)]">Domains</label>
-              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.domain_limit === 0 ? 'Unlimited' : form.domain_limit }}</span>
+              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.max_domains === 0 ? 'Unlimited' : form.max_domains }}</span>
             </div>
             <input
-              v-model.number="form.domain_limit"
+              v-model.number="form.max_domains"
               type="range"
               min="0"
               max="100"
@@ -179,10 +179,10 @@
           <div>
             <div class="flex items-center justify-between mb-1">
               <label class="text-sm font-medium text-[var(--text-primary)]">Databases</label>
-              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.db_limit === 0 ? 'Unlimited' : form.db_limit }}</span>
+              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.max_databases === 0 ? 'Unlimited' : form.max_databases }}</span>
             </div>
             <input
-              v-model.number="form.db_limit"
+              v-model.number="form.max_databases"
               type="range"
               min="0"
               max="100"
@@ -199,10 +199,10 @@
           <div class="sm:col-span-2">
             <div class="flex items-center justify-between mb-1">
               <label class="text-sm font-medium text-[var(--text-primary)]">Email Accounts</label>
-              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.email_limit === 0 ? 'Unlimited' : form.email_limit }}</span>
+              <span class="text-xs text-[var(--text-muted)] font-mono">{{ form.max_email_accounts === 0 ? 'Unlimited' : form.max_email_accounts }}</span>
             </div>
             <input
-              v-model.number="form.email_limit"
+              v-model.number="form.max_email_accounts"
               type="range"
               min="0"
               max="500"
@@ -258,11 +258,11 @@ const packageToDelete = ref(null)
 const defaultForm = {
   name: '',
   price_monthly: 0,
-  disk_limit: 10240,
-  bandwidth_limit: 102400,
-  domain_limit: 10,
-  db_limit: 5,
-  email_limit: 20
+  disk_quota_mb: 10240,
+  bandwidth_gb: 100,
+  max_domains: 10,
+  max_databases: 5,
+  max_email_accounts: 20
 }
 
 const form = ref({ ...defaultForm })
@@ -277,7 +277,7 @@ async function fetchPackages() {
   loading.value = true
   try {
     const { data } = await client.get('/packages')
-    packages.value = data
+    packages.value = data.items || data
   } catch {
     notifications.error('Failed to load packages.')
   } finally {
@@ -296,11 +296,11 @@ function openEditModal(pkg) {
   form.value = {
     name: pkg.name,
     price_monthly: pkg.price_monthly || 0,
-    disk_limit: pkg.disk_limit || 0,
-    bandwidth_limit: pkg.bandwidth_limit || 0,
-    domain_limit: pkg.domain_limit || 0,
-    db_limit: pkg.db_limit || 0,
-    email_limit: pkg.email_limit || 0
+    disk_quota_mb: pkg.disk_quota_mb || 0,
+    bandwidth_gb: pkg.bandwidth_gb || 0,
+    max_domains: pkg.max_domains || 0,
+    max_databases: pkg.max_databases || 0,
+    max_email_accounts: pkg.max_email_accounts || 0
   }
   showModal.value = true
 }

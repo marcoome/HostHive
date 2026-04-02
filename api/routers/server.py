@@ -104,7 +104,7 @@ async def list_services(
 ):
     agent = request.app.state.agent
     try:
-        result = await agent._request("GET", "/services")
+        result = await agent._request("GET", "/system/services")
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -137,6 +137,56 @@ async def restart_service(
 
 
 # --------------------------------------------------------------------------
+# POST /services/{name}/start
+# --------------------------------------------------------------------------
+@router.post("/services/{service_name}/start", status_code=status.HTTP_200_OK)
+async def start_service(
+    service_name: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent._request(
+            "POST", "/system/service/restart",
+            json_body={"name": service_name, "action": "start"},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error starting {service_name}: {exc}",
+        )
+    _log(db, request, admin.id, "server.start_service", f"Started service {service_name}")
+    return result
+
+
+# --------------------------------------------------------------------------
+# POST /services/{name}/stop
+# --------------------------------------------------------------------------
+@router.post("/services/{service_name}/stop", status_code=status.HTTP_200_OK)
+async def stop_service(
+    service_name: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent._request(
+            "POST", "/system/service/restart",
+            json_body={"name": service_name, "action": "stop"},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error stopping {service_name}: {exc}",
+        )
+    _log(db, request, admin.id, "server.stop_service", f"Stopped service {service_name}")
+    return result
+
+
+# --------------------------------------------------------------------------
 # Firewall
 # --------------------------------------------------------------------------
 
@@ -147,7 +197,7 @@ async def firewall_rules(
 ):
     agent = request.app.state.agent
     try:
-        result = await agent._request("GET", "/firewall/rules")
+        result = await agent._request("GET", "/system/firewall")
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -206,7 +256,7 @@ async def fail2ban_jails(
 ):
     agent = request.app.state.agent
     try:
-        result = await agent._request("GET", "/fail2ban/jails")
+        result = await agent._request("GET", "/system/fail2ban")
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -226,7 +276,7 @@ async def fail2ban_unban(
     try:
         result = await agent._request(
             "POST",
-            "/fail2ban/unban",
+            "/system/fail2ban/unban",
             json_body={"ip": ip},
         )
     except Exception as exc:
@@ -236,6 +286,56 @@ async def fail2ban_unban(
         )
 
     _log(db, request, admin.id, "server.fail2ban_unban", f"Unbanned IP {ip}")
+    return result
+
+
+# --------------------------------------------------------------------------
+# POST /fail2ban/{jail}/enable
+# --------------------------------------------------------------------------
+@router.post("/fail2ban/{jail_name}/enable", status_code=status.HTTP_200_OK)
+async def fail2ban_enable_jail(
+    jail_name: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent._request(
+            "POST", "/system/fail2ban/enable",
+            json_body={"jail": jail_name},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error enabling jail {jail_name}: {exc}",
+        )
+    _log(db, request, admin.id, "server.fail2ban_enable", f"Enabled jail {jail_name}")
+    return result
+
+
+# --------------------------------------------------------------------------
+# POST /fail2ban/{jail}/disable
+# --------------------------------------------------------------------------
+@router.post("/fail2ban/{jail_name}/disable", status_code=status.HTTP_200_OK)
+async def fail2ban_disable_jail(
+    jail_name: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent._request(
+            "POST", "/system/fail2ban/disable",
+            json_body={"jail": jail_name},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error disabling jail {jail_name}: {exc}",
+        )
+    _log(db, request, admin.id, "server.fail2ban_disable", f"Disabled jail {jail_name}")
     return result
 
 
@@ -253,7 +353,7 @@ async def service_logs(
     try:
         result = await agent._request(
             "GET",
-            f"/logs/{service}",
+            f"/system/logs/{service}",
             params={"lines": lines},
         )
     except Exception as exc:
@@ -336,7 +436,7 @@ async def ws_log_stream(websocket: WebSocket, service: str):
             try:
                 result = await agent._request(
                     "GET",
-                    f"/logs/{service}/tail",
+                    f"/system/logs/{service}/tail",
                     params={"lines": 20},
                 )
                 await websocket.send_json(result)

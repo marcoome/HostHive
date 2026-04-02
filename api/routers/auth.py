@@ -195,7 +195,7 @@ async def forgot_password(
         new_password = secrets.token_urlsafe(12)
         user.password_hash = hash_password(new_password)
         db.add(user)
-        logger.info("Password reset for user=%s email=%s new_password=%s", user.username, user.email, new_password)
+        logger.info("Password reset for user=%s email=%s", user.username, user.email)
         # TODO: Send email with new_password via notification service
 
     # Always return 200 to prevent email enumeration
