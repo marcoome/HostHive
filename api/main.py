@@ -33,6 +33,30 @@ limiter = Limiter(
 # Lifespan: start-up / shutdown
 # ---------------------------------------------------------------------------
 
+async def _ensure_admin_user() -> None:
+    """Create the initial admin account if it doesn't exist yet."""
+    from api.core.database import async_session_factory
+    from api.core.security import hash_password
+    from api.models.users import User, UserRole
+    from sqlalchemy import select
+
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(User).where(User.role == UserRole.ADMIN).limit(1)
+        )
+        if result.scalar_one_or_none() is not None:
+            return  # admin already exists
+
+        admin = User(
+            username=settings.admin_username or "admin",
+            email=f"{settings.admin_username or 'admin'}@localhost",
+            password_hash=hash_password(settings.admin_password or "changeme"),
+            role=UserRole.ADMIN,
+            is_active=True,
+        )
+        session.add(admin)
+        await session.commit()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -46,7 +70,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Agent client
     app.state.agent = AgentClient()
 
-    # (Tables are managed by Alembic; we do NOT call create_all here.)
+    # Create tables if they don't exist yet (first run)
+    from api.models import *  # noqa: F401,F403  — ensure all models are registered
+    from api.core.database import Base as _Base
+    async with engine.begin() as conn:
+        await conn.run_sync(_Base.metadata.create_all)
+
+    # Create initial admin user if not exists
+    await _ensure_admin_user()
 
     yield
 
