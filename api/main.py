@@ -25,28 +25,47 @@ from api.core.reseller_middleware import ResellerBrandingMiddleware
 # ---------------------------------------------------------------------------
 
 async def _ensure_admin_user() -> None:
-    """Create the initial admin account if it doesn't exist yet."""
+    """Create or update the admin account to match secrets.env credentials."""
     from api.core.database import async_session_factory
-    from api.core.security import hash_password
+    from api.core.security import hash_password, verify_password
     from api.models.users import User, UserRole
     from sqlalchemy import select
+    import logging
+    _log = logging.getLogger("hosthive.startup")
+
+    admin_username = settings.admin_username or "admin"
+    admin_password = settings.admin_password or "changeme"
+    admin_email = settings.admin_email or f"{admin_username}@localhost"
 
     async with async_session_factory() as session:
         result = await session.execute(
             select(User).where(User.role == UserRole.ADMIN).limit(1)
         )
-        if result.scalar_one_or_none() is not None:
-            return  # admin already exists
+        existing = result.scalar_one_or_none()
+
+        if existing is not None:
+            # Update password if it doesn't match (handles reinstall with new secrets)
+            if not verify_password(admin_password, existing.password_hash):
+                existing.password_hash = hash_password(admin_password)
+                existing.username = admin_username
+                existing.email = admin_email
+                existing.is_active = True
+                existing.is_suspended = False
+                session.add(existing)
+                await session.commit()
+                _log.info("Admin password updated to match secrets.env")
+            return
 
         admin = User(
-            username=settings.admin_username or "admin",
-            email=settings.admin_email or f"{settings.admin_username or 'admin'}@localhost",
-            password_hash=hash_password(settings.admin_password or "changeme"),
+            username=admin_username,
+            email=admin_email,
+            password_hash=hash_password(admin_password),
             role=UserRole.ADMIN,
             is_active=True,
         )
         session.add(admin)
         await session.commit()
+        _log.info("Admin user '%s' created.", admin_username)
 
 
 @asynccontextmanager
