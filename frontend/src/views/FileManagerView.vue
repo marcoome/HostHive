@@ -678,7 +678,7 @@ async function fetchFiles() {
   loadingFiles.value = true
   try {
     const { data } = await client.get('/files/list', { params: { path: currentPath.value } })
-    files.value = data.files || data || []
+    files.value = Array.isArray(data?.items) ? data.items : Array.isArray(data?.files) ? data.files : Array.isArray(data) ? data : []
   } catch (err) {
     notifications.error('Failed to load directory.')
     files.value = []

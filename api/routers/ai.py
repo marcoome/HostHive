@@ -946,7 +946,7 @@ class AiTestRequest(BaseModel):
 @router.post("/test-connection", status_code=status.HTTP_200_OK)
 async def test_ai_connection(
     body: AiTestRequest = AiTestRequest(),
-    admin: User = Depends(_admin),
+    current_user: User = Depends(get_current_user),
 ):
     """Test AI provider connection using credentials from the request body."""
     if not body.api_key:
@@ -991,4 +991,5 @@ async def test_ai_connection(
         else:
             return {"status": "error", "message": f"Unknown provider: {body.provider}"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.error("AI test-connection failed: %s", e)
+        return {"status": "error", "message": f"Connection failed: {e}"}
