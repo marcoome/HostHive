@@ -249,7 +249,7 @@ ADMIN_PASSWORD=${ADMIN_PASSWORD}
 
 # ── Network ──
 SERVER_IP=${SERVER_IP}
-PANEL_PORT=8083
+PANEL_PORT=8443
 SECRETS
 
 chmod 600 "${CONFIG_DIR}/secrets.env"
@@ -356,8 +356,8 @@ else
     cat > /etc/nginx/sites-available/hosthive << 'NGINX_CONF'
 # HostHive Panel — Nginx Configuration
 server {
-    listen 8083 ssl http2;
-    listen [::]:8083 ssl http2;
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name _;
 
     ssl_certificate /etc/ssl/hosthive/panel.crt;
@@ -416,7 +416,7 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t >> "$LOG_FILE" 2>&1 || warn "Nginx config test failed, check log"
 systemctl enable --now nginx >> "$LOG_FILE" 2>&1
 systemctl reload nginx >> "$LOG_FILE" 2>&1
-success "Nginx configured on port 8083"
+success "Nginx configured on HTTPS port 8443"
 
 # ─── Step 11: Install systemd services ───
 step 11 $TOTAL_STEPS "Creating systemd services"
@@ -443,7 +443,7 @@ step 12 $TOTAL_STEPS "Configuring firewall & security"
 ufw --force reset >> "$LOG_FILE" 2>&1
 ufw default deny incoming >> "$LOG_FILE" 2>&1
 ufw default allow outgoing >> "$LOG_FILE" 2>&1
-for port in 22 80 443 8083 21 25 587 993 110 995 53 3306; do
+for port in 22 80 443 8443 21 25 587 993 110 995 53 3306; do
     ufw allow "$port" >> "$LOG_FILE" 2>&1
 done
 ufw --force enable >> "$LOG_FILE" 2>&1
@@ -453,7 +453,7 @@ success "UFW firewall configured"
 cat > /etc/fail2ban/jail.d/hosthive.conf << 'F2B'
 [hosthive-auth]
 enabled = true
-port = 8083
+port = 8443
 filter = hosthive-auth
 logpath = /opt/hosthive/logs/api.log
 maxretry = 5
@@ -512,7 +512,7 @@ echo -e "  ${GREEN}${BOLD}║   ${WHITE}✓ HostHive installed successfully!${GR
 echo -e "  ${GREEN}${BOLD}║                                                              ║${NC}"
 echo -e "  ${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  ${WHITE}${BOLD}Panel URL:${NC}     https://${SERVER_IP}:8083"
+echo -e "  ${WHITE}${BOLD}Panel URL:${NC}     https://${SERVER_IP}:8443"
 echo -e "  ${WHITE}${BOLD}Username:${NC}      admin"
 echo -e "  ${WHITE}${BOLD}Password:${NC}      ${ADMIN_PASSWORD}"
 echo ""
