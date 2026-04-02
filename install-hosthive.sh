@@ -17,7 +17,8 @@
 #     curl -fsSL https://get.hosthive.io/install.sh | sudo bash
 #
 #======================================================================
-set -euo pipefail
+set -uo pipefail
+# Note: NOT using set -e because many optional steps may fail gracefully
 
 # ─── Colors & formatting ───
 RED='\033[0;31m'

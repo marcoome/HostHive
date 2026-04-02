@@ -5,8 +5,6 @@
 #   Usage:
 #     bash <(curl -sSL https://raw.githubusercontent.com/marcoome/HostHive/main/install.sh)
 #     — or —
-#     wget -qO- https://raw.githubusercontent.com/marcoome/HostHive/main/install.sh | bash
-#     — or —
 #     curl -fsSL https://raw.githubusercontent.com/marcoome/HostHive/main/install.sh | bash
 #======================================================================
 set -euo pipefail
@@ -21,7 +19,7 @@ echo ""
 
 # Must be root
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}Error: Run as root:${NC} curl -fsSL https://raw.githubusercontent.com/marcoome/HostHive/main/install.sh | bash"
+    echo -e "${RED}Error: Run as root${NC}"
     exit 1
 fi
 
@@ -31,7 +29,7 @@ if ! command -v git &>/dev/null; then
     apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq git >/dev/null 2>&1
 fi
 
-# Install curl if missing (needed by installer for NodeSource)
+# Install curl if missing
 if ! command -v curl &>/dev/null; then
     echo -e "  ${DIM}Installing curl...${NC}"
     apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1
@@ -52,6 +50,6 @@ fi
 echo -e "  ${GREEN}✓${NC} Source code ready"
 echo ""
 
-# Run main installer
+# Run main installer from file (not piped) so it works with curl | bash
 cd "$INSTALL_DIR"
-exec bash install-hosthive.sh "$@"
+bash "${INSTALL_DIR}/install-hosthive.sh" "$@"
