@@ -75,11 +75,14 @@ class AIClient:
         model: str | None = None,
         base_url: str | None = None,
     ) -> None:
-        if provider not in SUPPORTED_MODELS:
-            raise ValueError(f"Unsupported provider: {provider}")
+        # Accept any provider - map unknown to openai-compatible
+        known = ("openai", "anthropic", "ollama", "openrouter")
+        if provider not in known:
+            logger.warning("Unknown provider '%s', treating as openai-compatible", provider)
+            provider = "openai"
         self.provider = provider
         self.api_key = api_key
-        self.model = model or SUPPORTED_MODELS[provider][0]
+        self.model = model or SUPPORTED_MODELS.get(provider, ["gpt-4o"])[0]
         self.base_url = base_url
         self._http = httpx.AsyncClient(timeout=_TIMEOUT)
 
