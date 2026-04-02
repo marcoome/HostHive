@@ -680,7 +680,7 @@ async def install_app_endpoint(
 @router.get("/settings", status_code=status.HTTP_200_OK)
 async def get_settings(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(select(AiSettings).limit(1))
     ai_settings = result.scalar_one_or_none()
