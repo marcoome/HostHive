@@ -111,12 +111,17 @@ async def create_zone(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Zone already exists.")
 
     agent = request.app.state.agent
+    agent_ok = True
     try:
         await agent.create_zone(zone_name)
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error creating zone: {exc}",
+        # Log the agent error but still create the zone record in the database.
+        # The zone can be synced to the agent later.
+        agent_ok = False
+        import logging
+        logging.getLogger("hosthive.dns").warning(
+            "Agent error creating zone %s (will create DB record anyway): %s",
+            zone_name, exc,
         )
 
     zone = DnsZone(
@@ -128,7 +133,15 @@ async def create_zone(
     await db.flush()
 
     _log(db, request, current_user.id, "dns.create_zone", f"Created zone {zone_name}")
-    return DnsZoneResponse.model_validate(zone)
+
+    response = DnsZoneResponse.model_validate(zone)
+    # If agent failed, still return 201 but include a warning
+    if not agent_ok:
+        return {
+            **response.model_dump(mode="json"),
+            "warning": "Zone created in database but agent provisioning failed. It may need manual sync.",
+        }
+    return response
 
 
 @router.get("/zones/{zone_id}", response_model=DnsZoneDetailResponse, status_code=status.HTTP_200_OK)

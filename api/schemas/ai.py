@@ -99,7 +99,7 @@ class AiSettingsUpdate(BaseModel):
     base_url: Optional[str] = None
     auto_fix_enabled: Optional[bool] = None
     log_analysis_interval: Optional[str] = Field(
-        default=None, pattern=r"^(1h|6h|12h|daily)$",
+        default=None, pattern=r"^(1h|6h|12h|daily|disabled)$",
     )
     max_tokens_per_request: Optional[int] = Field(default=None, ge=100, le=8000)
     is_enabled: Optional[bool] = None

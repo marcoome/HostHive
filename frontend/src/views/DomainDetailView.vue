@@ -335,7 +335,7 @@ const store = useDomainsStore()
 const auth = useAuthStore()
 const notifications = useNotificationsStore()
 
-const phpVersions = ['8.2', '8.1', '8.0', '7.4']
+const phpVersions = ['8.5', '8.4', '8.3', '8.2', '8.1', '8.0', '7.4']
 
 const tabs = [
   { key: 'overview', label: 'Overview' },
@@ -441,7 +441,7 @@ async function fetchStats() {
 async function issueSSL() {
   issuingSSL.value = true
   try {
-    await client.post(`/domains/${route.params.id}/ssl/issue`)
+    await client.post(`/ssl/issue/${route.params.id}`)
     notifications.success('SSL certificate issued successfully.')
     await store.fetchOne(route.params.id)
   } catch (err) {
@@ -453,7 +453,7 @@ async function issueSSL() {
 
 async function uploadCert() {
   try {
-    await client.post(`/domains/${route.params.id}/ssl/upload`, certForm.value)
+    await client.post(`/ssl/install/${route.params.id}`, certForm.value)
     notifications.success('Certificate uploaded successfully.')
     showUploadCert.value = false
     certForm.value = { certificate: '', private_key: '' }
@@ -465,7 +465,7 @@ async function uploadCert() {
 
 function toggleAutoRenew() {
   autoRenew.value = !autoRenew.value
-  client.put(`/domains/${route.params.id}/ssl/auto-renew`, { enabled: autoRenew.value })
+  client.put(`/ssl/auto-renew/${route.params.id}`, { enabled: autoRenew.value })
     .then(() => notifications.success(`Auto-renew ${autoRenew.value ? 'enabled' : 'disabled'}.`))
     .catch(() => {
       autoRenew.value = !autoRenew.value

@@ -191,7 +191,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAiStore } from '@/stores/ai'
 import { useNotificationsStore } from '@/stores/notifications'
 import client from '@/api/client'
@@ -207,7 +207,7 @@ const conversationCount = ref(0)
 
 const form = ref({
   provider: 'openai',
-  model: 'gpt-4',
+  model: 'gpt-4o',
   apiKey: '',
   baseUrl: 'http://localhost:11434',
   autoFix: false,
@@ -222,12 +222,33 @@ const providers = [
 ]
 
 const modelsByProvider = {
-  openai: ['gpt-4', 'gpt-4-turbo', 'gpt-4o', 'gpt-3.5-turbo'],
-  anthropic: ['claude-3-opus', 'claude-3-sonnet', 'claude-3-haiku', 'claude-3.5-sonnet'],
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+  anthropic: ['claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-opus-4-20250514'],
   ollama: ['llama3', 'llama3.1', 'mistral', 'codellama', 'phi3', 'gemma2']
 }
 
-const filteredModels = computed(() => modelsByProvider[form.value.provider] || [])
+const fetchedModels = ref([])
+const fetchingModels = ref(false)
+
+const filteredModels = computed(() => {
+  if (fetchedModels.value.length > 0) return fetchedModels.value
+  return modelsByProvider[form.value.provider] || []
+})
+
+async function fetchModels() {
+  fetchingModels.value = true
+  try {
+    const { data } = await client.get('/ai/models')
+    if (data.models && data.models.length > 0) {
+      fetchedModels.value = data.models.map(m => m.id || m)
+    }
+  } catch {
+    // Fall back to hardcoded list
+    fetchedModels.value = []
+  } finally {
+    fetchingModels.value = false
+  }
+}
 
 const totalTokens = computed(() => tokenUsage.value.reduce((sum, d) => sum + d.tokens, 0))
 const avgTokensPerDay = computed(() => {
@@ -263,11 +284,25 @@ async function save() {
   await ai.updateSettings(form.value)
 }
 
+// When the provider changes, clear fetched models and reset model selection
+watch(() => form.value.provider, (newProvider) => {
+  fetchedModels.value = []
+  const defaults = modelsByProvider[newProvider]
+  if (defaults && defaults.length > 0) {
+    form.value.model = defaults[0]
+  }
+  // Try to fetch fresh models from the backend
+  fetchModels()
+})
+
 onMounted(async () => {
   try {
     await ai.fetchSettings()
     form.value = { ...ai.settings }
   } catch {}
+
+  // Try to auto-fetch models from backend
+  fetchModels()
 
   try {
     const { data } = await client.get('/ai/usage')

@@ -409,6 +409,12 @@ async def compose_deploy_alias(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Check Docker availability with graceful fallback
+    try:
+        _check_docker_available()
+    except HTTPException:
+        return {"detail": "Docker not available", "project_name": None, "containers": []}
+
     # Normalise payload: frontend sends {yaml} while backend expects {compose_yaml, project_name}
     compose_yaml = body.get("yaml") or body.get("compose_yaml") or ""
     project_name = body.get("project_name") or "compose-project"

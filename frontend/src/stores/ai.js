@@ -9,7 +9,7 @@ export const useAiStore = defineStore('ai', () => {
   const insights = ref([])
   const settings = ref({
     provider: 'openai',
-    model: 'gpt-4',
+    model: 'gpt-4o',
     apiKey: '',
     baseUrl: 'http://localhost:11434',
     autoFix: false,
@@ -135,7 +135,19 @@ export const useAiStore = defineStore('ai', () => {
   }
 
   async function updateSettings(newSettings) {
-    const { data } = await client.put('/ai/settings', newSettings)
+    // Map frontend camelCase keys to backend snake_case keys
+    const payload = {}
+    if (newSettings.provider !== undefined) payload.provider = newSettings.provider
+    if (newSettings.model !== undefined) payload.model = newSettings.model
+    if (newSettings.apiKey !== undefined) payload.api_key = newSettings.apiKey
+    if (newSettings.baseUrl !== undefined) payload.base_url = newSettings.baseUrl
+    if (newSettings.autoFix !== undefined) payload.auto_fix_enabled = newSettings.autoFix
+    if (newSettings.logAnalysisInterval !== undefined) payload.log_analysis_interval = newSettings.logAnalysisInterval
+    if (newSettings.tokenLimit !== undefined) payload.max_tokens_per_request = newSettings.tokenLimit
+    // Also pass is_enabled = true when saving settings with an API key
+    if (payload.api_key) payload.is_enabled = true
+
+    const { data } = await client.put('/ai/settings', payload)
     settings.value = { ...settings.value, ...data }
     const notify = useNotificationsStore()
     notify.success('AI settings updated')

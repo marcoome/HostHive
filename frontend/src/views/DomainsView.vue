@@ -167,7 +167,7 @@ const store = useDomainsStore()
 const auth = useAuthStore()
 const notifications = useNotificationsStore()
 
-const phpVersions = ['8.2', '8.1', '8.0', '7.4']
+const phpVersions = ['8.5', '8.4', '8.3', '8.2', '8.1', '8.0', '7.4']
 
 const columns = [
   { key: 'name', label: 'Domain' },
