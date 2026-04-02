@@ -557,12 +557,12 @@ async def database_sso(
                 detail=f"Could not reset database password for SSO: {exc}",
             )
 
-    # Generate one-time token stored in Redis (expires 30s)
+    # Generate one-time token stored in Redis (expires 120s)
     token = secrets.token_urlsafe(32)
     redis = request.app.state.redis
     await redis.setex(
         f"hosthive:pma_sso:{token}",
-        30,
+        120,
         _json.dumps({
             "user": record.db_user,
             "password": password,

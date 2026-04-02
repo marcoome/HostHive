@@ -9,18 +9,20 @@ if (empty($token) || !preg_match('/^[A-Za-z0-9_-]+$/', $token)) {
     die('Invalid or missing SSO token.');
 }
 
-// Connect to Redis
+// Connect to Redis with auth
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 
-// Auth Redis with password from secrets
 $secretsFile = '/opt/hosthive/config/secrets.env';
 if (file_exists($secretsFile)) {
-    $contents = file_get_contents($secretsFile);
-    if (preg_match('/REDIS_PASSWORD=(.+)/', $contents, $matches)) {
-        $redisPass = trim($matches[1]);
-        if (!empty($redisPass)) {
-            try { $redis->auth($redisPass); } catch (Exception $e) {}
+    $lines = file($secretsFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos($line, 'REDIS_PASSWORD=') === 0) {
+            $redisPass = substr($line, strlen('REDIS_PASSWORD='));
+            if (!empty($redisPass)) {
+                $redis->auth($redisPass);
+            }
+            break;
         }
     }
 }
