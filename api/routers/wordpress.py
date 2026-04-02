@@ -86,6 +86,18 @@ def _check_domain_access(domain: str, current_user: User) -> None:
 
 
 # ---------------------------------------------------------------------------
+# GET /installs — alias for frontend compatibility
+# ---------------------------------------------------------------------------
+
+@router.get("/installs", status_code=status.HTTP_200_OK)
+async def list_wp_installs_alias(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    return await list_wordpress_installs(request=request, current_user=current_user)
+
+
+# ---------------------------------------------------------------------------
 # GET / — list detected WordPress installations
 # ---------------------------------------------------------------------------
 
@@ -333,13 +345,3 @@ async def wp_security_check(
     return WPSecurityReport(**report)
 
 
-# ---------------------------------------------------------------------------
-# Alias routes for frontend compatibility
-# ---------------------------------------------------------------------------
-
-@router.get("/installs", status_code=status.HTTP_200_OK)
-async def list_wp_installs_alias(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-):
-    return await list_wordpress_installs(request=request, current_user=current_user)

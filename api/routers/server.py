@@ -343,32 +343,7 @@ async def fail2ban_disable_jail(
 
 
 # --------------------------------------------------------------------------
-# GET /logs -- query param variant for frontend compatibility
-# --------------------------------------------------------------------------
-@router.get("/logs", status_code=status.HTTP_200_OK)
-async def get_service_logs_query(
-    service: str = Query(...),
-    lines: int = Query(200, ge=1, le=1000),
-    request: Request = None,
-    admin: User = Depends(_admin),
-):
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
-            "GET",
-            f"/system/logs/{service}",
-            params={"lines": lines},
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error fetching logs: {exc}",
-        )
-    return result
-
-
-# --------------------------------------------------------------------------
-# GET /logs/{service} -- last 200 lines via agent
+# GET /logs/{service} -- last N lines via agent (path param)
 # --------------------------------------------------------------------------
 @router.get("/logs/{service}", status_code=status.HTTP_200_OK)
 async def service_logs(
@@ -384,12 +359,22 @@ async def service_logs(
             f"/system/logs/{service}",
             params={"lines": lines},
         )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error fetching logs: {exc}",
-        )
+    except Exception:
+        return {"lines": [], "service": service, "_agent_down": True}
     return result
+
+
+# --------------------------------------------------------------------------
+# GET /logs -- query param variant for frontend compatibility
+# --------------------------------------------------------------------------
+@router.get("/logs", status_code=status.HTTP_200_OK)
+async def get_service_logs_query(
+    service: str = Query(...),
+    lines: int = Query(200, ge=1, le=1000),
+    request: Request = None,
+    admin: User = Depends(_admin),
+):
+    return await service_logs(service=service, lines=lines, request=request, admin=admin)
 
 
 # --------------------------------------------------------------------------
