@@ -6,12 +6,12 @@ Wants=postgresql.service redis-server.service
 
 [Service]
 Type=simple
-User=novapanel
-Group=novapanel
-WorkingDirectory=/opt/novapanel
-EnvironmentFile=/opt/novapanel/config/secrets.env
+User=hosthive
+Group=hosthive
+WorkingDirectory=/opt/hosthive
+EnvironmentFile=/opt/hosthive/config/secrets.env
 
-ExecStart=/opt/novapanel/venv/bin/uvicorn \
+ExecStart=/opt/hosthive/venv/bin/uvicorn \
     app.main:app \
     --host 127.0.0.1 \
     --port 8000 \
@@ -26,7 +26,7 @@ RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/novapanel /var/log/novapanel
+ReadWritePaths=/opt/hosthive /var/log/hosthive
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -35,7 +35,7 @@ ProtectControlGroups=true
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=novapanel-api
+SyslogIdentifier=hosthive-api
 
 [Install]
 WantedBy=multi-user.target

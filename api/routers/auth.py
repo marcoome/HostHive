@@ -34,7 +34,7 @@ from api.schemas.users import UserResponse
 
 router = APIRouter()
 
-_REFRESH_PREFIX = "novapanel:refresh:"
+_REFRESH_PREFIX = "hosthive:refresh:"
 
 
 # --------------------------------------------------------------------------

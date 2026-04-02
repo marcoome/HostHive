@@ -50,7 +50,7 @@ logger = logging.getLogger("hosthive.ai.router")
 
 router = APIRouter()
 
-_RATE_LIMIT_PREFIX = "novapanel:ai:ratelimit:"
+_RATE_LIMIT_PREFIX = "hosthive:ai:ratelimit:"
 _RATE_LIMIT_MAX = 20  # requests per minute
 _RATE_LIMIT_WINDOW = 60  # seconds
 

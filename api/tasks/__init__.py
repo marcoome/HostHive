@@ -11,9 +11,9 @@ from celery import Celery
 from api.core.config import settings
 
 # ---------------------------------------------------------------------------
-# Logging setup -- all worker output goes to /opt/novapanel/logs/worker.log
+# Logging setup -- all worker output goes to /opt/hosthive/logs/worker.log
 # ---------------------------------------------------------------------------
-_LOG_DIR = Path("/opt/novapanel/logs")
+_LOG_DIR = Path("/opt/hosthive/logs")
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _log_handler = logging.FileHandler(_LOG_DIR / "worker.log")

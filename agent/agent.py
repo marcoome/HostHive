@@ -2,9 +2,9 @@
 HostHive Root Agent — FastAPI daemon bound to 127.0.0.1:7080.
 
 Accepts only localhost connections.  Every request is authenticated via
-HMAC-SHA256 (shared secret loaded from /opt/novapanel/config/secrets.env).
+HMAC-SHA256 (shared secret loaded from /opt/hosthive/config/secrets.env).
 
-Structured JSON logging goes to /opt/novapanel/logs/agent.log.
+Structured JSON logging goes to /opt/hosthive/logs/agent.log.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from api.core.middleware import IPWhitelistMiddleware
 # Configuration
 # ---------------------------------------------------------------------------
 
-SECRETS_FILE = Path("/opt/novapanel/config/secrets.env")
-LOG_FILE = Path("/opt/novapanel/logs/agent.log")
+SECRETS_FILE = Path("/opt/hosthive/config/secrets.env")
+LOG_FILE = Path("/opt/hosthive/logs/agent.log")
 BIND_HOST = "127.0.0.1"
 BIND_PORT = 7080
 
@@ -42,7 +42,7 @@ BIND_PORT = 7080
 def _setup_logging() -> logging.Logger:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    logger = logging.getLogger("novapanel.agent")
+    logger = logging.getLogger("hosthive.agent")
     logger.setLevel(logging.INFO)
 
     # JSON formatter
@@ -80,11 +80,11 @@ def _load_secret() -> str:
     """Read AGENT_SECRET from secrets.env (KEY=VALUE format)."""
     if not SECRETS_FILE.exists():
         log.warning("secrets file not found at %s — using fallback", SECRETS_FILE)
-        fallback = os.environ.get("NOVAPANEL_AGENT_SECRET", "")
+        fallback = os.environ.get("HOSTHIVE_AGENT_SECRET", "")
         if not fallback:
             raise RuntimeError(
                 f"No shared secret: {SECRETS_FILE} missing and "
-                "NOVAPANEL_AGENT_SECRET env var not set"
+                "HOSTHIVE_AGENT_SECRET env var not set"
             )
         return fallback
 

@@ -27,7 +27,7 @@ from api.models.integrations import Integration, IntegrationName
 from api.models.packages import Package
 from api.models.users import User, UserRole
 
-logger = logging.getLogger("novapanel.billing")
+logger = logging.getLogger("hosthive.billing")
 
 router = APIRouter()
 

@@ -18,7 +18,7 @@ from api.models.backups import Backup
 from api.models.domains import Domain
 from api.models.users import User
 
-logger = logging.getLogger("novapanel.metrics")
+logger = logging.getLogger("hosthive.metrics")
 
 router = APIRouter()
 

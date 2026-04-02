@@ -72,8 +72,8 @@ __version__ = "1.0.0"
 # Configuration
 # ---------------------------------------------------------------------------
 
-SECRETS_FILE = Path("/opt/novapanel/config/secrets.env")
-CONFIG_FILE = Path("/opt/novapanel/config/cli.env")
+SECRETS_FILE = Path("/opt/hosthive/config/secrets.env")
+CONFIG_FILE = Path("/opt/hosthive/config/cli.env")
 API_BASE = "http://127.0.0.1:8000/api/v1"
 
 # ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ def _request(
             sys.exit(1)
     except URLError as exc:
         _err(f"Cannot connect to API at {API_BASE}: {exc.reason}")
-        _err("Is the HostHive API running?  (systemctl status novapanel-api)")
+        _err("Is the HostHive API running?  (systemctl status hosthive-api)")
         sys.exit(1)
 
 
@@ -803,7 +803,7 @@ def cmd_update(_args: argparse.Namespace) -> None:
     api_version = resp.get("version", "unknown")
     print(f"  CLI version: {__version__}")
     print(f"  API version: {api_version}")
-    _info("To update HostHive, run: apt update && apt upgrade novapanel")
+    _info("To update HostHive, run: apt update && apt upgrade hosthive")
     _info("Or pull the latest from the repository.")
 
 

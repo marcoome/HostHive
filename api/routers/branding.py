@@ -20,7 +20,7 @@ _admin = require_role("admin")
 
 # Writable branding config path
 _BRANDING_PATHS = [
-    Path("/opt/novapanel/config/branding.json"),
+    Path("/opt/hosthive/config/branding.json"),
     Path(__file__).resolve().parent.parent.parent / "config" / "branding.json",
 ]
 

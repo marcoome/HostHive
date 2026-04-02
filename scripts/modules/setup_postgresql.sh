@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 ###############################################################################
 # HostHive — PostgreSQL Setup Module
-# Creates the novapanel database and user. Idempotent.
+# Creates the hosthive database and user. Idempotent.
 ###############################################################################
 set -euo pipefail
 
-SECRETS_FILE="/opt/novapanel/config/secrets.env"
+SECRETS_FILE="/opt/hosthive/config/secrets.env"
 
 if [[ ! -f "${SECRETS_FILE}" ]]; then
     echo "[PostgreSQL] ERROR: Secrets file not found at ${SECRETS_FILE}" >&2
@@ -15,8 +15,8 @@ fi
 # shellcheck disable=SC1090
 source "${SECRETS_FILE}"
 
-DB_NAME="${DB_NAME:-novapanel}"
-DB_USER="${DB_USER:-novapanel}"
+DB_NAME="${DB_NAME:-hosthive}"
+DB_USER="${DB_USER:-hosthive}"
 DB_PASSWORD="${DB_PASSWORD:?DB_PASSWORD must be set in secrets.env}"
 
 echo "[PostgreSQL] Configuring PostgreSQL..."
@@ -55,9 +55,9 @@ fi
 sudo -u postgres psql -c \
     "GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};" >/dev/null
 
-# ─── Ensure local md5 auth for the novapanel user ───────────────────────────
+# ─── Ensure local md5 auth for the hosthive user ───────────────────────────
 PG_HBA=$(sudo -u postgres psql -tAc "SHOW hba_file;" | tr -d ' ')
-if [[ -n "${PG_HBA}" ]] && ! grep -q "novapanel" "${PG_HBA}" 2>/dev/null; then
+if [[ -n "${PG_HBA}" ]] && ! grep -q "hosthive" "${PG_HBA}" 2>/dev/null; then
     # Insert a host rule before the first generic local entry
     echo "# HostHive database access" >> "${PG_HBA}"
     echo "host    ${DB_NAME}    ${DB_USER}    127.0.0.1/32    md5" >> "${PG_HBA}"

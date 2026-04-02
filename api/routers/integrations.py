@@ -18,7 +18,7 @@ from api.models.activity_log import ActivityLog
 from api.models.integrations import Integration, IntegrationName
 from api.models.users import User
 
-logger = logging.getLogger("novapanel.integrations")
+logger = logging.getLogger("hosthive.integrations")
 
 router = APIRouter()
 

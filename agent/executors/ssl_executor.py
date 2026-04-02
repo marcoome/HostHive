@@ -18,7 +18,7 @@ from agent.executors._helpers import (
     safe_path,
 )
 
-SSL_DIR = Path("/etc/ssl/novapanel")
+SSL_DIR = Path("/etc/ssl/hosthive")
 
 
 # ------------------------------------------------------------------

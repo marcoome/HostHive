@@ -34,7 +34,7 @@ DIM='\033[2m'
 # ─── Branding (loaded from config if available) ───
 PRODUCT_NAME="HostHive"
 PRODUCT_VERSION="1.0.0"
-INSTALL_DIR="/opt/novapanel"
+INSTALL_DIR="/opt/hosthive"
 CONFIG_DIR="${INSTALL_DIR}/config"
 LOG_FILE="${INSTALL_DIR}/logs/install.log"
 
@@ -185,11 +185,11 @@ done
 # ─── Create system user ───
 step 3 $TOTAL_STEPS "Creating system user"
 
-if ! id -u novapanel &>/dev/null; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin novapanel
-    success "System user 'novapanel' created"
+if ! id -u hosthive &>/dev/null; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin hosthive
+    success "System user 'hosthive' created"
 else
-    success "System user 'novapanel' already exists"
+    success "System user 'hosthive' already exists"
 fi
 
 # ─── Generate secrets ───
@@ -205,7 +205,7 @@ cat > "${CONFIG_DIR}/secrets.env" << SECRETS
 # HostHive Secrets — AUTO-GENERATED, DO NOT COMMIT
 # Generated: $(date -Iseconds)
 
-DATABASE_URL=postgresql+asyncpg://novapanel:${DB_PASSWORD}@localhost:5432/novapanel
+DATABASE_URL=postgresql+asyncpg://hosthive:${DB_PASSWORD}@localhost:5432/hosthive
 DATABASE_PASSWORD=${DB_PASSWORD}
 
 REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
@@ -222,7 +222,7 @@ PANEL_PORT=8083
 SECRETS
 
 chmod 600 "${CONFIG_DIR}/secrets.env"
-chown novapanel:novapanel "${CONFIG_DIR}/secrets.env"
+chown hosthive:hosthive "${CONFIG_DIR}/secrets.env"
 success "Secrets generated and stored"
 
 # ─── Setup PostgreSQL ───
@@ -231,8 +231,8 @@ step 5 $TOTAL_STEPS "Configuring PostgreSQL"
 systemctl enable --now postgresql >> "$LOG_FILE" 2>&1
 
 # Create database and user (idempotent)
-su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='novapanel'\" | grep -q 1 || psql -c \"CREATE ROLE novapanel WITH LOGIN PASSWORD '${DB_PASSWORD}'\"" >> "$LOG_FILE" 2>&1
-su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='novapanel'\" | grep -q 1 || psql -c \"CREATE DATABASE novapanel OWNER novapanel\"" >> "$LOG_FILE" 2>&1
+su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='hosthive'\" | grep -q 1 || psql -c \"CREATE ROLE hosthive WITH LOGIN PASSWORD '${DB_PASSWORD}'\"" >> "$LOG_FILE" 2>&1
+su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='hosthive'\" | grep -q 1 || psql -c \"CREATE DATABASE hosthive OWNER hosthive\"" >> "$LOG_FILE" 2>&1
 success "PostgreSQL configured"
 
 # ─── Setup Redis ───
@@ -315,7 +315,7 @@ server {
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' wss:;" always;
 
     # Frontend (Vue SPA)
-    root /opt/novapanel/frontend/dist;
+    root /opt/hosthive/frontend/dist;
     index index.html;
 
     # SPA fallback
@@ -346,8 +346,8 @@ server {
     }
 
     # Logs
-    access_log /opt/novapanel/logs/nginx-panel.access.log;
-    error_log /opt/novapanel/logs/nginx-panel.error.log;
+    access_log /opt/hosthive/logs/nginx-panel.access.log;
+    error_log /opt/hosthive/logs/nginx-panel.error.log;
 }
 
 # HTTP redirect to HTTPS
@@ -390,15 +390,15 @@ Wants=postgresql.service redis-server.service
 
 [Service]
 Type=exec
-User=novapanel
-Group=novapanel
-WorkingDirectory=/opt/novapanel
-EnvironmentFile=/opt/novapanel/config/secrets.env
-ExecStart=/opt/novapanel/venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000 --workers 4 --log-level info
+User=hosthive
+Group=hosthive
+WorkingDirectory=/opt/hosthive
+EnvironmentFile=/opt/hosthive/config/secrets.env
+ExecStart=/opt/hosthive/venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000 --workers 4 --log-level info
 Restart=always
 RestartSec=5
-StandardOutput=append:/opt/novapanel/logs/api.log
-StandardError=append:/opt/novapanel/logs/api.error.log
+StandardOutput=append:/opt/hosthive/logs/api.log
+StandardError=append:/opt/hosthive/logs/api.error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -413,13 +413,13 @@ After=network.target
 [Service]
 Type=exec
 User=root
-WorkingDirectory=/opt/novapanel
-EnvironmentFile=/opt/novapanel/config/secrets.env
-ExecStart=/opt/novapanel/venv/bin/uvicorn agent.agent:app --host 127.0.0.1 --port 7080 --log-level info
+WorkingDirectory=/opt/hosthive
+EnvironmentFile=/opt/hosthive/config/secrets.env
+ExecStart=/opt/hosthive/venv/bin/uvicorn agent.agent:app --host 127.0.0.1 --port 7080 --log-level info
 Restart=always
 RestartSec=5
-StandardOutput=append:/opt/novapanel/logs/agent.log
-StandardError=append:/opt/novapanel/logs/agent.error.log
+StandardOutput=append:/opt/hosthive/logs/agent.log
+StandardError=append:/opt/hosthive/logs/agent.error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -434,15 +434,15 @@ Wants=redis-server.service
 
 [Service]
 Type=exec
-User=novapanel
-Group=novapanel
-WorkingDirectory=/opt/novapanel
-EnvironmentFile=/opt/novapanel/config/secrets.env
-ExecStart=/opt/novapanel/venv/bin/celery -A api.tasks worker -l info -B --scheduler celery.beat:PersistentScheduler
+User=hosthive
+Group=hosthive
+WorkingDirectory=/opt/hosthive
+EnvironmentFile=/opt/hosthive/config/secrets.env
+ExecStart=/opt/hosthive/venv/bin/celery -A api.tasks worker -l info -B --scheduler celery.beat:PersistentScheduler
 Restart=always
 RestartSec=10
-StandardOutput=append:/opt/novapanel/logs/worker.log
-StandardError=append:/opt/novapanel/logs/worker.error.log
+StandardOutput=append:/opt/hosthive/logs/worker.log
+StandardError=append:/opt/hosthive/logs/worker.error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -471,7 +471,7 @@ cat > /etc/fail2ban/jail.d/hosthive.conf << 'F2B'
 enabled = true
 port = 8083
 filter = hosthive-auth
-logpath = /opt/novapanel/logs/api.log
+logpath = /opt/hosthive/logs/api.log
 maxretry = 5
 bantime = 900
 findtime = 600
@@ -496,7 +496,7 @@ success "Fail2ban configured"
 step 12 $TOTAL_STEPS "Starting HostHive services"
 
 # Set permissions
-chown -R novapanel:novapanel "${INSTALL_DIR}"
+chown -R hosthive:hosthive "${INSTALL_DIR}"
 chmod -R 750 "${INSTALL_DIR}"
 # Agent needs root-owned dirs
 chown root:root "${INSTALL_DIR}/agent" -R

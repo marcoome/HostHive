@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
-log = logging.getLogger("novapanel.mcp")
+log = logging.getLogger("hosthive.mcp")
 
 
 # ---------------------------------------------------------------------------

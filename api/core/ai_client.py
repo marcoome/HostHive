@@ -43,7 +43,7 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"(?i)(password|passwd|api_key|secret_key|access_token|bearer)\s*[:=]\s*\S+"),
 ]
 
-_REDIS_CACHE_PREFIX = "novapanel:ai:cache:"
+_REDIS_CACHE_PREFIX = "hosthive:ai:cache:"
 _CACHE_TTL = 300  # 5 minutes
 _MAX_RETRIES = 3
 _TIMEOUT = 60.0

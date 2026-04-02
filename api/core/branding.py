@@ -2,7 +2,7 @@
 Centralized branding configuration for HostHive.
 
 Change the product name, tagline, colors, and all branding
-in ONE place: /opt/novapanel/config/branding.json
+in ONE place: /opt/hosthive/config/branding.json
 
 This module loads branding and exposes it to the entire backend.
 The frontend reads the same file via the /api/v1/branding endpoint.
@@ -47,7 +47,7 @@ class BrandingConfig(BaseModel):
 
 # Search paths for branding.json (production first, then dev)
 _BRANDING_PATHS = [
-    Path("/opt/novapanel/config/branding.json"),
+    Path("/opt/hosthive/config/branding.json"),
     Path(__file__).resolve().parent.parent.parent / "config" / "branding.json",
 ]
 

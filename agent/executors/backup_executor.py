@@ -17,7 +17,7 @@ from typing import Any
 
 from agent.executors._helpers import safe_path, safe_username
 
-BACKUP_BASE = Path("/opt/novapanel/backups")
+BACKUP_BASE = Path("/opt/hosthive/backups")
 HOME_BASE = Path("/home")
 
 

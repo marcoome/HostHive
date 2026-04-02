@@ -25,7 +25,7 @@ from agent.executors._helpers import atomic_write, safe_domain, safe_username
 CGROUP_BASE = Path("/sys/fs/cgroup")
 HOSTHIVE_CGROUP = CGROUP_BASE / "hosthive"
 PHP_FPM_POOL_DIR = Path("/etc/php")  # /etc/php/<version>/fpm/pool.d/
-RESOURCE_META_DIR = Path("/opt/novapanel/data/resource_limits")
+RESOURCE_META_DIR = Path("/opt/hosthive/data/resource_limits")
 
 # ---------------------------------------------------------------------------
 # Internal helpers

@@ -17,14 +17,14 @@ from typing import Any, Dict, List, Optional
 
 from agent.executors._helpers import safe_domain
 
-log = logging.getLogger("novapanel.agent.analytics")
+log = logging.getLogger("hosthive.agent.analytics")
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _ACCESS_LOG_DIR = Path("/var/log/nginx")
-_REPORT_DIR = Path("/opt/novapanel/reports")
+_REPORT_DIR = Path("/opt/hosthive/reports")
 _GOACCESS_BIN = "goaccess"
 
 # Strict validation for period parameter
@@ -59,7 +59,7 @@ async def generate_visitor_report(domain: str, period: str = "daily") -> Dict[st
     """Generate a GoAccess HTML report for a domain.
 
     Parses the Nginx access log and outputs an HTML report to
-    /opt/novapanel/reports/{domain}/index.html
+    /opt/hosthive/reports/{domain}/index.html
     """
     domain = safe_domain(domain)
     period = _validate_period(period)

@@ -9,7 +9,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-_SECRETS_ENV = Path("/opt/novapanel/config/secrets.env")
+_SECRETS_ENV = Path("/opt/hosthive/config/secrets.env")
 
 
 class Settings(BaseSettings):
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # ── Database ────────────────────────────────────────────────────────
     DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://novapanel:changeme@127.0.0.1:5432/novapanel",
+        default="postgresql+asyncpg://hosthive:changeme@127.0.0.1:5432/hosthive",
         description="Async PostgreSQL connection string (asyncpg driver).",
     )
 

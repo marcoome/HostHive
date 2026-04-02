@@ -6,12 +6,12 @@ Wants=redis-server.service postgresql.service
 
 [Service]
 Type=simple
-User=novapanel
-Group=novapanel
-WorkingDirectory=/opt/novapanel
-EnvironmentFile=/opt/novapanel/config/secrets.env
+User=hosthive
+Group=hosthive
+WorkingDirectory=/opt/hosthive
+EnvironmentFile=/opt/hosthive/config/secrets.env
 
-ExecStart=/opt/novapanel/venv/bin/celery \
+ExecStart=/opt/hosthive/venv/bin/celery \
     -A app.worker \
     worker \
     --loglevel=info \
@@ -26,7 +26,7 @@ RestartSec=10
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/novapanel /var/log/novapanel /tmp
+ReadWritePaths=/opt/hosthive /var/log/hosthive /tmp
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -35,7 +35,7 @@ ProtectControlGroups=true
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=novapanel-worker
+SyslogIdentifier=hosthive-worker
 
 [Install]
 WantedBy=multi-user.target

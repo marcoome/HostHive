@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.executors._helpers import safe_domain, safe_path
 
-log = logging.getLogger("novapanel.agent.wordpress")
+log = logging.getLogger("hosthive.agent.wordpress")
 
 # Base directory where user web roots live.
 _WEB_BASE = "/home"

@@ -20,7 +20,7 @@ from api.core.security import require_role
 from api.models.activity_log import ActivityLog
 from api.models.users import User
 
-logger = logging.getLogger("novapanel.admin")
+logger = logging.getLogger("hosthive.admin")
 
 router = APIRouter()
 
@@ -82,7 +82,7 @@ async def rotate_secrets(
     new_agent_secret = secrets.token_urlsafe(48)
 
     # Write new secrets to the secrets file
-    secrets_path = "/opt/novapanel/config/secrets.env"
+    secrets_path = "/opt/hosthive/config/secrets.env"
     try:
         # Read existing file content
         existing_lines: list[str] = []
@@ -130,7 +130,7 @@ async def rotate_secrets(
         redis = request.app.state.redis
         cursor = 0
         while True:
-            cursor, keys = await redis.scan(cursor, match="novapanel:refresh:*", count=500)
+            cursor, keys = await redis.scan(cursor, match="hosthive:refresh:*", count=500)
             if keys:
                 await redis.delete(*keys)
             if cursor == 0:
@@ -141,7 +141,7 @@ async def rotate_secrets(
     # Request service restart via agent
     try:
         agent = request.app.state.agent
-        await agent.service_action("novapanel-api", "restart")
+        await agent.service_action("hosthive-api", "restart")
     except Exception as exc:
         logger.warning("Failed to restart API service: %s", exc)
 
@@ -204,10 +204,10 @@ async def toggle_maintenance_mode(
     redis = request.app.state.redis
 
     if body.enabled:
-        await redis.set("novapanel:maintenance_mode", "1")
+        await redis.set("hosthive:maintenance_mode", "1")
         detail = "Maintenance mode enabled. Non-admin requests will be blocked."
     else:
-        await redis.delete("novapanel:maintenance_mode")
+        await redis.delete("hosthive:maintenance_mode")
         detail = "Maintenance mode disabled."
 
     _log(

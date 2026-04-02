@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.executors._helpers import safe_path
 
-log = logging.getLogger("novapanel.agent.docker")
+log = logging.getLogger("hosthive.agent.docker")
 
 # Label used to associate containers with panel users.
 _USER_LABEL = "com.hosthive.user"

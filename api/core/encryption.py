@@ -17,7 +17,7 @@ def _derive_fernet_key(secret_key: str) -> bytes:
     raw = hashlib.pbkdf2_hmac(
         "sha256",
         secret_key.encode("utf-8"),
-        b"novapanel-fernet-salt",
+        b"hosthive-fernet-salt",
         iterations=480_000,
     )
     return base64.urlsafe_b64encode(raw)

@@ -7,16 +7,16 @@
 set -euo pipefail
 
 # ─── Constants ───────────────────────────────────────────────────────────────
-NOVAPANEL_DIR="/opt/novapanel"
-CONFIG_DIR="${NOVAPANEL_DIR}/config"
+HOSTHIVE_DIR="/opt/hosthive"
+CONFIG_DIR="${HOSTHIVE_DIR}/config"
 SECRETS_FILE="${CONFIG_DIR}/secrets.env"
-VENV_DIR="${NOVAPANEL_DIR}/venv"
-FRONTEND_DIR="${NOVAPANEL_DIR}/frontend"
-LOG_FILE="/var/log/novapanel-install.log"
+VENV_DIR="${HOSTHIVE_DIR}/venv"
+FRONTEND_DIR="${HOSTHIVE_DIR}/frontend"
+LOG_FILE="/var/log/hosthive-install.log"
 PANEL_PORT=8083
 API_PORT=8000
 AGENT_PORT=7080
-NOVAPANEL_USER="novapanel"
+HOSTHIVE_USER="hosthive"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="${SCRIPT_DIR}/modules"
@@ -104,16 +104,16 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES[@]}" >> "${LOG
 log "System packages installed."
 
 # ─── 2. Create system user ──────────────────────────────────────────────────
-if id "${NOVAPANEL_USER}" &>/dev/null; then
-    log "System user '${NOVAPANEL_USER}' already exists — skipping."
+if id "${HOSTHIVE_USER}" &>/dev/null; then
+    log "System user '${HOSTHIVE_USER}' already exists — skipping."
 else
-    useradd --system --no-create-home --shell /usr/sbin/nologin "${NOVAPANEL_USER}"
-    log "Created system user '${NOVAPANEL_USER}'."
+    useradd --system --no-create-home --shell /usr/sbin/nologin "${HOSTHIVE_USER}"
+    log "Created system user '${HOSTHIVE_USER}'."
 fi
 
 # ─── 3. Create directory structure ───────────────────────────────────────────
-mkdir -p "${CONFIG_DIR}" "${NOVAPANEL_DIR}/logs" "${NOVAPANEL_DIR}/data" "${FRONTEND_DIR}"
-chown -R "${NOVAPANEL_USER}:${NOVAPANEL_USER}" "${NOVAPANEL_DIR}"
+mkdir -p "${CONFIG_DIR}" "${HOSTHIVE_DIR}/logs" "${HOSTHIVE_DIR}/data" "${FRONTEND_DIR}"
+chown -R "${HOSTHIVE_USER}:${HOSTHIVE_USER}" "${HOSTHIVE_DIR}"
 
 # ─── 4. Generate secrets (idempotent — skip if file exists) ─────────────────
 generate_password() {
@@ -133,8 +133,8 @@ else
     cat > "${SECRETS_FILE}" <<SECRETS_EOF
 # HostHive secrets — generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Do NOT share or commit this file.
-DB_NAME=novapanel
-DB_USER=novapanel
+DB_NAME=hosthive
+DB_USER=hosthive
 DB_PASSWORD=${DB_PASSWORD}
 REDIS_PASSWORD=${REDIS_PASSWORD}
 ADMIN_USER=admin
@@ -143,7 +143,7 @@ SECRET_KEY=${SECRET_KEY}
 SECRETS_EOF
 
     chmod 600 "${SECRETS_FILE}"
-    chown "${NOVAPANEL_USER}:${NOVAPANEL_USER}" "${SECRETS_FILE}"
+    chown "${HOSTHIVE_USER}:${HOSTHIVE_USER}" "${SECRETS_FILE}"
     log "Generated secrets and stored in ${SECRETS_FILE}."
 fi
 
@@ -200,7 +200,7 @@ log "Installing Python packages into virtualenv..."
 log "Python packages installed."
 
 # ─── 7. Node.js via nvm + build frontend ────────────────────────────────────
-export NVM_DIR="/opt/novapanel/.nvm"
+export NVM_DIR="/opt/hosthive/.nvm"
 if [[ -d "${NVM_DIR}" ]]; then
     log "nvm already installed — skipping download."
 else
@@ -240,7 +240,7 @@ else
 <body><h1>HostHive</h1><p>Frontend not yet built. Run the Vue build to replace this page.</p></body>
 </html>
 HTML_EOF
-    chown -R "${NOVAPANEL_USER}:${NOVAPANEL_USER}" "${FRONTEND_DIR}"
+    chown -R "${HOSTHIVE_USER}:${HOSTHIVE_USER}" "${FRONTEND_DIR}"
 fi
 
 # ─── 8. Install systemd service files ───────────────────────────────────────
@@ -261,14 +261,14 @@ install_service() {
     log "Installed systemd unit: ${name}"
 }
 
-install_service "novapanel-api.service"
-install_service "novapanel-agent.service"
-install_service "novapanel-worker.service"
+install_service "hosthive-api.service"
+install_service "hosthive-agent.service"
+install_service "hosthive-worker.service"
 
 systemctl daemon-reload
 
 # Enable and start services
-for svc in novapanel-api novapanel-agent novapanel-worker; do
+for svc in hosthive-api hosthive-agent hosthive-worker; do
     systemctl enable "${svc}.service" >> "${LOG_FILE}" 2>&1 || true
     systemctl restart "${svc}.service" >> "${LOG_FILE}" 2>&1 || warn "Could not start ${svc} — check logs."
 done
@@ -288,7 +288,7 @@ else
 }
 ADMIN_EOF
     chmod 600 "${CONFIG_DIR}/initial_admin.json"
-    chown "${NOVAPANEL_USER}:${NOVAPANEL_USER}" "${CONFIG_DIR}/initial_admin.json"
+    chown "${HOSTHIVE_USER}:${HOSTHIVE_USER}" "${CONFIG_DIR}/initial_admin.json"
     touch "${ADMIN_FLAG}"
     log "Initial admin credentials written."
 fi
@@ -304,7 +304,7 @@ if command -v npm &>/dev/null; then
 fi
 
 # ─── 11. Install HostHive CLI symlink ──────────────────────────────────────
-CLI_SCRIPT="${NOVAPANEL_DIR}/scripts/hosthive-cli.py"
+CLI_SCRIPT="${HOSTHIVE_DIR}/scripts/hosthive-cli.py"
 CLI_LINK="/usr/local/bin/hosthive"
 
 if [[ -f "${SCRIPT_DIR}/hosthive-cli.py" ]]; then
@@ -331,7 +331,7 @@ if command -v rspamd &>/dev/null; then
 fi
 
 # ─── 14. Final ownership pass ──────────────────────────────────────────────
-chown -R "${NOVAPANEL_USER}:${NOVAPANEL_USER}" "${NOVAPANEL_DIR}"
+chown -R "${HOSTHIVE_USER}:${HOSTHIVE_USER}" "${HOSTHIVE_DIR}"
 
 # ─── Done ────────────────────────────────────────────────────────────────────
 HOST_IP="$(hostname -I | awk '{print $1}')"
@@ -349,9 +349,9 @@ echo "  Secrets   : ${SECRETS_FILE}"
 echo "  Logs      : ${LOG_FILE}"
 echo ""
 echo "  Services:"
-echo "    systemctl status novapanel-api"
-echo "    systemctl status novapanel-agent"
-echo "    systemctl status novapanel-worker"
+echo "    systemctl status hosthive-api"
+echo "    systemctl status hosthive-agent"
+echo "    systemctl status hosthive-worker"
 echo ""
 echo "  IMPORTANT: Change the default admin password immediately!"
 echo "==========================================================="

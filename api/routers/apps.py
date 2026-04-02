@@ -245,7 +245,7 @@ async def ws_app_logs(websocket: WebSocket, domain: str):
 
     await websocket.accept()
 
-    log_path = Path(f"/var/log/novapanel/apps/{domain}.stdout.log")
+    log_path = Path(f"/var/log/hosthive/apps/{domain}.stdout.log")
 
     try:
         # Start tailing the log file

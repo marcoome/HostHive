@@ -8,15 +8,15 @@ set -euo pipefail
 
 JAIL_LOCAL="/etc/fail2ban/jail.local"
 FILTER_DIR="/etc/fail2ban/filter.d"
-NOVAPANEL_FILTER="${FILTER_DIR}/hosthive-auth.conf"
-NOVAPANEL_LOG="/var/log/novapanel/access.log"
+HOSTHIVE_FILTER="${FILTER_DIR}/hosthive-auth.conf"
+HOSTHIVE_LOG="/var/log/hosthive/access.log"
 
 echo "[Fail2ban] Configuring fail2ban..."
 
 # ─── Ensure log file exists for the panel filter ────────────────────────────
-mkdir -p "$(dirname "${NOVAPANEL_LOG}")"
-touch "${NOVAPANEL_LOG}"
-chown novapanel:novapanel "${NOVAPANEL_LOG}"
+mkdir -p "$(dirname "${HOSTHIVE_LOG}")"
+touch "${HOSTHIVE_LOG}"
+chown hosthive:hosthive "${HOSTHIVE_LOG}"
 
 # ─── Write jail.local ───────────────────────────────────────────────────────
 cat > "${JAIL_LOCAL}" <<'JAIL_EOF'
@@ -43,7 +43,7 @@ bantime  = 3600
 enabled  = true
 port     = 8083
 filter   = hosthive-auth
-logpath  = /var/log/novapanel/access.log
+logpath  = /var/log/hosthive/access.log
 maxretry = 5
 findtime = 300
 bantime  = 1800
@@ -52,7 +52,7 @@ JAIL_EOF
 echo "[Fail2ban] Wrote ${JAIL_LOCAL}."
 
 # ─── Write custom filter for panel authentication failures ──────────────────
-cat > "${NOVAPANEL_FILTER}" <<'FILTER_EOF'
+cat > "${HOSTHIVE_FILTER}" <<'FILTER_EOF'
 # HostHive authentication failure filter
 # Matches log lines written by the API on failed login attempts.
 #
@@ -67,7 +67,7 @@ failregex = ^.*AUTH_FAILURE\s+ip=<HOST>.*$
 ignoreregex =
 FILTER_EOF
 
-echo "[Fail2ban] Wrote filter ${NOVAPANEL_FILTER}."
+echo "[Fail2ban] Wrote filter ${HOSTHIVE_FILTER}."
 
 # ─── Enable and restart ─────────────────────────────────────────────────────
 systemctl enable fail2ban

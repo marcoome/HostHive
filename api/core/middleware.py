@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from api.core.database import async_session_factory
 from api.models.activity_log import ActivityLog
 
-logger = logging.getLogger("novapanel.middleware")
+logger = logging.getLogger("hosthive.middleware")
 
 # ---------------------------------------------------------------------------
 # Paths that are excluded from audit logging

@@ -212,7 +212,7 @@ async def wp_backup(
 
     # Create backup via tar + wp db export
     timestamp = int(time.time())
-    backup_dir = f"/opt/novapanel/backups/wordpress"
+    backup_dir = f"/opt/hosthive/backups/wordpress"
     os.makedirs(backup_dir, exist_ok=True)
     backup_file = f"{backup_dir}/{domain}_{timestamp}.tar.gz"
 

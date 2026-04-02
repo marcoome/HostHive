@@ -18,7 +18,7 @@ from api.core.security import require_role
 from api.models.activity_log import ActivityLog
 from api.models.users import User
 
-logger = logging.getLogger("novapanel.wireguard")
+logger = logging.getLogger("hosthive.wireguard")
 
 router = APIRouter()
 

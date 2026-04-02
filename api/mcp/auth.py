@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from api.core.config import settings
 
-log = logging.getLogger("novapanel.mcp")
+log = logging.getLogger("hosthive.mcp")
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 

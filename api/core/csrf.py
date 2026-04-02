@@ -19,10 +19,10 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-logger = logging.getLogger("novapanel.csrf")
+logger = logging.getLogger("hosthive.csrf")
 
 _TOKEN_TTL = 3600  # 1 hour
-_REDIS_PREFIX = "novapanel:csrf:"
+_REDIS_PREFIX = "hosthive:csrf:"
 _COOKIE_NAME = "X-CSRF-Token"
 _HEADER_NAME = "X-CSRF-Token"
 

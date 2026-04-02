@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.executors._helpers import safe_username
 
-log = logging.getLogger("novapanel.agent.docker_isolation")
+log = logging.getLogger("hosthive.agent.docker_isolation")
 
 # ---------------------------------------------------------------------------
 # Label constants

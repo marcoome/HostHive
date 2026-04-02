@@ -5,7 +5,7 @@
 ###############################################################################
 set -euo pipefail
 
-SECRETS_FILE="/opt/novapanel/config/secrets.env"
+SECRETS_FILE="/opt/hosthive/config/secrets.env"
 REDIS_CONF="/etc/redis/redis.conf"
 
 if [[ ! -f "${SECRETS_FILE}" ]]; then

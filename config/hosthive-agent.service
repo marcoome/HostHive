@@ -1,8 +1,8 @@
 [Unit]
 Description=HostHive System Agent (root-level operations)
 Documentation=https://hosthive.dev
-After=network.target novapanel-api.service
-Wants=novapanel-api.service
+After=network.target hosthive-api.service
+Wants=hosthive-api.service
 
 [Service]
 Type=simple
@@ -10,10 +10,10 @@ Type=simple
 # (creating users, managing services, editing configs, etc.)
 User=root
 Group=root
-WorkingDirectory=/opt/novapanel
-EnvironmentFile=/opt/novapanel/config/secrets.env
+WorkingDirectory=/opt/hosthive
+EnvironmentFile=/opt/hosthive/config/secrets.env
 
-ExecStart=/opt/novapanel/venv/bin/uvicorn \
+ExecStart=/opt/hosthive/venv/bin/uvicorn \
     agent.main:app \
     --host 127.0.0.1 \
     --port 7080 \
@@ -31,7 +31,7 @@ PrivateTmp=true
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=novapanel-agent
+SyslogIdentifier=hosthive-agent
 
 [Install]
 WantedBy=multi-user.target

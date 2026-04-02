@@ -14,7 +14,7 @@ logger = logging.getLogger("hosthive.ip_reputation")
 _ABUSEIPDB_URL = "https://api.abuseipdb.com/api/v2/check"
 _TIMEOUT = 30.0
 _CACHE_TTL = 86400  # 24 hours in seconds
-_CACHE_PREFIX = "novapanel:ip_reputation:"
+_CACHE_PREFIX = "hosthive:ip_reputation:"
 _BLOCK_THRESHOLD = 50
 
 

@@ -25,8 +25,8 @@ from agent.executors._helpers import atomic_write, safe_domain, safe_path
 
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
 NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
-APPS_META_DIR = Path("/opt/novapanel/data/apps")
-APPS_LOG_DIR = Path("/var/log/novapanel/apps")
+APPS_META_DIR = Path("/opt/hosthive/data/apps")
+APPS_LOG_DIR = Path("/var/log/hosthive/apps")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 PM2_BIN = "/usr/local/bin/pm2"
 

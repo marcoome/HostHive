@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from api.mcp.auth import verify_mcp_bearer
 from api.mcp.tools import call_tool, list_tools
 
-log = logging.getLogger("novapanel.mcp")
+log = logging.getLogger("hosthive.mcp")
 
 # ---------------------------------------------------------------------------
 # MCP protocol constants

@@ -172,7 +172,7 @@ def require_role(*roles: str):
 # Brute-force protection (Redis-backed)
 # ---------------------------------------------------------------------------
 
-_LOGIN_PREFIX = "novapanel:login_fail:"
+_LOGIN_PREFIX = "hosthive:login_fail:"
 _MAX_FAILURES = 5
 _LOCKOUT_SECONDS = 15 * 60  # 15 minutes
 
