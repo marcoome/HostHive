@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from api.core.database import Base
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class ActivityLog(Base):
@@ -25,5 +29,5 @@ class ActivityLog(Base):
     details: Mapped[Optional[str]] = mapped_column(Text, default=None)
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), default=None)
     created_at: Mapped[datetime] = mapped_column(
-        default=datetime.utcnow, server_default=func.now(),
+        default=_utcnow, server_default=func.now(),
     )

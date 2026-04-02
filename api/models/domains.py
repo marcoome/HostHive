@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Boolean, ForeignKey, String, Text, func
@@ -30,5 +30,5 @@ class Domain(Base):
     nginx_template: Mapped[Optional[str]] = mapped_column(Text, default=None)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        default=datetime.utcnow, server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
     )

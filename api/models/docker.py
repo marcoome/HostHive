@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Boolean, ForeignKey, String, Text, func
@@ -49,8 +49,8 @@ class DockerContainer(Base):
     )
     ssl_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
-        default=datetime.utcnow, server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        default=datetime.utcnow, server_default=func.now(), onupdate=func.now(),
+        default=lambda: datetime.now(timezone.utc), server_default=func.now(), onupdate=func.now(),
     )

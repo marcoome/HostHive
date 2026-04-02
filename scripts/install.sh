@@ -56,8 +56,8 @@ PACKAGES=(
     nginx
     postgresql
     redis-server
-    python3.11
-    python3.11-venv
+    python3
+    python3-venv
     python3-pip
     nodejs
     npm
@@ -178,7 +178,7 @@ if [[ -d "${VENV_DIR}" ]]; then
     log "Python virtualenv already exists — skipping creation."
 else
     log "Creating Python virtualenv..."
-    python3.11 -m venv "${VENV_DIR}"
+    python3 -m venv "${VENV_DIR}"
 fi
 
 log "Installing Python packages into virtualenv..."
@@ -191,9 +191,10 @@ log "Installing Python packages into virtualenv..."
     "celery" \
     "redis" \
     "pydantic" \
-    "passlib[bcrypt]" \
+    "bcrypt" \
     "python-jose[cryptography]" \
     "pydantic-settings" \
+    "email-validator" \
     "python-multipart" \
     "aiofiles" \
     "paramiko" \
