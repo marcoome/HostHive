@@ -80,6 +80,14 @@ class Settings(BaseSettings):
         description="Enable Docker container management (requires Docker on host).",
     )
 
+    # ── Installer-generated fields ─────────────────────────────────────
+    database_password: str = Field(default="", description="PostgreSQL password (from installer).")
+    redis_password: str = Field(default="", description="Redis password (from installer).")
+    admin_username: str = Field(default="admin", description="Initial admin username.")
+    admin_password: str = Field(default="", description="Initial admin password.")
+    server_ip: str = Field(default="127.0.0.1", description="Server public IP.")
+    panel_port: str = Field(default="8443", description="Panel HTTPS port.")
+
     # ── Misc ────────────────────────────────────────────────────────────
     DEBUG: bool = Field(default=False)
 
