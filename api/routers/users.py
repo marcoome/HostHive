@@ -17,6 +17,8 @@ from api.models.domains import Domain
 from api.models.email_accounts import EmailAccount
 from api.models.ftp_accounts import FtpAccount
 from api.models.users import User, UserRole
+from api.schemas.databases import DatabaseResponse
+from api.schemas.domains import DomainResponse
 from api.schemas.users import UserCreate, UserListResponse, UserResponse, UserUpdate
 
 router = APIRouter()
@@ -132,6 +134,68 @@ async def get_user(
     admin: User = Depends(_admin),
 ):
     return UserResponse.model_validate(await _get_user_or_404(user_id, db))
+
+
+# --------------------------------------------------------------------------
+# GET /{id}/domains -- list domains owned by this user
+# --------------------------------------------------------------------------
+@router.get("/{user_id}/domains", status_code=status.HTTP_200_OK)
+async def list_user_domains(
+    user_id: uuid.UUID,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    await _get_user_or_404(user_id, db)
+
+    count_query = select(func.count()).select_from(Domain).where(Domain.user_id == user_id)
+    total = (await db.execute(count_query)).scalar() or 0
+
+    query = (
+        select(Domain)
+        .where(Domain.user_id == user_id)
+        .order_by(Domain.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    results = (await db.execute(query)).scalars().all()
+
+    return {
+        "items": [DomainResponse.model_validate(d) for d in results],
+        "total": total,
+    }
+
+
+# --------------------------------------------------------------------------
+# GET /{id}/databases -- list databases owned by this user
+# --------------------------------------------------------------------------
+@router.get("/{user_id}/databases", status_code=status.HTTP_200_OK)
+async def list_user_databases(
+    user_id: uuid.UUID,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    await _get_user_or_404(user_id, db)
+
+    count_query = select(func.count()).select_from(Database).where(Database.user_id == user_id)
+    total = (await db.execute(count_query)).scalar() or 0
+
+    query = (
+        select(Database)
+        .where(Database.user_id == user_id)
+        .order_by(Database.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    results = (await db.execute(query)).scalars().all()
+
+    return {
+        "items": [DatabaseResponse.model_validate(d) for d in results],
+        "total": total,
+    }
 
 
 # --------------------------------------------------------------------------
