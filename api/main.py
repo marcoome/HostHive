@@ -128,6 +128,7 @@ app = FastAPI(
     docs_url="/api/v1/docs",
     openapi_url="/api/v1/openapi.json",
     lifespan=lifespan,
+    redirect_slashes=False,  # Disable trailing slash redirect to fix CORS preflight
 )
 
 # Middleware ----------------------------------------------------------------
