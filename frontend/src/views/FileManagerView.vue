@@ -690,9 +690,14 @@ async function fetchFiles() {
 async function fetchTree() {
   try {
     const { data } = await client.get('/files/tree', { params: { path: '/' } })
-    directoryTree.value = data || { name: '/', path: '/', children: [] }
+    directoryTree.value = {
+      name: data?.name || '/',
+      path: data?.path || '/',
+      children: Array.isArray(data?.children) ? data.children : [],
+      expanded: true,
+    }
   } catch {
-    // Tree is optional, fail silently
+    directoryTree.value = { name: '/', path: '/', children: [], expanded: true }
   }
 }
 

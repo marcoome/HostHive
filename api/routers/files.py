@@ -72,6 +72,9 @@ def _resolve_path(current_user: User, raw_path: str) -> str:
     """Admins can access any /home/ path; users are sandboxed."""
     if _is_admin(current_user):
         normalized = posixpath.normpath(raw_path)
+        # Allow /home itself and any path under /home/
+        if normalized == "/home":
+            return normalized
         if not normalized.startswith("/home/"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -267,6 +270,14 @@ async def list_files(
         pass
 
     # --- Fallback: local filesystem ---
+    # Create user home directory if it doesn't exist
+    if not os.path.exists(safe):
+        try:
+            os.makedirs(safe, mode=0o755, exist_ok=True)
+        except OSError:
+            pass
+    if not os.path.exists(safe):
+        return FileListResponse(path=safe, items=[], total=0)
     items = _local_list_files(safe)
     return FileListResponse(path=safe, items=items, total=len(items))
 

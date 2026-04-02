@@ -125,6 +125,16 @@ async def create_user(
     db.add(user)
     await db.flush()
 
+    # Create user home directory structure
+    import os
+    home_dir = f"/home/{body.username}"
+    for subdir in ["", "web", "logs", "tmp", "backups"]:
+        dirpath = os.path.join(home_dir, subdir)
+        try:
+            os.makedirs(dirpath, mode=0o755, exist_ok=True)
+        except OSError:
+            pass
+
     _log(db, request, admin.id, "users.create", f"Created user {body.username}")
     return UserResponse.model_validate(user)
 
