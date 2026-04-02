@@ -221,16 +221,22 @@ success "Application source verified in ${INSTALL_DIR}"
 # ─── Step 5: Generate secrets ───
 step 5 $TOTAL_STEPS "Generating secrets"
 
-# Ask for admin email
-echo ""
-echo -e "  ${WHITE}${BOLD}Admin Configuration${NC}"
-echo -ne "  ${CYAN}Admin email: ${NC}"
-read -r ADMIN_EMAIL
-if [[ -z "$ADMIN_EMAIL" ]]; then
-    ADMIN_EMAIL="admin@localhost"
-    warn "No email provided, using admin@localhost"
+# Admin email (pass as env var ADMIN_EMAIL or first argument, otherwise default)
+ADMIN_EMAIL="${ADMIN_EMAIL:-${1:-admin@localhost}}"
+if [[ "$ADMIN_EMAIL" == "admin@localhost" ]]; then
+    # Try to read from terminal if available (not piped)
+    if [[ -t 0 ]]; then
+        echo ""
+        echo -e "  ${WHITE}${BOLD}Admin Configuration${NC}"
+        echo -ne "  ${CYAN}Admin email [admin@localhost]: ${NC}"
+        read -r input_email
+        if [[ -n "$input_email" ]]; then
+            ADMIN_EMAIL="$input_email"
+        fi
+        echo ""
+    fi
 fi
-echo ""
+success "Admin email: ${ADMIN_EMAIL}"
 
 DB_PASSWORD=$(generate_password)
 REDIS_PASSWORD=$(generate_password)
