@@ -60,8 +60,12 @@ async def _ensure_admin_user() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    import logging
+    _logger = logging.getLogger("hosthive.startup")
+
     # Startup -----------------------------------------------------------
     # Redis
+    _logger.info("Connecting to Redis at %s", settings.REDIS_URL.split("@")[-1] if "@" in settings.REDIS_URL else settings.REDIS_URL)
     app.state.redis = aioredis.from_url(
         settings.REDIS_URL,
         decode_responses=True,
@@ -71,13 +75,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.agent = AgentClient()
 
     # Create tables if they don't exist yet (first run)
+    _logger.info("Creating database tables (if not exist)...")
     import api.models  # noqa: F401 - ensure all models are registered
     from api.core.database import Base as _Base
-    async with engine.begin() as conn:
-        await conn.run_sync(_Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(_Base.metadata.create_all)
+        _logger.info("Database tables ready.")
+    except Exception as exc:
+        _logger.error(
+            "Failed to create database tables: %s. "
+            "Check DATABASE_URL and PostgreSQL permissions (GRANT ALL ON SCHEMA public TO hosthive).",
+            exc,
+        )
+        raise
 
     # Create initial admin user if not exists
     await _ensure_admin_user()
+    _logger.info("HostHive API startup complete.")
 
     yield
 

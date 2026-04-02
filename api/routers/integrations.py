@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
@@ -85,7 +85,7 @@ class IntegrationResponse(BaseModel):
 class IntegrationDetailResponse(BaseModel):
     name: str
     is_enabled: bool
-    config: dict[str, Any] | None = None
+    config: Optional[dict[str, Any]] = None
 
     model_config = {"from_attributes": True}
 

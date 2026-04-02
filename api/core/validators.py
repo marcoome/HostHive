@@ -9,7 +9,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from config.security import PASSWORD_MIN_LENGTH
+try:
+    from config.security import PASSWORD_MIN_LENGTH
+except ImportError:
+    PASSWORD_MIN_LENGTH = 8  # safe default if config module not on path
 
 # ---------------------------------------------------------------------------
 # Domain

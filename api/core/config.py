@@ -52,18 +52,25 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _build_connection_urls(self) -> "Settings":
-        """Construct DATABASE_URL and REDIS_URL from components if not set."""
-        if not self.DATABASE_URL:
-            password = quote_plus(self.DB_PASSWORD) if self.DB_PASSWORD else "changeme"
+        """Construct DATABASE_URL and REDIS_URL from components if not set or malformed."""
+        # Always rebuild from components when DB_PASSWORD is available —
+        # this avoids issues with passwords containing special chars (#, etc.)
+        # that may get truncated by systemd EnvironmentFile parsing.
+        if self.DB_PASSWORD:
+            password = quote_plus(self.DB_PASSWORD)
             self.DATABASE_URL = (
                 f"postgresql+asyncpg://{self.DB_USER}:{password}"
                 f"@127.0.0.1:5432/{self.DB_NAME}"
             )
-        if not self.REDIS_URL:
-            if self.REDIS_PASSWORD:
-                self.REDIS_URL = f"redis://:{quote_plus(self.REDIS_PASSWORD)}@127.0.0.1:6379/0"
-            else:
-                self.REDIS_URL = "redis://127.0.0.1:6379/0"
+        elif not self.DATABASE_URL:
+            self.DATABASE_URL = (
+                f"postgresql+asyncpg://{self.DB_USER}:changeme"
+                f"@127.0.0.1:5432/{self.DB_NAME}"
+            )
+        if self.REDIS_PASSWORD:
+            self.REDIS_URL = f"redis://:{quote_plus(self.REDIS_PASSWORD)}@127.0.0.1:6379/0"
+        elif not self.REDIS_URL:
+            self.REDIS_URL = "redis://127.0.0.1:6379/0"
         if not self.AGENT_SECRET:
             # Derive from SECRET_KEY so the API can start even if AGENT_SECRET
             # was not explicitly provided (older secrets.env files).

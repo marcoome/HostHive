@@ -105,7 +105,7 @@ spinner() {
 }
 
 generate_password() {
-    openssl rand -base64 32 | tr -d '/+=' | head -c 32
+    openssl rand -base64 48 | tr -d '/+=# \n' | head -c 32
 }
 
 # ─── Pre-flight checks ───
@@ -250,24 +250,15 @@ cat > "${CONFIG_DIR}/secrets.env" << SECRETS
 # HostHive Secrets — AUTO-GENERATED, DO NOT COMMIT
 # Generated: $(date -Iseconds)
 
-# ── Database ──
-DATABASE_URL=postgresql+asyncpg://hosthive:${DB_PASSWORD}@localhost:5432/hosthive
+DB_USER=hosthive
 DB_PASSWORD=${DB_PASSWORD}
-
-# ── Redis ──
-REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
+DB_NAME=hosthive
 REDIS_PASSWORD=${REDIS_PASSWORD}
-
-# ── Secrets / Keys ──
 SECRET_KEY=${SECRET_KEY}
 AGENT_SECRET=${AGENT_SECRET}
-
-# ── Initial admin ──
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
 ADMIN_EMAIL=${ADMIN_EMAIL}
-
-# ── Network ──
 SERVER_IP=${SERVER_IP}
 PANEL_PORT=8443
 SECRETS
@@ -285,8 +276,10 @@ systemctl enable --now postgresql >> "$LOG_FILE" 2>&1
 su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='hosthive'\" | grep -q 1 || psql -c \"CREATE ROLE hosthive WITH LOGIN PASSWORD '${DB_PASSWORD}'\"" >> "$LOG_FILE" 2>&1
 su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='hosthive'\" | grep -q 1 || psql -c \"CREATE DATABASE hosthive OWNER hosthive\"" >> "$LOG_FILE" 2>&1
 
-# Grant privileges explicitly
+# Grant privileges explicitly (PostgreSQL 15+ revoked public CREATE by default)
 su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE hosthive TO hosthive\"" >> "$LOG_FILE" 2>&1
+su - postgres -c "psql -d hosthive -c \"GRANT ALL ON SCHEMA public TO hosthive\"" >> "$LOG_FILE" 2>&1
+su - postgres -c "psql -d hosthive -c \"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO hosthive\"" >> "$LOG_FILE" 2>&1
 success "PostgreSQL configured"
 
 # ─── Step 7: Setup Redis ───
@@ -322,7 +315,7 @@ else
         fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg \
         celery redis "pydantic[email]" pydantic-settings bcrypt "python-jose[cryptography]" \
         python-multipart aiofiles paramiko dnspython slowapi jinja2 httpx \
-        cryptography alembic psutil email-validator >> "$LOG_FILE" 2>&1 &
+        cryptography alembic psutil email-validator psycopg2-binary >> "$LOG_FILE" 2>&1 &
     spinner $! "Installing Python packages"
 fi
 success "Python environment ready"
