@@ -260,25 +260,26 @@ const quickStats = computed(() => [
   { label: 'FTP Accounts', value: serverStats.value.ftp_count ?? 0, icon: '&#8645;' }
 ])
 
-// Chart data - generates mock 24h data
-function generateChartPoints(base, variance) {
-  const points = []
-  for (let i = 0; i < 24; i++) {
-    points.push(Math.max(0, Math.min(100, base + (Math.random() - 0.5) * variance * 2)))
+// Chart labels from historical timestamps
+const chartLabels = computed(() => {
+  if (dashboardData.value?.history_timestamps && dashboardData.value.history_timestamps.length > 0) {
+    return dashboardData.value.history_timestamps.map(ts => {
+      const date = new Date(ts)
+      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+    })
   }
-  return points
-}
-
-const chartLabels = Array.from({ length: 24 }, (_, i) => {
-  const h = (new Date().getHours() - 23 + i + 24) % 24
-  return `${h.toString().padStart(2, '0')}:00`
+  // Fallback: generate 24-hour labels
+  return Array.from({ length: 24 }, (_, i) => {
+    const h = (new Date().getHours() - 23 + i + 24) % 24
+    return `${h.toString().padStart(2, '0')}:00`
+  })
 })
 
 const cpuChartData = computed(() => ({
-  labels: chartLabels,
+  labels: chartLabels.value,
   datasets: [{
     label: 'CPU %',
-    data: serverStats.value.cpu_history || generateChartPoints(cpuUsage.value, 15),
+    data: serverStats.value.cpu_history || [],
     borderColor: 'rgba(99, 102, 241, 1)',
     backgroundColor: 'rgba(99, 102, 241, 0.1)',
     fill: true,
@@ -290,10 +291,10 @@ const cpuChartData = computed(() => ({
 }))
 
 const ramChartData = computed(() => ({
-  labels: chartLabels,
+  labels: chartLabels.value,
   datasets: [{
     label: 'RAM %',
-    data: serverStats.value.ram_history || generateChartPoints(ramUsage.value, 10),
+    data: serverStats.value.ram_history || [],
     borderColor: 'rgba(34, 197, 94, 1)',
     backgroundColor: 'rgba(34, 197, 94, 0.1)',
     fill: true,

@@ -233,10 +233,12 @@ async def dashboard_stats(
     admin: User = Depends(_admin),
 ):
     """Real dashboard stats from database + agent (if available)."""
+    from datetime import datetime, timedelta, timezone
     from api.models.domains import Domain
     from api.models.databases import Database
     from api.models.email_accounts import EmailAccount
     from api.models.ftp_accounts import FtpAccount
+    from api.models.server_stats import ServerStat
 
     # Counts from database
     domain_count = (await db.execute(select(func.count()).select_from(Domain))).scalar() or 0
@@ -273,6 +275,18 @@ async def dashboard_stats(
     disk_percent_str = disk.get("percent", "0%")
     disk_percent = int(disk_percent_str.replace("%", "")) if isinstance(disk_percent_str, str) else 0
 
+    # Fetch historical stats from last 24 hours
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    historical = (await db.execute(
+        select(ServerStat)
+        .where(ServerStat.created_at >= since)
+        .order_by(ServerStat.created_at.asc())
+    )).scalars().all()
+
+    cpu_history = [s.cpu_percent for s in historical]
+    ram_history = [s.memory_percent for s in historical]
+    timestamps = [s.created_at.isoformat() for s in historical]
+
     return {
         "cpu_usage": cpu_percent,
         "cpu_cores": os.cpu_count() or 1,
@@ -291,4 +305,7 @@ async def dashboard_stats(
         "email_count": email_count,
         "ftp_count": ftp_count,
         "user_count": user_count,
+        "cpu_history": cpu_history,
+        "ram_history": ram_history,
+        "history_timestamps": timestamps,
     }
