@@ -221,6 +221,17 @@ success "Application source verified in ${INSTALL_DIR}"
 # ─── Step 5: Generate secrets ───
 step 5 $TOTAL_STEPS "Generating secrets"
 
+# Ask for admin email
+echo ""
+echo -e "  ${WHITE}${BOLD}Admin Configuration${NC}"
+echo -ne "  ${CYAN}Admin email: ${NC}"
+read -r ADMIN_EMAIL
+if [[ -z "$ADMIN_EMAIL" ]]; then
+    ADMIN_EMAIL="admin@localhost"
+    warn "No email provided, using admin@localhost"
+fi
+echo ""
+
 DB_PASSWORD=$(generate_password)
 REDIS_PASSWORD=$(generate_password)
 SECRET_KEY=$(generate_password)
@@ -246,6 +257,7 @@ AGENT_SECRET=${AGENT_SECRET}
 # ── Initial admin ──
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
+ADMIN_EMAIL=${ADMIN_EMAIL}
 
 # ── Network ──
 SERVER_IP=${SERVER_IP}

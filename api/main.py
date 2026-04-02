@@ -49,7 +49,7 @@ async def _ensure_admin_user() -> None:
 
         admin = User(
             username=settings.admin_username or "admin",
-            email=f"{settings.admin_username or 'admin'}@localhost",
+            email=settings.admin_email or f"{settings.admin_username or 'admin'}@localhost",
             password_hash=hash_password(settings.admin_password or "changeme"),
             role=UserRole.ADMIN,
             is_active=True,

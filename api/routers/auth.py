@@ -26,6 +26,7 @@ from api.models.users import User
 from api.models.activity_log import ActivityLog
 from api.schemas.auth import (
     ChangePasswordRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     RefreshRequest,
     TokenResponse,
@@ -169,6 +170,34 @@ async def logout(
     redis = request.app.state.redis
     refresh_key = f"{_REFRESH_PREFIX}{current_user.id}:{body.refresh_token[-16:]}"
     await redis.delete(refresh_key)
+
+
+# --------------------------------------------------------------------------
+# POST /forgot-password
+# --------------------------------------------------------------------------
+@router.post("/forgot-password", status_code=status.HTTP_200_OK)
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a new random password and store it. In production, email it."""
+    import secrets
+    import logging
+
+    logger = logging.getLogger("hosthive.auth")
+
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+
+    if user is not None:
+        new_password = secrets.token_urlsafe(12)
+        user.password_hash = hash_password(new_password)
+        db.add(user)
+        logger.info("Password reset for user=%s email=%s new_password=%s", user.username, user.email, new_password)
+        # TODO: Send email with new_password via notification service
+
+    # Always return 200 to prevent email enumeration
+    return {"detail": "If an account exists with that email, a password reset has been initiated."}
 
 
 # --------------------------------------------------------------------------

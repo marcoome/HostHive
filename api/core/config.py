@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     redis_password: str = Field(default="", description="Redis password (from installer).")
     admin_username: str = Field(default="admin", description="Initial admin username.")
     admin_password: str = Field(default="", description="Initial admin password.")
+    admin_email: str = Field(default="admin@localhost", description="Initial admin email.")
     server_ip: str = Field(default="127.0.0.1", description="Server public IP.")
     panel_port: str = Field(default="8083", description="Panel HTTPS port.")
 
