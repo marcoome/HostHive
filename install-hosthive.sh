@@ -272,8 +272,9 @@ step 6 $TOTAL_STEPS "Configuring PostgreSQL"
 
 systemctl enable --now postgresql >> "$LOG_FILE" 2>&1
 
-# Create database and user (idempotent)
+# Create database and user — always reset password to match secrets.env
 su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='hosthive'\" | grep -q 1 || psql -c \"CREATE ROLE hosthive WITH LOGIN PASSWORD '${DB_PASSWORD}'\"" >> "$LOG_FILE" 2>&1
+su - postgres -c "psql -c \"ALTER ROLE hosthive WITH PASSWORD '${DB_PASSWORD}'\"" >> "$LOG_FILE" 2>&1
 su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='hosthive'\" | grep -q 1 || psql -c \"CREATE DATABASE hosthive OWNER hosthive\"" >> "$LOG_FILE" 2>&1
 
 # Grant privileges explicitly (PostgreSQL 15+ revoked public CREATE by default)
