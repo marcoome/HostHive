@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.core.database import get_db
 from api.core.security import get_current_user, hash_password, require_role
@@ -34,7 +35,11 @@ async def _get_user_or_404(
     user_id: uuid.UUID,
     db: AsyncSession,
 ) -> User:
-    result = await db.execute(select(User).where(User.id == user_id))
+    result = await db.execute(
+        select(User)
+        .where(User.id == user_id)
+        .options(selectinload(User.package), selectinload(User.environment))
+    )
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
@@ -64,7 +69,7 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    query = select(User)
+    query = select(User).options(selectinload(User.package), selectinload(User.environment))
     count_query = select(func.count()).select_from(User)
 
     if role is not None:

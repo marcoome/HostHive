@@ -7,6 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.core.database import get_db
 from api.core.security import require_role
@@ -157,7 +158,10 @@ async def package_users(
     total = (await db.execute(count_query)).scalar() or 0
 
     results = (await db.execute(
-        select(User).where(User.package_id == pkg_id).offset(skip).limit(limit)
+        select(User)
+        .where(User.package_id == pkg_id)
+        .options(selectinload(User.package), selectinload(User.environment))
+        .offset(skip).limit(limit)
     )).scalars().all()
 
     return {

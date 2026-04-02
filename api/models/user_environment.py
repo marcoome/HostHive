@@ -44,6 +44,10 @@ class UserEnvironment(TimestampedBase):
     )  # active / suspended / creating / error / destroyed
 
     # Relationships
+    # NOTE: Use "noload" to prevent circular eager loading.
+    # User already selectin-loads its environment; if environment
+    # also selectin-loads User, it creates a loop causing
+    # MissingGreenlet errors. Query explicitly when needed.
     user: Mapped["User"] = relationship(
-        back_populates="environment", lazy="selectin",
+        back_populates="environment", lazy="noload",
     )

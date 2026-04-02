@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.core.database import get_db
 from api.core.security import (
@@ -56,7 +57,9 @@ async def login(
     await check_brute_force(redis, client_ip)
 
     result = await db.execute(
-        select(User).where(User.username == body.username)
+        select(User)
+        .where(User.username == body.username)
+        .options(selectinload(User.package), selectinload(User.environment))
     )
     user = result.scalar_one_or_none()
 
@@ -254,7 +257,7 @@ async def change_password(
 # --------------------------------------------------------------------------
 @router.get("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
 async def me(current_user: User = Depends(get_current_user)):
-    return current_user
+    return UserResponse.model_validate(current_user)
 
 
 # ---------------------------------------------------------------------------

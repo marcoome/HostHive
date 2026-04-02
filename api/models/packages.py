@@ -44,6 +44,11 @@ class Package(TimestampedBase):
     memcached_memory_mb: Mapped[int] = mapped_column(Integer, default=64)
 
     # Relationships
+    # NOTE: Use "noload" to prevent circular eager loading.
+    # Loading a User selectin-loads its Package; if Package also
+    # selectin-loads all its Users, SQLAlchemy enters an async
+    # greenlet loop that causes MissingGreenlet errors.
+    # When you need package.users, query explicitly with selectinload.
     users: Mapped[List["User"]] = relationship(
-        back_populates="package", lazy="selectin",
+        back_populates="package", lazy="noload",
     )

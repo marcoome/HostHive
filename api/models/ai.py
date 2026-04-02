@@ -85,7 +85,9 @@ class AiMessage(Base):
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(),
     )
 
-    conversation: Mapped["AiConversation"] = relationship(back_populates="messages")
+    conversation: Mapped["AiConversation"] = relationship(
+        back_populates="messages", lazy="noload",
+    )
 
 
 # ---------------------------------------------------------------------------

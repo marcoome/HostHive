@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.core.database import get_db
 from api.core.security import get_current_user, hash_password, require_role
@@ -53,7 +54,9 @@ async def _get_reseller_user_or_404(
 ) -> User:
     """Fetch a user that belongs to this reseller, or raise 404."""
     result = await db.execute(
-        select(User).where(User.id == user_id, User.created_by == reseller_id)
+        select(User)
+        .where(User.id == user_id, User.created_by == reseller_id)
+        .options(selectinload(User.package), selectinload(User.environment))
     )
     user = result.scalar_one_or_none()
     if user is None:
@@ -84,7 +87,11 @@ async def list_reseller_users(
     db: AsyncSession = Depends(get_db),
     reseller: User = Depends(_reseller),
 ):
-    base = select(User).where(User.created_by == reseller.id)
+    base = (
+        select(User)
+        .where(User.created_by == reseller.id)
+        .options(selectinload(User.package), selectinload(User.environment))
+    )
     count_q = select(func.count()).select_from(User).where(User.created_by == reseller.id)
 
     total = (await db.execute(count_q)).scalar() or 0
