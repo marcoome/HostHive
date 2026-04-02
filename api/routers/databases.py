@@ -91,8 +91,8 @@ async def _run_async(
 # -- MySQL / MariaDB -------------------------------------------------------
 
 async def _mysql_exec(sql: str, db_password: str | None = None) -> subprocess.CompletedProcess:
-    """Execute a MySQL statement as root."""
-    cmd = ["mysql", "-u", "root"]
+    """Execute a MySQL statement as root (via sudo for Debian compatibility)."""
+    cmd = ["sudo", "mysql", "-u", "root"]
     if db_password:
         cmd.append(f"-p{db_password}")
     return await _run_async(cmd, stdin_data=sql)
