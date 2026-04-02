@@ -191,7 +191,7 @@ async def enable_ssl(
     agent = request.app.state.agent
 
     try:
-        result = await agent.issue_ssl(domain.domain_name)
+        result = await agent.issue_ssl(domain.domain_name, current_user.email)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

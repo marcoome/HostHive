@@ -590,6 +590,7 @@ async def install_app_endpoint(
             app_name=body.app_name,
             agent_client=request.app.state.agent,
             user=current_user.username,
+            email=current_user.email,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

@@ -110,6 +110,7 @@ def verify_token(token: str, *, expected_type: str = "access") -> dict[str, Any]
 
 
 async def get_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> Any:  # returns User model instance
@@ -149,6 +150,7 @@ async def get_current_user(
                 detail="Token invalidated by password change.",
             )
 
+    request.state.current_user = user
     return user
 
 

@@ -34,7 +34,7 @@ export const useAuditStore = defineStore('audit', () => {
       Object.keys(params).forEach(k => {
         if (!params[k]) delete params[k]
       })
-      const { data } = await client.get('/audit-log', { params })
+      const { data } = await client.get('/audit', { params })
       entries.value = data.entries || data.items || []
       pagination.total = data.total || 0
       pagination.totalPages = data.total_pages || Math.ceil(pagination.total / pagination.perPage) || 1
@@ -54,7 +54,7 @@ export const useAuditStore = defineStore('audit', () => {
       Object.keys(params).forEach(k => {
         if (!params[k]) delete params[k]
       })
-      const { data } = await client.get('/audit-log/export', {
+      const { data } = await client.get('/audit/export', {
         params,
         responseType: 'blob'
       })
@@ -73,7 +73,7 @@ export const useAuditStore = defineStore('audit', () => {
 
   async function fetchSuspicious() {
     try {
-      const { data } = await client.get('/audit-log/suspicious')
+      const { data } = await client.get('/audit/suspicious')
       suspicious.value = data.entries || data || []
     } catch (err) {
       const notify = useNotificationsStore()

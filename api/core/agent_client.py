@@ -81,7 +81,11 @@ class AgentClient:
             headers=headers,
         )
         resp.raise_for_status()
-        return resp.json()
+        body = resp.json()
+        # Agent wraps responses in {"ok": bool, "data": ...} — unwrap
+        if isinstance(body, dict) and "data" in body:
+            return body["data"]
+        return body
 
     # ------------------------------------------------------------------
     # HTTP method convenience wrappers

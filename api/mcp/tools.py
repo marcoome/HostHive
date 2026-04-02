@@ -317,14 +317,15 @@ async def delete_dns_record(domain: str, record_id: str) -> Any:
         "type": "object",
         "properties": {
             "domain": {"type": "string", "description": "Domain name"},
+            "email": {"type": "string", "description": "Contact email for Let's Encrypt"},
         },
-        "required": ["domain"],
+        "required": ["domain", "email"],
     },
 )
-async def issue_ssl(domain: str) -> Any:
+async def issue_ssl(domain: str, email: str) -> Any:
     agent = _get_agent_client()
     try:
-        return await agent.issue_ssl(domain)
+        return await agent.issue_ssl(domain, email)
     finally:
         await agent.close()
 

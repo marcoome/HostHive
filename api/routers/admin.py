@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
@@ -220,3 +221,74 @@ async def toggle_maintenance_mode(
         maintenance_mode=body.enabled,
         detail=detail,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /dashboard -- real-time dashboard stats
+# ---------------------------------------------------------------------------
+@router.get("/dashboard", status_code=status.HTTP_200_OK)
+async def dashboard_stats(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    """Real dashboard stats from database + agent (if available)."""
+    from api.models.domains import Domain
+    from api.models.databases import Database
+    from api.models.email_accounts import EmailAccount
+    from api.models.ftp_accounts import FtpAccount
+
+    # Counts from database
+    domain_count = (await db.execute(select(func.count()).select_from(Domain))).scalar() or 0
+    db_count = (await db.execute(select(func.count()).select_from(Database))).scalar() or 0
+    email_count = (await db.execute(select(func.count()).select_from(EmailAccount))).scalar() or 0
+    ftp_count = (await db.execute(select(func.count()).select_from(FtpAccount))).scalar() or 0
+    user_count = (await db.execute(select(func.count()).select_from(User))).scalar() or 0
+
+    # Server stats from agent (graceful fallback)
+    server = {}
+    try:
+        agent = request.app.state.agent
+        server = await agent.get_server_stats()
+    except Exception:
+        pass
+
+    # Parse agent stats into frontend-friendly format
+    cpu_percent = server.get("cpu_percent", 0) or 0
+    mem = server.get("memory", {}) or {}
+    disk = server.get("disk", {}) or {}
+    load = server.get("load_average", {}) or {}
+    net = server.get("network", {}) or {}
+
+    # Sum network across interfaces
+    total_rx = sum(iface.get("rx_bytes", 0) for iface in net.values()) if isinstance(net, dict) else 0
+    total_tx = sum(iface.get("tx_bytes", 0) for iface in net.values()) if isinstance(net, dict) else 0
+
+    mem_total = mem.get("total_kb", 0) * 1024
+    mem_used = mem.get("used_kb", 0) * 1024
+    mem_percent = mem.get("percent", 0)
+
+    disk_total = disk.get("total_bytes", 0)
+    disk_used = disk.get("used_bytes", 0)
+    disk_percent_str = disk.get("percent", "0%")
+    disk_percent = int(disk_percent_str.replace("%", "")) if isinstance(disk_percent_str, str) else 0
+
+    return {
+        "cpu_usage": cpu_percent,
+        "cpu_cores": os.cpu_count() or 1,
+        "ram_used": mem_used,
+        "ram_total": mem_total,
+        "ram_usage": mem_percent,
+        "disk_used": disk_used,
+        "disk_total": disk_total,
+        "disk_usage": disk_percent,
+        "net_in": total_rx,
+        "net_out": total_tx,
+        "load_average": load,
+        "uptime_seconds": server.get("uptime_seconds", 0),
+        "domains_count": domain_count,
+        "databases_count": db_count,
+        "email_count": email_count,
+        "ftp_count": ftp_count,
+        "user_count": user_count,
+    }

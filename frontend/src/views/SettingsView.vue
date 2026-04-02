@@ -324,12 +324,13 @@ const savingProfile = ref(false)
 async function saveProfile() {
   savingProfile.value = true
   try {
+    // NOTE: PUT /auth/me not implemented in backend yet; fails silently
     const { data } = await client.put('/auth/me', profileForm.value)
     auth.user = { ...auth.user, ...data }
     localStorage.setItem('hosthive_user', JSON.stringify(auth.user))
     notifications.success('Profile updated.')
   } catch (err) {
-    notifications.error(err.response?.data?.detail || 'Failed to update profile.')
+    notifications.error(err.response?.data?.detail || 'Profile update not available yet.')
   } finally {
     savingProfile.value = false
   }
@@ -437,7 +438,7 @@ const copied = ref(false)
 
 async function fetchApiKeys() {
   try {
-    const { data } = await client.get('/auth/api-keys')
+    const { data } = await client.get('/api-keys')
     apiKeys.value = data
   } catch {
     apiKeys.value = []
@@ -446,7 +447,7 @@ async function fetchApiKeys() {
 
 async function generateApiKey() {
   try {
-    const { data } = await client.post('/auth/api-keys')
+    const { data } = await client.post('/api-keys')
     newApiKey.value = data.key
     if (data.id) {
       apiKeys.value.unshift({
@@ -465,7 +466,7 @@ async function generateApiKey() {
 
 async function revokeApiKey(id) {
   try {
-    await client.delete(`/auth/api-keys/${id}`)
+    await client.delete(`/api-keys/${id}`)
     apiKeys.value = apiKeys.value.filter(k => k.id !== id)
     notifications.success('API key revoked.')
   } catch {

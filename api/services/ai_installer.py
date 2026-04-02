@@ -242,6 +242,7 @@ async def install_app(
     agent_client: Any,
     ai_client: AIClient | None = None,
     user: str = "www-data",
+    email: str | None = None,
 ) -> dict[str, Any]:
     """Install an application on the specified domain.
 
@@ -297,7 +298,7 @@ async def install_app(
 
         elif step == "setup_ssl":
             try:
-                await agent_client.issue_ssl(domain)
+                await agent_client.issue_ssl(domain, email or f"admin@{domain}")
             except Exception as exc:
                 logger.warning("SSL setup failed for %s: %s", domain, exc)
 

@@ -6,6 +6,7 @@ path traversal attacks. Every path is resolved and validated before use.
 
 from __future__ import annotations
 
+import base64
 import os
 import posixpath
 import uuid
@@ -154,8 +155,14 @@ async def upload_file(
     content = await file.read()
     agent = request.app.state.agent
 
+    # Try UTF-8 for text files, fall back to base64 for binary
     try:
-        await agent.write_file(safe_dest, content.decode("utf-8", errors="replace"))
+        text_content = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text_content = base64.b64encode(content).decode("ascii")
+
+    try:
+        await agent.write_file(safe_dest, text_content)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

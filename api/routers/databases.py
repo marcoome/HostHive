@@ -138,7 +138,7 @@ async def delete_database(
     agent = request.app.state.agent
 
     try:
-        await agent.delete_database(record.db_name, record.db_type.value)
+        await agent.delete_database(record.db_name, record.db_user, record.db_type.value)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

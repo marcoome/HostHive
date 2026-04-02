@@ -23,48 +23,63 @@ export const useSslStore = defineStore('ssl', () => {
   async function fetchCertificates() {
     loading.value = true
     try {
-      const { data } = await client.get('/ssl/certificates')
-      certificates.value = data
+      const { data } = await client.get('/ssl')
+      certificates.value = data.items || data
     } finally {
       loading.value = false
     }
   }
 
-  async function issueCertificate(payload) {
-    const { data } = await client.post('/ssl/certificates', payload)
+  async function issueCertificate(domainId) {
+    const { data } = await client.post(`/ssl/issue/${domainId}`)
     certificates.value.push(data)
     return data
   }
 
-  async function uploadCertificate(payload) {
-    const { data } = await client.post('/ssl/certificates/upload', payload)
+  async function uploadCertificate(domainId, payload) {
+    const { data } = await client.post(`/ssl/install/${domainId}`, payload)
     certificates.value.push(data)
     return data
   }
 
-  async function renewCertificate(id) {
-    const { data } = await client.post(`/ssl/certificates/${id}/renew`)
-    const idx = certificates.value.findIndex(c => c.id === id)
+  async function renewCertificate(domainId) {
+    const { data } = await client.post(`/ssl/renew/${domainId}`)
+    const idx = certificates.value.findIndex(c => c.domain_id === domainId)
     if (idx !== -1) certificates.value[idx] = data
     return data
   }
 
+  // NOTE: revokeCertificate - no backend endpoint yet; wrapped in try-catch
   async function revokeCertificate(id) {
-    await client.post(`/ssl/certificates/${id}/revoke`)
-    const idx = certificates.value.findIndex(c => c.id === id)
-    if (idx !== -1) certificates.value[idx].status = 'revoked'
+    try {
+      await client.post(`/ssl/certificates/${id}/revoke`)
+      const idx = certificates.value.findIndex(c => c.id === id)
+      if (idx !== -1) certificates.value[idx].status = 'revoked'
+    } catch {
+      console.warn('SSL revoke endpoint not available')
+    }
   }
 
+  // NOTE: toggleAutoRenew - no backend endpoint yet; wrapped in try-catch
   async function toggleAutoRenew(id) {
-    const { data } = await client.post(`/ssl/certificates/${id}/auto-renew`)
-    const idx = certificates.value.findIndex(c => c.id === id)
-    if (idx !== -1) certificates.value[idx] = data
-    return data
+    try {
+      const { data } = await client.post(`/ssl/certificates/${id}/auto-renew`)
+      const idx = certificates.value.findIndex(c => c.id === id)
+      if (idx !== -1) certificates.value[idx] = data
+      return data
+    } catch {
+      console.warn('SSL auto-renew endpoint not available')
+    }
   }
 
+  // NOTE: removeCertificate - no backend DELETE endpoint yet; wrapped in try-catch
   async function removeCertificate(id) {
-    await client.delete(`/ssl/certificates/${id}`)
-    certificates.value = certificates.value.filter(c => c.id !== id)
+    try {
+      await client.delete(`/ssl/${id}`)
+      certificates.value = certificates.value.filter(c => c.id !== id)
+    } catch {
+      console.warn('SSL delete endpoint not available')
+    }
   }
 
   return {

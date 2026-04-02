@@ -184,7 +184,7 @@ async def delete_user(
     )).scalars().all()
     for database in databases:
         try:
-            await agent.delete_database(database.db_name, database.db_type.value)
+            await agent.delete_database(database.db_name, database.db_user, database.db_type.value)
         except Exception:
             pass
 

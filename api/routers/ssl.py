@@ -87,7 +87,7 @@ async def issue_certificate(
     agent = request.app.state.agent
 
     try:
-        result = await agent.issue_ssl(domain.domain_name)
+        result = await agent.issue_ssl(domain.domain_name, current_user.email)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -133,10 +133,9 @@ async def install_custom_certificate(
 
     try:
         result = await agent.install_custom_ssl(
-            domain=domain.domain_name,
-            cert=body.certificate,
-            key=body.private_key,
-            chain=body.chain,
+            domain.domain_name,
+            body.certificate,
+            body.private_key,
         )
     except Exception as exc:
         raise HTTPException(
@@ -190,7 +189,7 @@ async def renew_certificate(
 
     agent = request.app.state.agent
     try:
-        await agent.issue_ssl(domain.domain_name)
+        await agent.issue_ssl(domain.domain_name, current_user.email)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

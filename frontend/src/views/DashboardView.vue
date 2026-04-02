@@ -229,26 +229,17 @@ import {
   Tooltip
 } from 'chart.js'
 import GaugeChart from '@/components/GaugeChart.vue'
-import { useServerStore } from '@/stores/server'
+import client from '@/api/client'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip)
 
-const serverStore = useServerStore()
 const loading = ref(true)
 const dashboardRef = ref(null)
+const dashboardData = ref(null)
 
-// Mock data structures (will use real data from store when available)
-const serverStats = computed(() => serverStore.stats || {
-  cpu_usage: 42,
-  cpu_cores: 8,
-  ram_used: 6442450944,
-  ram_total: 17179869184,
-  ram_usage: 37,
-  disk_used: 107374182400,
-  disk_total: 536870912000,
-  disk_usage: 20,
-  net_in: 1258291,
-  net_out: 524288
+const serverStats = computed(() => dashboardData.value || {
+  cpu_usage: 0, cpu_cores: 0, ram_used: 0, ram_total: 0, ram_usage: 0,
+  disk_used: 0, disk_total: 0, disk_usage: 0, net_in: 0, net_out: 0
 })
 
 const cpuUsage = computed(() => serverStats.value.cpu_usage || 0)
@@ -263,10 +254,10 @@ const diskColor = computed(() => {
 })
 
 const quickStats = computed(() => [
-  { label: 'Domains', value: serverStats.value.domains_count ?? 12, icon: '&#9673;' },
-  { label: 'Databases', value: serverStats.value.databases_count ?? 8, icon: '&#9707;' },
-  { label: 'Email Accounts', value: serverStats.value.email_count ?? 24, icon: '&#9993;' },
-  { label: 'FTP Accounts', value: serverStats.value.ftp_count ?? 5, icon: '&#8645;' }
+  { label: 'Domains', value: serverStats.value.domains_count ?? 0, icon: '&#9673;' },
+  { label: 'Databases', value: serverStats.value.databases_count ?? 0, icon: '&#9707;' },
+  { label: 'Email Accounts', value: serverStats.value.email_count ?? 0, icon: '&#9993;' },
+  { label: 'FTP Accounts', value: serverStats.value.ftp_count ?? 0, icon: '&#8645;' }
 ])
 
 // Chart data - generates mock 24h data
@@ -354,7 +345,7 @@ const chartOptions = {
   }
 }
 
-// Alerts
+// Alerts (derived from real dashboard data)
 const alerts = computed(() => {
   const list = []
   if (diskUsage.value > 90) {
@@ -362,48 +353,32 @@ const alerts = computed(() => {
   } else if (diskUsage.value > 80) {
     list.push({ id: 'disk', type: 'WARNING', message: `Disk usage at ${diskUsage.value}%`, badgeClass: 'badge-warning' })
   }
-
-  // Mock SSL expiry alerts
-  const sslAlerts = serverStats.value.ssl_expiring || [
-    { domain: 'example.com', days: 7 },
-    { domain: 'api.example.com', days: 3 }
-  ]
-  sslAlerts.forEach((ssl, i) => {
-    list.push({
-      id: `ssl-${i}`,
-      type: ssl.days <= 3 ? 'CRITICAL' : 'WARNING',
-      message: `SSL for ${ssl.domain} expires in ${ssl.days} days`,
-      badgeClass: ssl.days <= 3 ? 'badge-error' : 'badge-warning'
-    })
-  })
-
-  // Mock service down alerts
-  const downServices = serverStore.services.filter(s => s.status === 'stopped') || []
-  downServices.forEach((svc, i) => {
-    list.push({
-      id: `svc-${i}`,
-      type: 'DOWN',
-      message: `Service ${svc.name} is not running`,
-      badgeClass: 'badge-error'
-    })
-  })
-
+  if (ramUsage.value > 90) {
+    list.push({ id: 'ram', type: 'WARNING', message: `RAM usage at ${ramUsage.value}%`, badgeClass: 'badge-warning' })
+  }
+  if (cpuUsage.value > 90) {
+    list.push({ id: 'cpu', type: 'WARNING', message: `CPU usage at ${cpuUsage.value}%`, badgeClass: 'badge-warning' })
+  }
   return list
 })
 
-// Recent Activity (mock)
-const recentActivity = ref([
-  { id: 1, user: 'admin', action: 'created domain example.com', time: '2 min ago', ip: '192.168.1.100' },
-  { id: 2, user: 'admin', action: 'issued SSL certificate for example.com', time: '5 min ago', ip: '192.168.1.100' },
-  { id: 3, user: 'john', action: 'created database myapp_db', time: '12 min ago', ip: '10.0.0.15' },
-  { id: 4, user: 'admin', action: 'restarted nginx service', time: '25 min ago', ip: '192.168.1.100' },
-  { id: 5, user: 'sarah', action: 'created email account info@example.com', time: '1 hour ago', ip: '172.16.0.5' },
-  { id: 6, user: 'admin', action: 'updated firewall rules', time: '2 hours ago', ip: '192.168.1.100' },
-  { id: 7, user: 'john', action: 'uploaded files via FTP', time: '3 hours ago', ip: '10.0.0.15' },
-  { id: 8, user: 'admin', action: 'created backup (full)', time: '5 hours ago', ip: '192.168.1.100' },
-  { id: 9, user: 'sarah', action: 'added DNS record A for api.example.com', time: '6 hours ago', ip: '172.16.0.5' },
-  { id: 10, user: 'admin', action: 'updated server settings', time: '8 hours ago', ip: '192.168.1.100' }
-])
+// Recent Activity (fetched from audit API)
+const recentActivity = ref([])
+
+async function fetchActivity() {
+  try {
+    const { data } = await client.get('/audit', { params: { limit: 10 } })
+    recentActivity.value = (data.items || []).map(item => ({
+      id: item.id,
+      user: item.user || 'system',
+      action: item.action || item.details || '',
+      time: item.created_at ? new Date(item.created_at).toLocaleString() : '',
+      ip: item.ip_address || ''
+    }))
+  } catch {
+    // Keep empty on error
+  }
+}
 
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B'
@@ -415,29 +390,17 @@ function formatBytes(bytes) {
 async function refreshAll() {
   loading.value = true
   try {
-    await Promise.all([
-      serverStore.fetchStats(),
-      serverStore.fetchServices()
-    ])
+    const { data } = await client.get('/admin/dashboard')
+    dashboardData.value = data
+    await fetchActivity()
   } catch {
-    // Use fallback mock data on error
+    // Use defaults on error
   } finally {
     loading.value = false
   }
 }
 
-onMounted(async () => {
-  try {
-    await Promise.all([
-      serverStore.fetchStats(),
-      serverStore.fetchServices()
-    ])
-  } catch {
-    // Will use default mock data
-  } finally {
-    loading.value = false
-  }
-})
+onMounted(refreshAll)
 </script>
 
 <style scoped>
