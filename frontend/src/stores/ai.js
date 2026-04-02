@@ -53,20 +53,29 @@ export const useAiStore = defineStore('ai', () => {
     streamingText.value = ''
 
     try {
-      // Get fresh token (may have been refreshed by interceptor)
+      // Use axios for the request (handles token refresh automatically)
+      // Then read as stream
       const storedTokens = JSON.parse(localStorage.getItem('hosthive_tokens') || '{}')
-      const authHeader = storedTokens.access ? `Bearer ${storedTokens.access}` : ''
+      let authToken = storedTokens.access || ''
 
-      if (!authHeader) {
+      if (!authToken) {
         throw new Error('Not authenticated. Please log in again.')
       }
+
+      // Try to use axios first to get a fresh token if needed
+      try {
+        await client.get('/auth/me')
+        // Re-read token in case it was refreshed
+        const freshTokens = JSON.parse(localStorage.getItem('hosthive_tokens') || '{}')
+        authToken = freshTokens.access || authToken
+      } catch {}
 
       const response = await fetch('/api/v1/ai/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
-          'Authorization': authHeader
+          'Authorization': `Bearer ${authToken}`
         },
         body: JSON.stringify({
           message,
@@ -74,24 +83,9 @@ export const useAiStore = defineStore('ai', () => {
         })
       })
 
-      // Handle auth errors
-      if (response.status === 401) {
-        // Try to refresh token
-        try {
-          const refreshResp = await fetch('/api/v1/auth/refresh', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh_token: storedTokens.refresh })
-          })
-          if (refreshResp.ok) {
-            const refreshData = await refreshResp.json()
-            const newTokens = { access: refreshData.access_token, refresh: refreshData.refresh_token || storedTokens.refresh }
-            localStorage.setItem('hosthive_tokens', JSON.stringify(newTokens))
-            // Retry with new token
-            return sendMessage(message, context)
-          }
-        } catch {}
-        throw new Error('Session expired. Please log in again.')
+      if (!response.ok) {
+        const errBody = await response.text()
+        throw new Error(errBody || `HTTP ${response.status}`)
       }
 
       const reader = response.body.getReader()

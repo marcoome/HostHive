@@ -94,9 +94,9 @@ async def issue_certificate(
         domain_id=domain.id,
         domain_name=domain.domain_name,
         provider=CertProvider.LETS_ENCRYPT,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=90),
+        expires_at=datetime.utcnow() + timedelta(days=90),
         auto_renew=True,
-        last_renewed_at=datetime.now(timezone.utc),
+        last_renewed_at=datetime.utcnow(),
     )
     db.add(cert)
     await db.flush()
@@ -268,8 +268,8 @@ async def renew_certificate(
     # Update DB records
     cert.cert_path = cert_result["cert_path"]
     cert.key_path = cert_result["key_path"]
-    cert.expires_at = datetime.now(timezone.utc) + timedelta(days=90)
-    cert.last_renewed_at = datetime.now(timezone.utc)
+    cert.expires_at = datetime.utcnow() + timedelta(days=90)
+    cert.last_renewed_at = datetime.utcnow()
     db.add(cert)
 
     domain.ssl_cert_path = cert_result["cert_path"]
@@ -289,7 +289,7 @@ async def expiring_certificates(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    threshold = datetime.now(timezone.utc) + timedelta(days=30)
+    threshold = datetime.utcnow() + timedelta(days=30)
     query = select(SSLCertificate).where(
         SSLCertificate.expires_at.isnot(None),
         SSLCertificate.expires_at < threshold,
