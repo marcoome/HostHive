@@ -546,7 +546,8 @@ async def database_sso(
         import random
         new_password = ''.join(random.choices(string.ascii_letters + string.digits, k=20))
         try:
-            await _run_async(_direct_reset_password, record.db_name, record.db_user, new_password, record.db_type)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _direct_reset_password, record.db_name, record.db_user, new_password, record.db_type)
             record.db_password_encrypted = encrypt_value(new_password, settings.SECRET_KEY)
             db.add(record)
             await db.commit()
