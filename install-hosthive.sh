@@ -483,6 +483,13 @@ step 13 $TOTAL_STEPS "Starting HostHive services"
 chown -R hosthive:hosthive "${INSTALL_DIR}"
 chmod -R 750 "${INSTALL_DIR}"
 
+# Frontend dist must be readable by nginx (www-data)
+chmod -R o+rX "${INSTALL_DIR}/frontend/dist" 2>/dev/null || true
+# Also ensure parent dirs are traversable
+chmod o+x "${INSTALL_DIR}"
+chmod o+x "${INSTALL_DIR}/frontend"
+chmod o+x "${INSTALL_DIR}/frontend/dist"
+
 # Agent directory needs root ownership (it runs as root for privileged ops)
 chown -R root:root "${INSTALL_DIR}/agent"
 
@@ -492,6 +499,10 @@ chmod 770 "${INSTALL_DIR}/logs"
 
 # Ensure venv is accessible
 chmod -R 755 "${INSTALL_DIR}/venv"
+
+# Config dir readable by hosthive user
+chmod -R 750 "${INSTALL_DIR}/config"
+chown -R hosthive:hosthive "${INSTALL_DIR}/config"
 
 # Ensure /var/log/hosthive exists for nginx
 mkdir -p /var/log/hosthive

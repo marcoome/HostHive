@@ -10,6 +10,7 @@ User=hosthive
 Group=hosthive
 WorkingDirectory=/opt/hosthive
 EnvironmentFile=/opt/hosthive/config/secrets.env
+Environment=PYTHONPATH=/opt/hosthive
 
 ExecStart=/opt/hosthive/venv/bin/uvicorn \
     api.main:app \
