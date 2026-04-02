@@ -21,22 +21,24 @@ export const useServerStore = defineStore('server', () => {
 
   async function fetchServices() {
     const { data } = await client.get('/server/services')
-    services.value = data
+    services.value = Array.isArray(data) ? data : []
   }
 
   async function restartService(name) {
+    if (!name) { console.warn('restartService called without name'); return }
     await client.post(`/server/services/${name}/restart`)
     await fetchServices()
   }
 
   async function toggleService(name, action) {
+    if (!name || !action) { console.warn('toggleService called without name or action'); return }
     await client.post(`/server/services/${name}/${action}`)
     await fetchServices()
   }
 
   async function fetchFirewallRules() {
     const { data } = await client.get('/server/firewall')
-    firewallRules.value = data
+    firewallRules.value = Array.isArray(data) ? data : []
   }
 
   async function addFirewallRule(payload) {
@@ -46,16 +48,18 @@ export const useServerStore = defineStore('server', () => {
   }
 
   async function removeFirewallRule(id) {
+    if (!id) { console.warn('removeFirewallRule called without id'); return }
     await client.delete(`/server/firewall/${id}`)
     firewallRules.value = firewallRules.value.filter(r => r.id !== id)
   }
 
   async function fetchFail2ban() {
     const { data } = await client.get('/server/fail2ban')
-    fail2banJails.value = data
+    fail2banJails.value = Array.isArray(data) ? data : []
   }
 
   async function toggleFail2banJail(jail, action) {
+    if (!jail || !action) { console.warn('toggleFail2banJail called without jail or action'); return }
     await client.post(`/server/fail2ban/${jail}/${action}`)
     await fetchFail2ban()
   }

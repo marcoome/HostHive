@@ -198,6 +198,7 @@ async function importZone() {
 }
 
 function exportZone(zone) {
+  if (!zone?.id) return
   const url = `/api/v1/dns/zones/${zone.id}/export`
   const link = document.createElement('a')
   link.href = url

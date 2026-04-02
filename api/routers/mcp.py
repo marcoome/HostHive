@@ -24,3 +24,15 @@ async def mcp_status(
         "servers": [],
         "message": "MCP integration is not configured.",
     }
+
+
+@router.post("/token/regenerate", status_code=status.HTTP_200_OK)
+async def regenerate_mcp_token(current_user: User = Depends(get_current_user)):
+    import secrets
+    token = secrets.token_urlsafe(32)
+    return {"token": token, "detail": "MCP token regenerated."}
+
+
+@router.get("/config", status_code=status.HTTP_200_OK)
+async def get_mcp_config(current_user: User = Depends(get_current_user)):
+    return {"enabled": False, "servers": [], "tools": []}

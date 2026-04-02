@@ -11,7 +11,7 @@ export const useIntegrationsStore = defineStore('integrations', () => {
     loading.value = true
     try {
       const { data } = await client.get('/integrations')
-      integrations.value = data
+      integrations.value = Array.isArray(data) ? data : []
     } catch (err) {
       const notify = useNotificationsStore()
       notify.error('Failed to load integrations')
@@ -22,6 +22,7 @@ export const useIntegrationsStore = defineStore('integrations', () => {
   }
 
   async function updateIntegration(name, config) {
+    if (!name) { console.warn('updateIntegration called without name'); return }
     const notify = useNotificationsStore()
     try {
       const { data } = await client.put(`/integrations/${name}`, { config })
@@ -36,6 +37,7 @@ export const useIntegrationsStore = defineStore('integrations', () => {
   }
 
   async function toggleIntegration(name) {
+    if (!name) { console.warn('toggleIntegration called without name'); return }
     const notify = useNotificationsStore()
     try {
       const current = integrations.value.find(i => i.name === name)
@@ -52,6 +54,7 @@ export const useIntegrationsStore = defineStore('integrations', () => {
   }
 
   async function testConnection(name) {
+    if (!name) { console.warn('testConnection called without name'); return }
     const notify = useNotificationsStore()
     try {
       const { data } = await client.post(`/integrations/${name}/test`)

@@ -106,7 +106,10 @@ async def list_containers(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    try:
+        _check_docker_available()
+    except HTTPException:
+        return {"items": [], "total": 0, "docker_available": False}
 
     query = select(DockerContainer)
     count_query = select(func.count()).select_from(DockerContainer)

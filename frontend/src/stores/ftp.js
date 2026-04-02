@@ -23,6 +23,7 @@ export const useFtpStore = defineStore('ftp', () => {
   }
 
   async function updateAccount(id, payload) {
+    if (!id) { console.warn('updateAccount called without id'); return }
     const { data } = await client.put(`/ftp/accounts/${id}`, payload)
     const idx = accounts.value.findIndex(a => a.id === id)
     if (idx !== -1) accounts.value[idx] = data
@@ -30,11 +31,13 @@ export const useFtpStore = defineStore('ftp', () => {
   }
 
   async function removeAccount(id) {
+    if (!id) { console.warn('removeAccount called without id'); return }
     await client.delete(`/ftp/accounts/${id}`)
     accounts.value = accounts.value.filter(a => a.id !== id)
   }
 
   async function toggleStatus(id) {
+    if (!id) { console.warn('toggleStatus called without id'); return }
     const { data } = await client.post(`/ftp/accounts/${id}/toggle`)
     const idx = accounts.value.findIndex(a => a.id === id)
     if (idx !== -1) accounts.value[idx] = data

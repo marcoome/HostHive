@@ -381,21 +381,24 @@ const showDeleteQueueDialog = ref(false)
 const queueItemToDelete = ref(null)
 
 const availableDomains = computed(() => {
-  return domainsStore.domains.map(d => d.name)
+  const list = Array.isArray(domainsStore.domains) ? domainsStore.domains : []
+  return list.map(d => d.name)
 })
 
 const filteredMailboxes = computed(() => {
-  if (!search.value) return emailStore.mailboxes
+  const list = Array.isArray(emailStore.mailboxes) ? emailStore.mailboxes : []
+  if (!search.value) return list
   const q = search.value.toLowerCase()
-  return emailStore.mailboxes.filter(m =>
+  return list.filter(m =>
     m.address?.toLowerCase().includes(q) || m.domain?.toLowerCase().includes(q)
   )
 })
 
 const filteredAliases = computed(() => {
-  if (!search.value) return emailStore.aliases
+  const list = Array.isArray(emailStore.aliases) ? emailStore.aliases : []
+  if (!search.value) return list
   const q = search.value.toLowerCase()
-  return emailStore.aliases.filter(a =>
+  return list.filter(a =>
     a.from_address?.toLowerCase().includes(q) || a.to_address?.toLowerCase().includes(q)
   )
 })
@@ -579,7 +582,7 @@ function confirmDeleteQueueItem(row) {
 }
 
 async function handleDeleteQueueItem() {
-  if (!queueItemToDelete.value) return
+  if (!queueItemToDelete.value || !queueItemToDelete.value.message_id) return
   try {
     await client.delete(`/email/queue/${queueItemToDelete.value.message_id}`)
     queueItems.value = queueItems.value.filter(q => q.message_id !== queueItemToDelete.value.message_id)

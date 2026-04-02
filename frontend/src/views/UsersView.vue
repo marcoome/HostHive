@@ -342,6 +342,7 @@ async function handleCreate() {
 }
 
 async function suspendUser(user) {
+  if (!user?.id) return
   try {
     await client.post(`/users/${user.id}/suspend`)
     user.status = 'suspended'
@@ -352,6 +353,7 @@ async function suspendUser(user) {
 }
 
 async function unsuspendUser(user) {
+  if (!user?.id) return
   try {
     await client.post(`/users/${user.id}/unsuspend`)
     user.status = 'active'
@@ -367,7 +369,7 @@ function confirmDeleteUser(user) {
 }
 
 async function handleDelete() {
-  if (!userToDelete.value) return
+  if (!userToDelete.value?.id) return
   try {
     await client.delete(`/users/${userToDelete.value.id}`)
     users.value = users.value.filter(u => u.id !== userToDelete.value.id)

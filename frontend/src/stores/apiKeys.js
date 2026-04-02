@@ -11,7 +11,7 @@ export const useApiKeysStore = defineStore('apiKeys', () => {
     loading.value = true
     try {
       const { data } = await client.get('/api-keys')
-      keys.value = data.keys || data || []
+      keys.value = Array.isArray(data?.keys) ? data.keys : (Array.isArray(data) ? data : [])
     } catch (err) {
       const notify = useNotificationsStore()
       notify.error('Failed to load API keys')
@@ -35,6 +35,7 @@ export const useApiKeysStore = defineStore('apiKeys', () => {
   }
 
   async function revokeKey(id) {
+    if (!id) { console.warn('revokeKey called without id'); return }
     const notify = useNotificationsStore()
     try {
       await client.delete(`/api-keys/${id}`)

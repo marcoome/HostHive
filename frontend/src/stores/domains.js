@@ -18,6 +18,7 @@ export const useDomainsStore = defineStore('domains', () => {
   }
 
   async function fetchOne(id) {
+    if (!id) { console.warn('domains.fetchOne called without id'); return }
     loading.value = true
     try {
       const { data } = await client.get(`/domains/${id}`)
@@ -35,6 +36,7 @@ export const useDomainsStore = defineStore('domains', () => {
   }
 
   async function update(id, payload) {
+    if (!id) { console.warn('domains.update called without id'); return }
     const { data } = await client.put(`/domains/${id}`, payload)
     const idx = domains.value.findIndex(d => d.id === id)
     if (idx !== -1) domains.value[idx] = data
@@ -42,6 +44,7 @@ export const useDomainsStore = defineStore('domains', () => {
   }
 
   async function remove(id) {
+    if (!id) { console.warn('domains.remove called without id'); return }
     await client.delete(`/domains/${id}`)
     domains.value = domains.value.filter(d => d.id !== id)
   }

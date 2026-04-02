@@ -197,7 +197,7 @@ const documentRoot = computed(() => {
 })
 
 const filteredDomains = computed(() => {
-  let result = store.domains
+  let result = Array.isArray(store.domains) ? store.domains : []
   if (search.value) {
     const q = search.value.toLowerCase()
     result = result.filter(d => d.name.toLowerCase().includes(q))

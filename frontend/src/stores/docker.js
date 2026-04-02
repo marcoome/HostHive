@@ -12,7 +12,7 @@ export const useDockerStore = defineStore('docker', () => {
     loading.value = true
     try {
       const { data } = await client.get('/docker/containers')
-      containers.value = data
+      containers.value = Array.isArray(data) ? data : []
       dockerAvailable.value = true
       return data
     } catch (err) {
@@ -34,6 +34,7 @@ export const useDockerStore = defineStore('docker', () => {
   }
 
   async function startContainer(id) {
+    if (!id) { console.warn('startContainer called without id'); return }
     const { data } = await client.post(`/docker/containers/${id}/start`)
     const notify = useNotificationsStore()
     notify.success('Container started')
@@ -42,6 +43,7 @@ export const useDockerStore = defineStore('docker', () => {
   }
 
   async function stopContainer(id) {
+    if (!id) { console.warn('stopContainer called without id'); return }
     const { data } = await client.post(`/docker/containers/${id}/stop`)
     const notify = useNotificationsStore()
     notify.success('Container stopped')
@@ -50,6 +52,7 @@ export const useDockerStore = defineStore('docker', () => {
   }
 
   async function restartContainer(id) {
+    if (!id) { console.warn('restartContainer called without id'); return }
     const { data } = await client.post(`/docker/containers/${id}/restart`)
     const notify = useNotificationsStore()
     notify.success('Container restarted')
@@ -58,6 +61,7 @@ export const useDockerStore = defineStore('docker', () => {
   }
 
   async function removeContainer(id) {
+    if (!id) { console.warn('removeContainer called without id'); return }
     const { data } = await client.delete(`/docker/containers/${id}`)
     const notify = useNotificationsStore()
     notify.success('Container removed')
@@ -66,11 +70,13 @@ export const useDockerStore = defineStore('docker', () => {
   }
 
   async function getContainerLogs(id) {
+    if (!id) { console.warn('getContainerLogs called without id'); return }
     const { data } = await client.get(`/docker/containers/${id}/logs`)
     return data
   }
 
   async function getContainerStats(id) {
+    if (!id) { console.warn('getContainerStats called without id'); return }
     const { data } = await client.get(`/docker/containers/${id}/stats`)
     return data
   }

@@ -273,7 +273,8 @@ const dbUser = computed(() => {
 })
 
 const filteredDatabases = computed(() => {
-  let result = store.databases.filter(d => d.type === activeTab.value)
+  const list = Array.isArray(store.databases) ? store.databases : []
+  let result = list.filter(d => d.type === activeTab.value)
   if (search.value) {
     const q = search.value.toLowerCase()
     result = result.filter(d => d.name.toLowerCase().includes(q) || d.username?.toLowerCase().includes(q))

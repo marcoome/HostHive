@@ -23,6 +23,7 @@ export const useDatabasesStore = defineStore('databases', () => {
   }
 
   async function update(id, payload) {
+    if (!id) { console.warn('databases.update called without id'); return }
     const { data } = await client.put(`/databases/${id}`, payload)
     const idx = databases.value.findIndex(d => d.id === id)
     if (idx !== -1) databases.value[idx] = data
@@ -30,6 +31,7 @@ export const useDatabasesStore = defineStore('databases', () => {
   }
 
   async function remove(id) {
+    if (!id) { console.warn('databases.remove called without id'); return }
     await client.delete(`/databases/${id}`)
     databases.value = databases.value.filter(d => d.id !== id)
   }

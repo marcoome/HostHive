@@ -544,6 +544,7 @@ function toggleJailExpand(jail) {
 }
 
 async function unbanIp(jailName, ip) {
+  if (!jailName || !ip) return
   try {
     await client.post(`/server/fail2ban/${jailName}/unban`, { ip })
     notifications.success(`Unbanned ${ip} from ${jailName}.`)

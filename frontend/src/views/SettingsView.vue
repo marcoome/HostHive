@@ -422,6 +422,7 @@ async function fetchSessions() {
 }
 
 async function revokeSession(id) {
+  if (!id) return
   try {
     await client.delete(`/auth/sessions/${id}`)
     sessions.value = sessions.value.filter(s => s.id !== id)
@@ -447,7 +448,7 @@ async function fetchApiKeys() {
 
 async function generateApiKey() {
   try {
-    const { data } = await client.post('/api-keys')
+    const { data } = await client.post('/api-keys', { name: 'Default API Key', scope: 'read_only' })
     newApiKey.value = data.key
     if (data.id) {
       apiKeys.value.unshift({
@@ -465,6 +466,7 @@ async function generateApiKey() {
 }
 
 async function revokeApiKey(id) {
+  if (!id) return
   try {
     await client.delete(`/api-keys/${id}`)
     apiKeys.value = apiKeys.value.filter(k => k.id !== id)

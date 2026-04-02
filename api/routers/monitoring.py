@@ -192,6 +192,34 @@ async def acknowledge_anomaly(
 # --------------------------------------------------------------------------
 # GET /disk-prediction -- predictive disk usage
 # --------------------------------------------------------------------------
+def _safe_float(val, default: float = 0.0) -> float:
+    """Return a safe float, replacing None/NaN/Inf with default."""
+    import math
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val, default: int = 0) -> int:
+    """Return a safe int, replacing None/NaN/Inf with default."""
+    import math
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return int(f)
+    except (TypeError, ValueError):
+        return default
+
+
 @router.get("/disk-prediction", response_model=DiskPredictionResponse, status_code=status.HTTP_200_OK)
 async def disk_prediction(
     db: AsyncSession = Depends(get_db),
@@ -199,7 +227,15 @@ async def disk_prediction(
 ):
     try:
         svc = MonitoringService(db)
-        return await svc.predict_disk_full()
+        result = await svc.predict_disk_full()
+        # Sanitise numeric fields to avoid NaN
+        return DiskPredictionResponse(
+            days_until_full=_safe_float(result.days_until_full, 0.0) if result.days_until_full is not None else None,
+            current_usage_percent=_safe_float(result.current_usage_percent),
+            current_used_gb=_safe_float(result.current_used_gb),
+            total_gb=_safe_float(result.total_gb),
+            trend_gb_per_day=_safe_float(result.trend_gb_per_day),
+        )
     except Exception:
         return DiskPredictionResponse(
             days_until_full=None,
@@ -267,26 +303,23 @@ async def realtime_stats(
     agent = request.app.state.agent
     try:
         data = await agent.get_server_stats()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error: {exc}",
-        )
+    except Exception:
+        data = {}
 
     return RealtimeStatsResponse(
-        cpu_percent=data.get("cpu_percent", 0.0),
-        memory_percent=data.get("memory_percent", 0.0),
-        memory_used_mb=data.get("memory_used_mb", 0),
-        memory_total_mb=data.get("memory_total_mb", 0),
-        disk_percent=data.get("disk_percent", 0.0),
-        disk_used_gb=data.get("disk_used_gb", 0.0),
-        disk_total_gb=data.get("disk_total_gb", 0.0),
-        load_avg_1=data.get("load_avg_1", 0.0),
-        load_avg_5=data.get("load_avg_5", 0.0),
-        load_avg_15=data.get("load_avg_15", 0.0),
-        network_rx_bytes=data.get("network_rx_bytes", 0),
-        network_tx_bytes=data.get("network_tx_bytes", 0),
-        active_connections=data.get("active_connections", 0),
+        cpu_percent=_safe_float(data.get("cpu_percent")),
+        memory_percent=_safe_float(data.get("memory_percent")),
+        memory_used_mb=_safe_int(data.get("memory_used_mb")),
+        memory_total_mb=_safe_int(data.get("memory_total_mb")),
+        disk_percent=_safe_float(data.get("disk_percent")),
+        disk_used_gb=_safe_float(data.get("disk_used_gb")),
+        disk_total_gb=_safe_float(data.get("disk_total_gb")),
+        load_avg_1=_safe_float(data.get("load_avg_1")),
+        load_avg_5=_safe_float(data.get("load_avg_5")),
+        load_avg_15=_safe_float(data.get("load_avg_15")),
+        network_rx_bytes=_safe_int(data.get("network_rx_bytes")),
+        network_tx_bytes=_safe_int(data.get("network_tx_bytes")),
+        active_connections=_safe_int(data.get("active_connections")),
     )
 
 

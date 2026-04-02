@@ -25,8 +25,8 @@ export const useResellerStore = defineStore('reseller', () => {
     loading.value = true
     try {
       const { data } = await client.get('/reseller/users', { params: { skip, limit } })
-      users.value = data.items
-      usersTotal.value = data.total
+      users.value = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : [])
+      usersTotal.value = data?.total || users.value.length
     } finally {
       loading.value = false
     }
@@ -40,6 +40,7 @@ export const useResellerStore = defineStore('reseller', () => {
   }
 
   async function updateUser(id, payload) {
+    if (!id) { console.warn('reseller.updateUser called without id'); return }
     const { data } = await client.put(`/reseller/users/${id}`, payload)
     const idx = users.value.findIndex(u => u.id === id)
     if (idx !== -1) users.value[idx] = data
@@ -47,12 +48,14 @@ export const useResellerStore = defineStore('reseller', () => {
   }
 
   async function deleteUser(id) {
+    if (!id) { console.warn('reseller.deleteUser called without id'); return }
     await client.delete(`/reseller/users/${id}`)
     users.value = users.value.filter(u => u.id !== id)
     usersTotal.value--
   }
 
   async function suspendUser(id) {
+    if (!id) { console.warn('reseller.suspendUser called without id'); return }
     const { data } = await client.post(`/reseller/users/${id}/suspend`)
     const idx = users.value.findIndex(u => u.id === id)
     if (idx !== -1) users.value[idx] = data
@@ -60,6 +63,7 @@ export const useResellerStore = defineStore('reseller', () => {
   }
 
   async function unsuspendUser(id) {
+    if (!id) { console.warn('reseller.unsuspendUser called without id'); return }
     const { data } = await client.post(`/reseller/users/${id}/unsuspend`)
     const idx = users.value.findIndex(u => u.id === id)
     if (idx !== -1) users.value[idx] = data
@@ -100,7 +104,7 @@ export const useResellerStore = defineStore('reseller', () => {
 
   async function fetchPackages() {
     const { data } = await client.get('/reseller/packages')
-    packages.value = data.items
+    packages.value = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : [])
   }
 
   return {

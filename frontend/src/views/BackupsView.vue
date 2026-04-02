@@ -267,6 +267,7 @@ async function handleCreate() {
 }
 
 function handleDownload(backup) {
+  if (!backup?.id) return
   const link = document.createElement('a')
   link.href = `/api/v1/backups/${backup.id}/download`
   link.download = `backup-${backup.id}.tar.gz`
@@ -283,7 +284,7 @@ function openRestore(backup) {
 }
 
 async function handleRestore() {
-  if (restoreConfirmText.value !== 'RESTORE' || !restoreTarget.value) return
+  if (restoreConfirmText.value !== 'RESTORE' || !restoreTarget.value?.id) return
   restoring.value = true
   try {
     await client.post(`/backups/${restoreTarget.value.id}/restore`)
@@ -302,7 +303,7 @@ function confirmDeleteBackup(backup) {
 }
 
 async function handleDelete() {
-  if (!deleteTarget.value) return
+  if (!deleteTarget.value?.id) return
   try {
     await client.delete(`/backups/${deleteTarget.value.id}`)
     backups.value = backups.value.filter(b => b.id !== deleteTarget.value.id)

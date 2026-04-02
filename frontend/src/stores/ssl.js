@@ -24,25 +24,28 @@ export const useSslStore = defineStore('ssl', () => {
     loading.value = true
     try {
       const { data } = await client.get('/ssl')
-      certificates.value = data.items || data
+      certificates.value = Array.isArray(data) ? data : (Array.isArray(data.items) ? data.items : [])
     } finally {
       loading.value = false
     }
   }
 
   async function issueCertificate(domainId) {
+    if (!domainId) { console.warn('issueCertificate called without domainId'); return }
     const { data } = await client.post(`/ssl/issue/${domainId}`)
     certificates.value.push(data)
     return data
   }
 
   async function uploadCertificate(domainId, payload) {
+    if (!domainId) { console.warn('uploadCertificate called without domainId'); return }
     const { data } = await client.post(`/ssl/install/${domainId}`, payload)
     certificates.value.push(data)
     return data
   }
 
   async function renewCertificate(domainId) {
+    if (!domainId) { console.warn('renewCertificate called without domainId'); return }
     const { data } = await client.post(`/ssl/renew/${domainId}`)
     const idx = certificates.value.findIndex(c => c.domain_id === domainId)
     if (idx !== -1) certificates.value[idx] = data
@@ -51,6 +54,7 @@ export const useSslStore = defineStore('ssl', () => {
 
   // NOTE: revokeCertificate - no backend endpoint yet; wrapped in try-catch
   async function revokeCertificate(id) {
+    if (!id) { console.warn('revokeCertificate called without id'); return }
     try {
       await client.post(`/ssl/certificates/${id}/revoke`)
       const idx = certificates.value.findIndex(c => c.id === id)
@@ -62,6 +66,7 @@ export const useSslStore = defineStore('ssl', () => {
 
   // NOTE: toggleAutoRenew - no backend endpoint yet; wrapped in try-catch
   async function toggleAutoRenew(id) {
+    if (!id) { console.warn('toggleAutoRenew called without id'); return }
     try {
       const { data } = await client.post(`/ssl/certificates/${id}/auto-renew`)
       const idx = certificates.value.findIndex(c => c.id === id)
@@ -74,6 +79,7 @@ export const useSslStore = defineStore('ssl', () => {
 
   // NOTE: removeCertificate - no backend DELETE endpoint yet; wrapped in try-catch
   async function removeCertificate(id) {
+    if (!id) { console.warn('removeCertificate called without id'); return }
     try {
       await client.delete(`/ssl/${id}`)
       certificates.value = certificates.value.filter(c => c.id !== id)

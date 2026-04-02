@@ -309,7 +309,7 @@ async function handleSave() {
   if (!form.value.name.trim()) return
   submitting.value = true
   try {
-    if (editingPackage.value) {
+    if (editingPackage.value?.id) {
       const { data } = await client.put(`/packages/${editingPackage.value.id}`, form.value)
       const idx = packages.value.findIndex(p => p.id === editingPackage.value.id)
       if (idx >= 0) packages.value[idx] = data
@@ -333,7 +333,7 @@ function confirmDeletePackage(pkg) {
 }
 
 async function handleDelete() {
-  if (!packageToDelete.value) return
+  if (!packageToDelete.value?.id) return
   try {
     await client.delete(`/packages/${packageToDelete.value.id}`)
     packages.value = packages.value.filter(p => p.id !== packageToDelete.value.id)

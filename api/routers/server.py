@@ -118,7 +118,10 @@ async def list_services(
     try:
         result = await agent._request("GET", "/system/services")
     except Exception:
-        return {"services": [], "_agent_down": True}
+        known_services = ["nginx", "postgresql", "redis-server", "hosthive-api", "hosthive-agent",
+                          "hosthive-worker", "exim4", "dovecot", "proftpd", "fail2ban", "docker"]
+        return {"services": [{"name": s, "status": "unknown", "enabled": False} for s in known_services],
+                "_agent_down": True}
     return result
 
 

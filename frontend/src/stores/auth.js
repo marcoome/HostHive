@@ -61,6 +61,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function impersonate(userId) {
+    if (!userId) throw new Error('User ID is required for impersonation')
     if (!isAdmin.value) throw new Error('Only admins can impersonate users')
 
     // Store original admin token

@@ -23,14 +23,14 @@ export const useAiStore = defineStore('ai', () => {
 
   async function fetchConversations() {
     const { data } = await client.get('/ai/conversations')
-    conversations.value = data
-    return data
+    conversations.value = Array.isArray(data) ? data : []
+    return conversations.value
   }
 
   async function fetchInsights() {
     const { data } = await client.get('/ai/insights')
-    insights.value = data
-    return data
+    insights.value = Array.isArray(data) ? data : []
+    return insights.value
   }
 
   async function sendMessage(message, context = null) {
@@ -113,12 +113,14 @@ export const useAiStore = defineStore('ai', () => {
   }
 
   async function resolveInsight(id) {
+    if (!id) { console.warn('resolveInsight called without id'); return }
     const { data } = await client.post(`/ai/insights/${id}/resolve`)
     insights.value = insights.value.filter(i => i.id !== id)
     return data
   }
 
   async function applyAutofix(id) {
+    if (!id) { console.warn('applyAutofix called without id'); return }
     const { data } = await client.post(`/ai/insights/${id}/autofix`)
     const notify = useNotificationsStore()
     notify.success('Auto-fix applied successfully')

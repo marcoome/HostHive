@@ -24,6 +24,7 @@ export const useEmailStore = defineStore('email', () => {
   }
 
   async function updateMailbox(id, payload) {
+    if (!id) { console.warn('updateMailbox called without id'); return }
     const { data } = await client.put(`/email/mailboxes/${id}`, payload)
     const idx = mailboxes.value.findIndex(m => m.id === id)
     if (idx !== -1) mailboxes.value[idx] = data
@@ -31,6 +32,7 @@ export const useEmailStore = defineStore('email', () => {
   }
 
   async function removeMailbox(id) {
+    if (!id) { console.warn('removeMailbox called without id'); return }
     await client.delete(`/email/mailboxes/${id}`)
     mailboxes.value = mailboxes.value.filter(m => m.id !== id)
   }
@@ -52,6 +54,7 @@ export const useEmailStore = defineStore('email', () => {
   }
 
   async function updateAlias(id, payload) {
+    if (!id) { console.warn('updateAlias called without id'); return }
     const { data } = await client.put(`/email/aliases/${id}`, payload)
     const idx = aliases.value.findIndex(a => a.id === id)
     if (idx !== -1) aliases.value[idx] = data
@@ -59,6 +62,7 @@ export const useEmailStore = defineStore('email', () => {
   }
 
   async function removeAlias(id) {
+    if (!id) { console.warn('removeAlias called without id'); return }
     await client.delete(`/email/aliases/${id}`)
     aliases.value = aliases.value.filter(a => a.id !== id)
   }

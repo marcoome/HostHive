@@ -11,19 +11,21 @@ export const useWordPressStore = defineStore('wordpress', () => {
     loading.value = true
     try {
       const { data } = await client.get('/wordpress/installs')
-      installs.value = data
-      return data
+      installs.value = Array.isArray(data) ? data : []
+      return installs.value
     } finally {
       loading.value = false
     }
   }
 
   async function getWpInfo(domain) {
+    if (!domain) { console.warn('getWpInfo called without domain'); return }
     const { data } = await client.get(`/wordpress/${domain}/info`)
     return data
   }
 
   async function updateCore(domain) {
+    if (!domain) { console.warn('updateCore called without domain'); return }
     const { data } = await client.post(`/wordpress/${domain}/update-core`)
     const notify = useNotificationsStore()
     notify.success(`WordPress core updated for ${domain}`)
@@ -32,6 +34,7 @@ export const useWordPressStore = defineStore('wordpress', () => {
   }
 
   async function updatePlugins(domain) {
+    if (!domain) { console.warn('updatePlugins called without domain'); return }
     const { data } = await client.post(`/wordpress/${domain}/update-plugins`)
     const notify = useNotificationsStore()
     notify.success(`Plugins updated for ${domain}`)
@@ -39,6 +42,7 @@ export const useWordPressStore = defineStore('wordpress', () => {
   }
 
   async function backupWp(domain) {
+    if (!domain) { console.warn('backupWp called without domain'); return }
     const { data } = await client.post(`/wordpress/${domain}/backup`)
     const notify = useNotificationsStore()
     notify.success(`Backup created for ${domain}`)
@@ -46,6 +50,7 @@ export const useWordPressStore = defineStore('wordpress', () => {
   }
 
   async function cloneWp(domain, targetDomain) {
+    if (!domain) { console.warn('cloneWp called without domain'); return }
     const { data } = await client.post(`/wordpress/${domain}/clone`, { target_domain: targetDomain })
     const notify = useNotificationsStore()
     notify.success(`${domain} cloned to ${targetDomain}`)
@@ -54,6 +59,7 @@ export const useWordPressStore = defineStore('wordpress', () => {
   }
 
   async function securityCheck(domain) {
+    if (!domain) { console.warn('securityCheck called without domain'); return }
     const { data } = await client.post(`/wordpress/${domain}/security-check`)
     return data
   }

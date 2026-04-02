@@ -224,6 +224,42 @@ async def toggle_maintenance_mode(
 
 
 # ---------------------------------------------------------------------------
+# POST /system/update -- pull latest code and rebuild frontend
+# ---------------------------------------------------------------------------
+@router.post("/system/update", status_code=status.HTTP_200_OK)
+async def system_update(
+    request: Request,
+    admin: User = Depends(_admin),
+):
+    import subprocess
+    results = []
+
+    # Git pull
+    try:
+        r = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            cwd="/opt/hosthive",
+            capture_output=True, text=True, timeout=30,
+        )
+        results.append({"step": "git_pull", "success": r.returncode == 0, "output": r.stdout.strip()})
+    except Exception as e:
+        results.append({"step": "git_pull", "success": False, "output": str(e)})
+
+    # Frontend rebuild
+    try:
+        r = subprocess.run(
+            ["npm", "run", "build"],
+            cwd="/opt/hosthive/frontend",
+            capture_output=True, text=True, timeout=120,
+        )
+        results.append({"step": "frontend_build", "success": r.returncode == 0, "output": r.stdout[-200:] if r.stdout else ""})
+    except Exception as e:
+        results.append({"step": "frontend_build", "success": False, "output": str(e)})
+
+    return {"detail": "System update completed.", "results": results, "restart_required": True}
+
+
+# ---------------------------------------------------------------------------
 # GET /dashboard -- real-time dashboard stats
 # ---------------------------------------------------------------------------
 @router.get("/dashboard", status_code=status.HTTP_200_OK)

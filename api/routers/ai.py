@@ -17,6 +17,7 @@ from api.core.ai_client import AIClient, SUPPORTED_MODELS, get_ai_client_from_se
 from api.core.config import settings
 from api.core.database import get_db
 from api.core.encryption import decrypt_value, encrypt_value
+from pydantic import BaseModel, Field
 from api.core.security import get_current_user, require_role
 from api.models.activity_log import ActivityLog
 from api.models.ai import (
@@ -49,6 +50,8 @@ from api.schemas.ai import (
 logger = logging.getLogger("hosthive.ai.router")
 
 router = APIRouter()
+
+_admin = require_role("admin")
 
 _RATE_LIMIT_PREFIX = "hosthive:ai:ratelimit:"
 _RATE_LIMIT_MAX = 20  # requests per minute
@@ -773,6 +776,64 @@ async def get_usage(
             by_model=[],
             period_days=days,
         )
+
+
+# --------------------------------------------------------------------------
+# POST /config -- save AI provider config to Redis
+# --------------------------------------------------------------------------
+
+class AiConfigRequest(BaseModel):
+    provider: str = Field(..., pattern="^(openrouter|openai|anthropic)$")
+    api_key: str = Field(..., min_length=1)
+    default_model: Optional[str] = None
+
+
+@router.post("/config", status_code=status.HTTP_200_OK)
+async def save_ai_config(body: AiConfigRequest, request: Request, admin: User = Depends(_admin)):
+    redis = request.app.state.redis
+    await redis.hset("hosthive:ai:config", mapping={
+        "provider": body.provider,
+        "api_key": body.api_key,
+        "default_model": body.default_model or "",
+    })
+    return {"detail": "AI configuration saved.", "provider": body.provider}
+
+
+# --------------------------------------------------------------------------
+# GET /models -- fetch available models for current provider
+# --------------------------------------------------------------------------
+@router.get("/models", status_code=status.HTTP_200_OK)
+async def list_ai_models(request: Request, admin: User = Depends(_admin)):
+    redis = request.app.state.redis
+    config = await redis.hgetall("hosthive:ai:config")
+    if not config or not config.get("api_key"):
+        return {"models": [], "detail": "No AI provider configured."}
+
+    provider = config.get("provider", "openai")
+    models = []
+
+    if provider == "openai":
+        models = [
+            {"id": "gpt-4o", "name": "GPT-4o"},
+            {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+            {"id": "gpt-4-turbo", "name": "GPT-4 Turbo"},
+            {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
+        ]
+    elif provider == "anthropic":
+        models = [
+            {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4"},
+            {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5"},
+            {"id": "claude-opus-4-20250514", "name": "Claude Opus 4"},
+        ]
+    elif provider == "openrouter":
+        models = [
+            {"id": "openai/gpt-4o", "name": "GPT-4o (OpenRouter)"},
+            {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4 (OpenRouter)"},
+            {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro (OpenRouter)"},
+            {"id": "meta-llama/llama-3.1-405b", "name": "Llama 3.1 405B (OpenRouter)"},
+        ]
+
+    return {"models": models, "provider": provider}
 
 
 # --------------------------------------------------------------------------

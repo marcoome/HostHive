@@ -19,23 +19,24 @@ export const useMonitoringStore = defineStore('monitoring', () => {
 
   async function fetchHealth() {
     const { data } = await client.get('/monitoring/health')
-    healthChecks.value = data
-    return data
+    healthChecks.value = Array.isArray(data) ? data : []
+    return healthChecks.value
   }
 
   async function fetchIncidents() {
     const { data } = await client.get('/monitoring/incidents')
-    incidents.value = data
-    return data
+    incidents.value = Array.isArray(data) ? data : []
+    return incidents.value
   }
 
   async function fetchAnomalies() {
     const { data } = await client.get('/monitoring/anomalies')
-    anomalies.value = data
-    return data
+    anomalies.value = Array.isArray(data) ? data : []
+    return anomalies.value
   }
 
   async function acknowledgeAnomaly(id) {
+    if (!id) { console.warn('acknowledgeAnomaly called without id'); return }
     const { data } = await client.post(`/monitoring/anomalies/${id}/acknowledge`)
     const notify = useNotificationsStore()
     notify.success('Anomaly acknowledged')
@@ -52,6 +53,7 @@ export const useMonitoringStore = defineStore('monitoring', () => {
   }
 
   async function fetchBandwidth(domain) {
+    if (!domain) { console.warn('fetchBandwidth called without domain'); return [] }
     const { data } = await client.get(`/monitoring/bandwidth/${domain}`)
     return data
   }
