@@ -51,7 +51,7 @@ class HealthCheck(Base):
     response_time_ms: Mapped[float] = mapped_column(Float, default=0.0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, default=None)
     checked_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(), index=True,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(), index=True,
     )
 
 
@@ -65,7 +65,7 @@ class MonitoringIncident(Base):
     )
     service_name: Mapped[str] = mapped_column(String(64), index=True)
     started_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(),
     )
     resolved_at: Mapped[Optional[datetime]] = mapped_column(default=None)
     auto_restarted: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -108,5 +108,5 @@ class AnomalyAlert(Base):
     )
     is_acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(), index=True,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(), index=True,
     )

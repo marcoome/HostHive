@@ -12,8 +12,8 @@ from api.core.database import Base
 
 
 def _utcnow() -> datetime:
-    """Return timezone-aware UTC now (avoids deprecated datetime.utcnow)."""
-    return datetime.now(timezone.utc)
+    """Return naive UTC now (PostgreSQL TIMESTAMP WITHOUT TIME ZONE)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class TimestampedBase(Base):

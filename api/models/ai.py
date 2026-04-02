@@ -53,10 +53,10 @@ class AiConversation(Base):
     )
     title: Mapped[str] = mapped_column(String(255), default="New conversation")
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(), onupdate=func.now(),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(), onupdate=func.now(),
     )
 
     messages: Mapped[list["AiMessage"]] = relationship(
@@ -82,7 +82,7 @@ class AiMessage(Base):
     content: Mapped[str] = mapped_column(Text)
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(),
     )
 
     conversation: Mapped["AiConversation"] = relationship(back_populates="messages")
@@ -109,7 +109,7 @@ class AiInsight(Base):
     is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(),
     )
 
 
@@ -132,7 +132,7 @@ class AiTokenUsage(Base):
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(),
     )
 
 

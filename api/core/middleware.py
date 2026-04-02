@@ -98,7 +98,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     action=action,
                     details=None,
                     ip_address=ip_address,
-                    created_at=datetime.now(timezone.utc),
+                    created_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
                 session.add(entry)
                 await session.commit()

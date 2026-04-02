@@ -48,7 +48,7 @@ async def log_activity(
         action=action,
         details=details,
         ip_address=ip_address,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(entry)
     # We intentionally do NOT commit here — the caller's session-scoped

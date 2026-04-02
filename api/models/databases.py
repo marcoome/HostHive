@@ -34,5 +34,5 @@ class Database(Base):
         default=DbType.MYSQL,
     )
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(timezone.utc), server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), server_default=func.now(),
     )

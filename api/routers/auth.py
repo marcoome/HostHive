@@ -219,7 +219,7 @@ async def change_password(
         )
 
     current_user.password_hash = hash_password(body.new_password)
-    current_user.password_changed_at = datetime.now(timezone.utc)
+    current_user.password_changed_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.add(current_user)
 
     # Invalidate ALL refresh tokens for this user
