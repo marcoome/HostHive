@@ -122,6 +122,23 @@ async def create_domain(
     except Exception as exc:
         system_warning = f"Domain saved to DB but system setup failed: {exc}"
 
+    # 3. Auto-create DNS zone for this domain
+    try:
+        from api.models.dns_zones import DnsZone
+        existing_zone = await db.execute(
+            select(DnsZone).where(DnsZone.zone_name == body.domain_name)
+        )
+        if existing_zone.scalar_one_or_none() is None:
+            zone = DnsZone(
+                user_id=current_user.id,
+                domain_id=domain.id,
+                zone_name=body.domain_name,
+            )
+            db.add(zone)
+            await db.flush()
+    except Exception:
+        pass  # DNS zone creation is optional
+
     _log(db, request, current_user.id, "domains.create", f"Created domain {body.domain_name}")
 
     response = DomainResponse.model_validate(domain)

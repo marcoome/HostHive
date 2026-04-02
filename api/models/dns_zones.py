@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Optional
 
 from sqlalchemy import Boolean, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -19,8 +20,8 @@ class DnsZone(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True,
     )
-    domain_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("domains.id", ondelete="CASCADE"), index=True,
+    domain_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("domains.id", ondelete="SET NULL"), index=True, nullable=True,
     )
     zone_name: Mapped[str] = mapped_column(String(255), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
