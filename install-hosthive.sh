@@ -453,15 +453,33 @@ success "PostgreSQL configured"
 # ─── Step 7: Setup Redis ───
 step 7 $TOTAL_STEPS "Configuring Redis"
 
-# Set Redis password
-if ! grep -q "^requirepass" /etc/redis/redis.conf 2>/dev/null; then
-    echo "requirepass ${REDIS_PASSWORD}" >> /etc/redis/redis.conf
-else
-    sed -i "s/^requirepass.*/requirepass ${REDIS_PASSWORD}/" /etc/redis/redis.conf
+# Set Redis password - handle both legacy requirepass and Redis 6+ ACL
+REDIS_CONF="/etc/redis/redis.conf"
+if [ -f "$REDIS_CONF" ]; then
+    # Remove any existing requirepass lines (including commented ones that might interfere)
+    sed -i '/^requirepass/d' "$REDIS_CONF"
+    # Add clean requirepass
+    echo "requirepass ${REDIS_PASSWORD}" >> "$REDIS_CONF"
+    # Disable protected-mode since we use password auth
+    sed -i 's/^protected-mode yes/protected-mode no/' "$REDIS_CONF"
+    # Bind to localhost only
+    sed -i 's/^bind .*/bind 127.0.0.1 ::1/' "$REDIS_CONF"
 fi
 
 systemctl enable --now redis-server >> "$LOG_FILE" 2>&1
 systemctl restart redis-server >> "$LOG_FILE" 2>&1
+
+# Verify Redis auth works and also set password via CLI (handles ACL-based Redis 7+)
+sleep 1
+redis-cli -a "${REDIS_PASSWORD}" ping >> "$LOG_FILE" 2>&1 || {
+    # If password auth fails, try without password and set it via ACL
+    redis-cli ping >> "$LOG_FILE" 2>&1 && {
+        redis-cli CONFIG SET requirepass "${REDIS_PASSWORD}" >> "$LOG_FILE" 2>&1
+        redis-cli -a "${REDIS_PASSWORD}" CONFIG REWRITE >> "$LOG_FILE" 2>&1 || true
+    }
+    # Also try setting via ACL for Redis 6+
+    redis-cli ACL SETUSER default on ">${REDIS_PASSWORD}" ~* &* +@all >> "$LOG_FILE" 2>&1 || true
+}
 success "Redis configured with password"
 
 # ─── Step 8: Setup Python environment ───

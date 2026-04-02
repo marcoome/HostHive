@@ -68,7 +68,7 @@ class Settings(BaseSettings):
                 f"@127.0.0.1:5432/{self.DB_NAME}"
             )
         if self.REDIS_PASSWORD:
-            self.REDIS_URL = f"redis://:{quote_plus(self.REDIS_PASSWORD)}@127.0.0.1:6379/0"
+            self.REDIS_URL = f"redis://default:{quote_plus(self.REDIS_PASSWORD)}@127.0.0.1:6379/0"
         elif not self.REDIS_URL:
             self.REDIS_URL = "redis://127.0.0.1:6379/0"
         if not self.AGENT_SECRET:

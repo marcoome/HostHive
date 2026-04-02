@@ -61,6 +61,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         settings.REDIS_URL,
         decode_responses=True,
     )
+    # Verify Redis connection at startup
+    try:
+        await app.state.redis.ping()
+        _logger.info("Redis connection OK.")
+    except Exception as exc:
+        _logger.error("Redis connection FAILED: %s — login/sessions will not work!", exc)
 
     # Agent client
     app.state.agent = AgentClient()
