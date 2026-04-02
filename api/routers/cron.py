@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import subprocess
+import tempfile
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
@@ -16,6 +21,7 @@ from api.models.users import User
 from api.schemas.cron import CronJobCreate, CronJobResponse, CronJobUpdate
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _is_admin(user: User) -> bool:
@@ -41,12 +47,82 @@ def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, de
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
+# --------------------------------------------------------------------------
+# Direct crontab management (no agent)
+# --------------------------------------------------------------------------
+
+def _direct_list_crontab(username: str) -> list[str]:
+    """List the current crontab entries for a system user."""
+    result = subprocess.run(
+        ["crontab", "-l", "-u", username],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        # crontab returns non-zero when no crontab exists
+        return []
+    return [line for line in result.stdout.splitlines() if line.strip() and not line.startswith("#")]
+
+
+def _direct_write_crontab(username: str, entries: list[dict[str, str]]) -> None:
+    """Write a full crontab for a system user from a list of {schedule, command} dicts."""
+    header = "# Managed by HostHive -- do not edit manually\n"
+    lines = [header]
+    for entry in entries:
+        lines.append(f"{entry['schedule']} {entry['command']}\n")
+
+    crontab_content = "".join(lines)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".crontab", delete=False) as tmp:
+        tmp.write(crontab_content)
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["crontab", "-u", username, tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"crontab install failed: {result.stderr.strip()}")
+    finally:
+        import os
+        os.unlink(tmp_path)
+
+
+def _direct_clear_crontab(username: str) -> None:
+    """Remove all cron jobs for a system user."""
+    subprocess.run(
+        ["crontab", "-r", "-u", username],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+def _direct_run_command(username: str, command: str) -> str:
+    """Execute a command immediately as the given user."""
+    result = subprocess.run(
+        ["sudo", "-u", username, "bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\nSTDERR: {result.stderr}" if result.stderr else ""
+        output += f"\nExit code: {result.returncode}"
+    return output
+
+
 async def _sync_crontab(
     db: AsyncSession,
     user: User,
     agent,
 ):
-    """Push the full crontab for a user to the agent."""
+    """Push the full crontab for a user. Tries agent first, falls back to direct."""
     jobs = (await db.execute(
         select(CronJob).where(CronJob.user_id == user.id, CronJob.is_active.is_(True))
     )).scalars().all()
@@ -55,7 +131,20 @@ async def _sync_crontab(
         {"schedule": j.schedule, "command": j.command}
         for j in jobs
     ]
-    await agent.set_crontab(user.username, entries)
+
+    # Try agent first
+    try:
+        await agent.set_crontab(user.username, entries)
+        return
+    except Exception as exc:
+        logger.warning("Agent error syncing crontab, falling back to direct: %s", exc)
+
+    # Direct fallback
+    loop = asyncio.get_running_loop()
+    if entries:
+        await loop.run_in_executor(None, _direct_write_crontab, user.username, entries)
+    else:
+        await loop.run_in_executor(None, _direct_clear_crontab, user.username)
 
 
 # --------------------------------------------------------------------------
@@ -93,9 +182,6 @@ async def create_cron_job(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    import logging
-    logger = logging.getLogger(__name__)
-
     job = CronJob(
         user_id=current_user.id,
         schedule=body.schedule,
@@ -189,8 +275,10 @@ async def run_cron_now(
     current_user: User = Depends(get_current_user),
 ):
     job = await _get_cron_or_404(cron_id, db, current_user)
-    agent = request.app.state.agent
 
+    # Try agent first, fall back to direct execution
+    result = None
+    agent = request.app.state.agent
     try:
         result = await agent._request(
             "POST",
@@ -198,10 +286,26 @@ async def run_cron_now(
             json_body={"username": current_user.username, "command": job.command},
         )
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error running cron job: {exc}",
-        )
+        logger.warning("Agent error running cron job, falling back to direct: %s", exc)
+
+    if result is None:
+        try:
+            loop = asyncio.get_running_loop()
+            output = await loop.run_in_executor(
+                None, _direct_run_command, current_user.username, job.command,
+            )
+            result = {"output": output}
+        except Exception as exc:
+            logger.error("Direct cron execution also failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to run cron job: {exc}",
+            )
+
+    # Update last_run timestamp
+    job.last_run = datetime.now(timezone.utc)
+    db.add(job)
+    await db.flush()
 
     _log(db, request, current_user.id, "cron.run_now", f"Manually ran cron job {cron_id}")
     return {"detail": "Job execution triggered.", "result": result}

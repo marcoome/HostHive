@@ -18,6 +18,7 @@ from api.models.dns_records import DnsRecord
 from api.models.dns_zones import DnsZone
 from api.models.domains import Domain
 from api.models.email_accounts import EmailAccount
+from api.models.email_aliases import EmailAlias
 from api.models.ftp_accounts import FtpAccount
 from api.models.packages import Package
 from api.models.server_stats import ServerStat
@@ -74,6 +75,7 @@ __all__ = [
     "Domain",
     "DomainBandwidth",
     "EmailAccount",
+    "EmailAlias",
     "FtpAccount",
     "HealthCheck",
     "HealthStatus",

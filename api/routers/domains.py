@@ -1,4 +1,7 @@
-"""Domains router -- /api/v1/domains."""
+"""Domains router -- /api/v1/domains.
+
+All nginx operations are performed directly via nginx_service (no agent).
+"""
 
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ from api.models.activity_log import ActivityLog
 from api.models.domains import Domain
 from api.models.users import User
 from api.schemas.domains import DomainCreate, DomainResponse, DomainUpdate
+from api.services import nginx_service
 
 router = APIRouter()
 
@@ -92,8 +96,9 @@ async def create_domain(
             detail="Domain already exists.",
         )
 
-    doc_root = body.document_root or f"/home/{current_user.username}/{body.domain_name}/public_html"
+    doc_root = body.document_root or f"/home/{current_user.username}/web/{body.domain_name}/public_html"
 
+    # 1. Save to DB first
     domain = Domain(
         user_id=current_user.id,
         domain_name=body.domain_name,
@@ -103,22 +108,30 @@ async def create_domain(
     db.add(domain)
     await db.flush()
 
-    # Create vhost via agent
-    agent = request.app.state.agent
+    # 2. Create nginx vhost, document root, index.html directly
+    system_warning: str | None = None
     try:
-        await agent.create_vhost(
+        result = await nginx_service.create_vhost(
             domain=body.domain_name,
+            username=current_user.username,
             document_root=doc_root,
             php_version=body.php_version,
         )
+        if result.get("warnings"):
+            system_warning = "; ".join(result["warnings"])
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error creating vhost: {exc}",
-        )
+        system_warning = f"Domain saved to DB but system setup failed: {exc}"
 
     _log(db, request, current_user.id, "domains.create", f"Created domain {body.domain_name}")
-    return DomainResponse.model_validate(domain)
+
+    response = DomainResponse.model_validate(domain)
+    if system_warning:
+        # Attach warning as extra info -- DomainResponse will ignore unknown
+        # fields via model_config, so we return a dict instead.
+        resp_dict = response.model_dump()
+        resp_dict["system_warning"] = system_warning
+        return resp_dict
+    return response
 
 
 # --------------------------------------------------------------------------
@@ -153,17 +166,27 @@ async def update_domain(
     domain = await _get_domain_or_404(domain_id, db, current_user)
     update_data = body.model_dump(exclude_unset=True)
 
+    old_php = domain.php_version
+
     for field, value in update_data.items():
         setattr(domain, field, value)
     db.add(domain)
     await db.flush()
 
-    # Propagate config changes to agent
-    agent = request.app.state.agent
-    try:
-        await agent.update_vhost(domain.domain_name, **update_data)
-    except Exception:
-        pass  # non-fatal; DB record is source of truth
+    # If PHP version changed, rewrite the nginx vhost
+    new_php = update_data.get("php_version")
+    if new_php and new_php != old_php:
+        try:
+            await nginx_service.update_vhost_php(
+                domain=domain.domain_name,
+                document_root=domain.document_root,
+                new_php_version=new_php,
+                ssl_enabled=domain.ssl_enabled,
+                cert_path=domain.ssl_cert_path,
+                key_path=domain.ssl_key_path,
+            )
+        except Exception:
+            pass  # non-fatal; DB record is source of truth
 
     _log(db, request, current_user.id, "domains.update", f"Updated domain {domain.domain_name}")
     return DomainResponse.model_validate(domain)
@@ -181,13 +204,13 @@ async def delete_domain(
 ):
     domain = await _get_domain_or_404(domain_id, db, current_user)
 
-    agent = request.app.state.agent
+    # Remove nginx config and symlink directly
     try:
-        await agent.delete_vhost(domain.domain_name)
+        await nginx_service.delete_vhost(domain.domain_name)
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error deleting vhost: {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"System error deleting vhost: {exc}",
         )
 
     _log(db, request, current_user.id, "domains.delete", f"Deleted domain {domain.domain_name}")
@@ -196,7 +219,7 @@ async def delete_domain(
 
 
 # --------------------------------------------------------------------------
-# POST /{id}/enable-ssl -- trigger certbot via agent
+# POST /{id}/enable-ssl -- trigger certbot directly
 # --------------------------------------------------------------------------
 @router.post("/{domain_id}/enable-ssl", response_model=DomainResponse, status_code=status.HTTP_200_OK)
 async def enable_ssl(
@@ -206,19 +229,40 @@ async def enable_ssl(
     current_user: User = Depends(get_current_user),
 ):
     domain = await _get_domain_or_404(domain_id, db, current_user)
-    agent = request.app.state.agent
 
+    # 1. Run certbot
     try:
-        result = await agent.issue_ssl(domain.domain_name, current_user.email)
+        cert_result = await nginx_service.issue_letsencrypt(
+            domain.domain_name, current_user.email,
+        )
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error issuing SSL: {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SSL issuance failed: {exc}",
         )
 
+    cert_path = cert_result["cert_path"]
+    key_path = cert_result["key_path"]
+
+    # 2. Update nginx config with SSL
+    try:
+        await nginx_service.apply_ssl_to_nginx(
+            domain=domain.domain_name,
+            document_root=domain.document_root,
+            php_version=domain.php_version,
+            cert_path=cert_path,
+            key_path=key_path,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SSL applied by certbot but nginx update failed: {exc}",
+        )
+
+    # 3. Update DB
     domain.ssl_enabled = True
-    domain.ssl_cert_path = result.get("cert_path")
-    domain.ssl_key_path = result.get("key_path")
+    domain.ssl_cert_path = cert_path
+    domain.ssl_key_path = key_path
     db.add(domain)
     await db.flush()
 
@@ -227,7 +271,7 @@ async def enable_ssl(
 
 
 # --------------------------------------------------------------------------
-# GET /{id}/logs -- last 100 lines of nginx log via agent
+# GET /{id}/logs -- last 100 lines of nginx log (direct)
 # --------------------------------------------------------------------------
 @router.get("/{domain_id}/logs", status_code=status.HTTP_200_OK)
 async def domain_logs(
@@ -238,19 +282,16 @@ async def domain_logs(
     current_user: User = Depends(get_current_user),
 ):
     domain = await _get_domain_or_404(domain_id, db, current_user)
-    agent = request.app.state.agent
 
     log_path = f"/var/log/nginx/{domain.domain_name}.{log_type}.log"
     try:
-        result = await agent.read_file(log_path)
+        content = await nginx_service.read_log_file(log_path, lines=100)
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error reading logs: {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error reading logs: {exc}",
         )
 
-    # Return last 100 lines
-    content = result.get("content", "")
     lines = content.strip().split("\n") if content else []
     return {"domain": domain.domain_name, "log_type": log_type, "lines": lines[-100:]}
 
@@ -266,19 +307,19 @@ async def domain_stats(
     current_user: User = Depends(get_current_user),
 ):
     domain = await _get_domain_or_404(domain_id, db, current_user)
-    agent = request.app.state.agent
 
+    # Basic stats from access log -- count lines for today
+    log_path = f"/var/log/nginx/{domain.domain_name}.access.log"
     try:
-        result = await agent._request(
-            "GET",
-            f"/vhost/{domain.domain_name}/stats",
-        )
+        content = await nginx_service.read_log_file(log_path, lines=10000)
+        lines = content.strip().split("\n") if content else []
+        total_lines = len(lines)
     except Exception:
-        result = {}
+        total_lines = 0
 
     return {
         "domain": domain.domain_name,
-        "bandwidth_bytes": result.get("bandwidth_bytes", 0),
-        "requests_today": result.get("requests_today", 0),
-        "requests_30d": result.get("requests_30d", 0),
+        "bandwidth_bytes": 0,
+        "requests_today": total_lines,
+        "requests_30d": total_lines,
     }

@@ -28,3 +28,12 @@ class EmailAccountResponse(BaseModel):
 class AliasCreate(BaseModel):
     source: str = Field(..., min_length=3, max_length=255)
     destination: str = Field(..., min_length=3, max_length=255)
+
+
+class AliasResponse(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    source: str
+    destination: str
+
+    model_config = {"from_attributes": True}

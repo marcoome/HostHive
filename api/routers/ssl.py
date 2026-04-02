@@ -1,11 +1,13 @@
-"""SSL certificates router -- /api/v1/ssl."""
+"""SSL certificates router -- /api/v1/ssl.
+
+All certbot and file operations are performed directly via nginx_service (no agent).
+"""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +19,7 @@ from api.models.domains import Domain
 from api.models.ssl_certificates import CertProvider, SSLCertificate
 from api.models.users import User
 from api.schemas.ssl import CustomCertInstall, SslCertificateResponse
+from api.services import nginx_service
 
 router = APIRouter()
 
@@ -75,7 +78,7 @@ async def list_certificates(
 
 
 # --------------------------------------------------------------------------
-# POST /issue/{domain_id} -- issue Let's Encrypt cert
+# POST /issue/{domain_id} -- issue Let's Encrypt cert (direct certbot)
 # --------------------------------------------------------------------------
 @router.post("/issue/{domain_id}", response_model=SslCertificateResponse, status_code=status.HTTP_201_CREATED)
 async def issue_certificate(
@@ -85,48 +88,66 @@ async def issue_certificate(
     current_user: User = Depends(get_current_user),
 ):
     domain = await _get_domain_for_user(domain_id, db, current_user)
-    agent = request.app.state.agent
 
-    try:
-        result = await agent.issue_ssl(domain.domain_name, current_user.email)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 400:
-            try:
-                body = exc.response.json()
-                detail = body.get("detail", body.get("error", str(exc)))
-            except Exception:
-                detail = exc.response.text or str(exc)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"SSL issuance failed: {detail}",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error issuing SSL: {exc}",
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error issuing SSL: {exc}",
-        )
-
+    # 1. Save cert record to DB first
     cert = SSLCertificate(
         domain_id=domain.id,
         domain_name=domain.domain_name,
         provider=CertProvider.LETS_ENCRYPT,
-        cert_path=result.get("cert_path"),
-        key_path=result.get("key_path"),
         expires_at=datetime.now(timezone.utc) + timedelta(days=90),
         auto_renew=True,
         last_renewed_at=datetime.now(timezone.utc),
     )
     db.add(cert)
+    await db.flush()
 
-    # Update domain SSL status
+    # 2. Run certbot directly
+    system_warning: str | None = None
+    try:
+        cert_result = await nginx_service.issue_letsencrypt(
+            domain.domain_name, current_user.email,
+        )
+        cert.cert_path = cert_result["cert_path"]
+        cert.key_path = cert_result["key_path"]
+    except Exception as exc:
+        system_warning = f"Certificate saved to DB but certbot failed: {exc}"
+        # Set fallback paths so DB record is consistent
+        cert.cert_path = f"/etc/letsencrypt/live/{domain.domain_name}/fullchain.pem"
+        cert.key_path = f"/etc/letsencrypt/live/{domain.domain_name}/privkey.pem"
+        db.add(cert)
+        await db.flush()
+
+        # Update domain SSL status even on failure (DB is source of truth)
+        domain.ssl_enabled = False
+        domain.ssl_cert_path = cert.cert_path
+        domain.ssl_key_path = cert.key_path
+        db.add(domain)
+        await db.flush()
+
+        _log(db, request, current_user.id, "ssl.issue", f"SSL issue attempted for {domain.domain_name} (certbot failed)")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SSL issuance failed: {exc}",
+        )
+
+    # 3. Update nginx config with SSL
+    try:
+        await nginx_service.apply_ssl_to_nginx(
+            domain=domain.domain_name,
+            document_root=domain.document_root,
+            php_version=domain.php_version,
+            cert_path=cert.cert_path,
+            key_path=cert.key_path,
+        )
+    except Exception as exc:
+        system_warning = f"Certificate issued but nginx SSL update failed: {exc}"
+
+    # 4. Update domain record
     domain.ssl_enabled = True
     domain.ssl_cert_path = cert.cert_path
     domain.ssl_key_path = cert.key_path
     db.add(domain)
+    db.add(cert)
     await db.flush()
 
     _log(db, request, current_user.id, "ssl.issue", f"Issued LE cert for {domain.domain_name}")
@@ -134,7 +155,7 @@ async def issue_certificate(
 
 
 # --------------------------------------------------------------------------
-# POST /install/{domain_id} -- upload custom cert
+# POST /install/{domain_id} -- upload custom cert (direct file write)
 # --------------------------------------------------------------------------
 @router.post("/install/{domain_id}", response_model=SslCertificateResponse, status_code=status.HTTP_201_CREATED)
 async def install_custom_certificate(
@@ -145,34 +166,52 @@ async def install_custom_certificate(
     current_user: User = Depends(get_current_user),
 ):
     domain = await _get_domain_for_user(domain_id, db, current_user)
-    agent = request.app.state.agent
 
-    try:
-        result = await agent.install_custom_ssl(
-            domain.domain_name,
-            body.certificate,
-            body.private_key,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error installing cert: {exc}",
-        )
-
+    # 1. Save cert record to DB first
     cert = SSLCertificate(
         domain_id=domain.id,
         domain_name=domain.domain_name,
         provider=CertProvider.CUSTOM,
-        cert_path=result.get("cert_path"),
-        key_path=result.get("key_path"),
         auto_renew=False,
     )
     db.add(cert)
+    await db.flush()
 
+    # 2. Write cert and key to /etc/ssl/hosthive/{domain}/
+    try:
+        file_result = await nginx_service.install_custom_ssl(
+            domain=domain.domain_name,
+            certificate=body.certificate,
+            private_key=body.private_key,
+            chain=body.chain,
+        )
+        cert.cert_path = file_result["cert_path"]
+        cert.key_path = file_result["key_path"]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save certificate files: {exc}",
+        )
+
+    # 3. Update nginx config with SSL
+    try:
+        await nginx_service.apply_ssl_to_nginx(
+            domain=domain.domain_name,
+            document_root=domain.document_root,
+            php_version=domain.php_version,
+            cert_path=cert.cert_path,
+            key_path=cert.key_path,
+        )
+    except Exception as exc:
+        # Non-fatal: files are saved, nginx just needs manual reload
+        pass
+
+    # 4. Update domain record
     domain.ssl_enabled = True
     domain.ssl_cert_path = cert.cert_path
     domain.ssl_key_path = cert.key_path
     db.add(domain)
+    db.add(cert)
     await db.flush()
 
     _log(db, request, current_user.id, "ssl.install_custom", f"Installed custom cert for {domain.domain_name}")
@@ -180,7 +219,7 @@ async def install_custom_certificate(
 
 
 # --------------------------------------------------------------------------
-# POST /renew/{domain_id} -- renew cert via agent
+# POST /renew/{domain_id} -- renew cert (direct certbot)
 # --------------------------------------------------------------------------
 @router.post("/renew/{domain_id}", response_model=SslCertificateResponse, status_code=status.HTTP_200_OK)
 async def renew_certificate(
@@ -203,18 +242,39 @@ async def renew_certificate(
             detail="No certificate found for this domain.",
         )
 
-    agent = request.app.state.agent
+    # Run certbot directly to renew
     try:
-        await agent.issue_ssl(domain.domain_name, current_user.email)
+        cert_result = await nginx_service.issue_letsencrypt(
+            domain.domain_name, current_user.email,
+        )
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error renewing cert: {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Certificate renewal failed: {exc}",
         )
 
+    # Update nginx config with (potentially new) cert paths
+    try:
+        await nginx_service.apply_ssl_to_nginx(
+            domain=domain.domain_name,
+            document_root=domain.document_root,
+            php_version=domain.php_version,
+            cert_path=cert_result["cert_path"],
+            key_path=cert_result["key_path"],
+        )
+    except Exception:
+        pass  # Non-fatal: cert renewed, nginx may need manual reload
+
+    # Update DB records
+    cert.cert_path = cert_result["cert_path"]
+    cert.key_path = cert_result["key_path"]
     cert.expires_at = datetime.now(timezone.utc) + timedelta(days=90)
     cert.last_renewed_at = datetime.now(timezone.utc)
     db.add(cert)
+
+    domain.ssl_cert_path = cert_result["cert_path"]
+    domain.ssl_key_path = cert_result["key_path"]
+    db.add(domain)
     await db.flush()
 
     _log(db, request, current_user.id, "ssl.renew", f"Renewed cert for {domain.domain_name}")

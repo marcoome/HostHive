@@ -56,5 +56,13 @@ class DnsRecordResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DnsRecordUpdate(BaseModel):
+    record_type: Optional[str] = Field(default=None, pattern=r"^(A|AAAA|CNAME|MX|TXT|NS|SRV|CAA|PTR)$")
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    value: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    ttl: Optional[int] = Field(default=None, ge=60, le=604800)
+    priority: Optional[int] = Field(default=None, ge=0, le=65535)
+
+
 class DnsZoneDetailResponse(DnsZoneResponse):
     records: List[DnsRecordResponse] = []

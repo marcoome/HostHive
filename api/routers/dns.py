@@ -1,7 +1,18 @@
-"""DNS router -- /api/v1/dns."""
+"""DNS router -- /api/v1/dns.
+
+All operations follow the DB-first pattern:
+1. Validate & persist to database.
+2. Try to sync to BIND9 (directly via zone files + ``rndc reload``).
+3. Optionally try the agent as a secondary sync path.
+
+If BIND or the agent is unavailable the data is still safely in the DB and
+a warning is attached to the response so the operator knows manual sync may
+be needed.
+"""
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
@@ -18,13 +29,20 @@ from api.models.users import User
 from api.schemas.dns import (
     DnsRecordCreate,
     DnsRecordResponse,
+    DnsRecordUpdate,
     DnsZoneCreate,
     DnsZoneDetailResponse,
     DnsZoneResponse,
 )
+from api.services.bind_service import generate_zone_file, remove_zone, write_zone
 
 router = APIRouter()
+_dns_logger = logging.getLogger("hosthive.dns")
 
+
+# =========================================================================
+# Helpers
+# =========================================================================
 
 def _is_admin(user: User) -> bool:
     return user.role.value == "admin"
@@ -44,14 +62,68 @@ async def _get_zone_or_404(
     return zone
 
 
+async def _get_record_or_404(
+    record_id: uuid.UUID,
+    zone_id: uuid.UUID,
+    db: AsyncSession,
+) -> DnsRecord:
+    result = await db.execute(
+        select(DnsRecord).where(DnsRecord.id == record_id, DnsRecord.zone_id == zone_id)
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="DNS record not found.")
+    return record
+
+
 def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, details: str):
     client_ip = request.client.host if request.client else "unknown"
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
-# ==========================================================================
+async def _fetch_zone_records(db: AsyncSession, zone_id: uuid.UUID) -> list[DnsRecord]:
+    """Return all DNS records for a zone from the DB."""
+    result = await db.execute(select(DnsRecord).where(DnsRecord.zone_id == zone_id))
+    return list(result.scalars().all())
+
+
+async def _sync_zone_to_bind(zone_name: str, records: list[DnsRecord]) -> dict | None:
+    """Write zone file and reload BIND.  Returns a warning dict or None."""
+    try:
+        ok, msg = await write_zone(zone_name, records)
+        if not ok:
+            _dns_logger.warning("BIND sync warning for %s: %s", zone_name, msg)
+            return {"bind_warning": msg}
+    except Exception as exc:
+        _dns_logger.warning("BIND sync failed for %s: %s", zone_name, exc)
+        return {"bind_warning": f"BIND sync failed: {exc}"}
+    return None
+
+
+async def _try_agent(request: Request, coro_factory, label: str) -> dict | None:
+    """Try calling the agent; return a warning dict on failure, None on success."""
+    try:
+        agent = getattr(request.app.state, "agent", None)
+        if agent is None:
+            return {"agent_warning": "Agent not configured."}
+        await coro_factory(agent)
+    except Exception as exc:
+        _dns_logger.warning("Agent error (%s): %s", label, exc)
+        return {"agent_warning": f"Agent error: {exc}"}
+    return None
+
+
+def _attach_warnings(response_dict: dict, *warnings: dict | None) -> dict:
+    """Merge any non-None warning dicts into the response."""
+    for w in warnings:
+        if w:
+            response_dict.update(w)
+    return response_dict
+
+
+# =========================================================================
 # Zones
-# ==========================================================================
+# =========================================================================
 
 @router.get("/zones", status_code=status.HTTP_200_OK)
 async def list_zones(
@@ -82,11 +154,15 @@ async def create_zone(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    import logging
-    _dns_logger = logging.getLogger("hosthive.dns")
+    """Create a DNS zone.
 
+    1. Validate domain ownership (if domain_id given).
+    2. Persist zone to DB.
+    3. Generate BIND zone file & reload.
+    4. Try agent as secondary sync.
+    """
     try:
-        # If domain_id is provided, verify domain ownership
+        # -- Domain ownership check --
         domain_id = body.domain_id
         if domain_id is not None:
             domain_result = await db.execute(select(Domain).where(Domain.id == domain_id))
@@ -96,7 +172,6 @@ async def create_zone(
             if not _is_admin(current_user) and domain.user_id != current_user.id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to domain.")
         else:
-            # Try to look up the domain by zone_name (frontend sends name only)
             domain_result = await db.execute(
                 select(Domain).where(Domain.domain_name == body.zone_name)
             )
@@ -108,25 +183,17 @@ async def create_zone(
 
         zone_name = body.zone_name
         if not zone_name:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="zone_name is required.")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="zone_name is required.",
+            )
 
+        # -- Duplicate check --
         exists = await db.execute(select(DnsZone).where(DnsZone.zone_name == zone_name))
         if exists.scalar_one_or_none() is not None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Zone already exists.")
 
-        agent = request.app.state.agent
-        agent_ok = True
-        try:
-            await agent.create_zone(zone_name)
-        except Exception as exc:
-            # Log the agent error but still create the zone record in the database.
-            # The zone can be synced to the agent later.
-            agent_ok = False
-            _dns_logger.warning(
-                "Agent error creating zone %s (will create DB record anyway): %s",
-                zone_name, exc,
-            )
-
+        # -- 1. DB first --
         zone = DnsZone(
             user_id=current_user.id,
             domain_id=domain_id,
@@ -137,14 +204,18 @@ async def create_zone(
 
         _log(db, request, current_user.id, "dns.create_zone", f"Created zone {zone_name}")
 
-        response = DnsZoneResponse.model_validate(zone)
-        # If agent failed, still return 201 but include a warning
-        if not agent_ok:
-            return {
-                **response.model_dump(mode="json"),
-                "warning": "Zone created in database but agent provisioning failed. It may need manual sync.",
-            }
-        return response
+        # -- 2. BIND sync (direct) --
+        bind_warn = await _sync_zone_to_bind(zone_name, [])
+
+        # -- 3. Agent sync (best-effort) --
+        agent_warn = await _try_agent(
+            request,
+            lambda ag: ag.create_zone(zone_name),
+            f"create_zone({zone_name})",
+        )
+
+        response = DnsZoneResponse.model_validate(zone).model_dump(mode="json")
+        return _attach_warnings(response, bind_warn, agent_warn)
 
     except HTTPException:
         raise
@@ -163,10 +234,7 @@ async def get_zone(
     current_user: User = Depends(get_current_user),
 ):
     zone = await _get_zone_or_404(zone_id, db, current_user)
-    records_result = await db.execute(
-        select(DnsRecord).where(DnsRecord.zone_id == zone_id)
-    )
-    records = records_result.scalars().all()
+    records = await _fetch_zone_records(db, zone_id)
 
     resp = DnsZoneDetailResponse.model_validate(zone)
     resp.records = [DnsRecordResponse.model_validate(r) for r in records]
@@ -180,25 +248,31 @@ async def delete_zone(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Delete a zone from DB, remove BIND zone file, and try agent."""
     zone = await _get_zone_or_404(zone_id, db, current_user)
-    agent = request.app.state.agent
 
-    try:
-        await agent.delete_zone(zone.zone_name)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error deleting zone: {exc}",
-        )
-
+    # -- 1. DB first --
     _log(db, request, current_user.id, "dns.delete_zone", f"Deleted zone {zone.zone_name}")
     await db.delete(zone)
     await db.flush()
 
+    # -- 2. Remove BIND zone file --
+    try:
+        await remove_zone(zone.zone_name)
+    except Exception as exc:
+        _dns_logger.warning("BIND zone removal failed for %s: %s", zone.zone_name, exc)
 
-# ==========================================================================
+    # -- 3. Agent (best-effort) --
+    await _try_agent(
+        request,
+        lambda ag: ag.delete_zone(zone.zone_name),
+        f"delete_zone({zone.zone_name})",
+    )
+
+
+# =========================================================================
 # Records within zones
-# ==========================================================================
+# =========================================================================
 
 @router.get("/zones/{zone_id}/records", status_code=status.HTTP_200_OK)
 async def list_records(
@@ -231,24 +305,15 @@ async def create_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Create a DNS record.
+
+    1. Persist to DB.
+    2. Regenerate full zone file and reload BIND.
+    3. Try agent as secondary sync.
+    """
     zone = await _get_zone_or_404(zone_id, db, current_user)
-    agent = request.app.state.agent
 
-    try:
-        await agent.add_dns_record(
-            zone=zone.zone_name,
-            record_type=body.record_type,
-            name=body.name,
-            value=body.value,
-            ttl=body.ttl,
-            priority=body.priority,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error adding record: {exc}",
-        )
-
+    # -- 1. DB first --
     record = DnsRecord(
         zone_id=zone_id,
         record_type=body.record_type,
@@ -261,7 +326,84 @@ async def create_record(
     await db.flush()
 
     _log(db, request, current_user.id, "dns.create_record", f"Added {body.record_type} record to {zone.zone_name}")
-    return DnsRecordResponse.model_validate(record)
+
+    # -- 2. BIND sync --
+    all_records = await _fetch_zone_records(db, zone_id)
+    bind_warn = await _sync_zone_to_bind(zone.zone_name, all_records)
+
+    # -- 3. Agent sync --
+    agent_warn = await _try_agent(
+        request,
+        lambda ag: ag.add_dns_record(
+            zone=zone.zone_name,
+            record_type=body.record_type,
+            name=body.name,
+            value=body.value,
+            ttl=body.ttl,
+            priority=body.priority,
+        ),
+        f"add_record({zone.zone_name})",
+    )
+
+    response = DnsRecordResponse.model_validate(record).model_dump(mode="json")
+    return _attach_warnings(response, bind_warn, agent_warn)
+
+
+@router.put("/zones/{zone_id}/records/{record_id}", status_code=status.HTTP_200_OK)
+async def update_record(
+    zone_id: uuid.UUID,
+    record_id: uuid.UUID,
+    body: DnsRecordUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update an existing DNS record.
+
+    1. Update fields in DB.
+    2. Regenerate full zone file and reload BIND.
+    3. Try agent as secondary sync.
+    """
+    zone = await _get_zone_or_404(zone_id, db, current_user)
+    record = await _get_record_or_404(record_id, zone_id, db)
+
+    # -- 1. Apply partial update to DB --
+    update_data = body.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No fields to update.",
+        )
+
+    for field, value in update_data.items():
+        setattr(record, field, value)
+    await db.flush()
+
+    _log(
+        db, request, current_user.id, "dns.update_record",
+        f"Updated record {record_id} in {zone.zone_name}",
+    )
+
+    # -- 2. BIND sync --
+    all_records = await _fetch_zone_records(db, zone_id)
+    bind_warn = await _sync_zone_to_bind(zone.zone_name, all_records)
+
+    # -- 3. Agent sync (best-effort: delete old + create new) --
+    agent_warn = await _try_agent(
+        request,
+        lambda ag: ag.add_dns_record(
+            zone=zone.zone_name,
+            record_type=record.record_type,
+            name=record.name,
+            value=record.value,
+            ttl=record.ttl,
+            priority=record.priority,
+        ),
+        f"update_record({zone.zone_name})",
+    )
+
+    response = DnsRecordResponse.model_validate(record).model_dump(mode="json")
+    return _attach_warnings(response, bind_warn, agent_warn)
 
 
 @router.delete("/zones/{zone_id}/records/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -272,32 +414,38 @@ async def delete_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Delete a DNS record.
+
+    1. Remove from DB.
+    2. Regenerate zone file (without the deleted record) and reload BIND.
+    3. Try agent as secondary sync.
+    """
     zone = await _get_zone_or_404(zone_id, db, current_user)
+    record = await _get_record_or_404(record_id, zone_id, db)
 
-    result = await db.execute(
-        select(DnsRecord).where(DnsRecord.id == record_id, DnsRecord.zone_id == zone_id)
-    )
-    record = result.scalar_one_or_none()
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="DNS record not found.")
-
-    agent = request.app.state.agent
-    try:
-        await agent.delete_dns_record(zone.zone_name, str(record_id))
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error deleting record: {exc}",
-        )
-
+    # -- 1. DB first --
     _log(db, request, current_user.id, "dns.delete_record", f"Deleted record {record_id} from {zone.zone_name}")
     await db.delete(record)
     await db.flush()
 
+    # -- 2. BIND sync --
+    remaining_records = await _fetch_zone_records(db, zone_id)
+    try:
+        await write_zone(zone.zone_name, remaining_records)
+    except Exception as exc:
+        _dns_logger.warning("BIND sync after record delete failed for %s: %s", zone.zone_name, exc)
 
-# ==========================================================================
+    # -- 3. Agent sync --
+    await _try_agent(
+        request,
+        lambda ag: ag.delete_dns_record(zone.zone_name, str(record_id)),
+        f"delete_record({zone.zone_name})",
+    )
+
+
+# =========================================================================
 # Import / Export
-# ==========================================================================
+# =========================================================================
 
 @router.post("/zones/{zone_id}/import", status_code=status.HTTP_200_OK)
 async def import_zone(
@@ -307,24 +455,93 @@ async def import_zone(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Import a BIND zone file.
+
+    Parses each resource record line, saves to DB, then regenerates the zone
+    file and reloads BIND.
+    """
     zone = await _get_zone_or_404(zone_id, db, current_user)
     content = (await file.read()).decode("utf-8")
 
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
+    imported = 0
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith(";") or line.startswith("$"):
+            continue
+        # Very basic RR parser: NAME TTL CLASS TYPE RDATA
+        # Also handles: NAME CLASS TYPE RDATA (no explicit TTL)
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+
+        # Determine layout
+        name = parts[0]
+        idx = 1
+
+        # Optional TTL (numeric)
+        ttl = 3600
+        if parts[idx].isdigit():
+            ttl = int(parts[idx])
+            idx += 1
+
+        # Class (IN)
+        if idx < len(parts) and parts[idx].upper() == "IN":
+            idx += 1
+
+        if idx + 1 >= len(parts):
+            continue
+
+        record_type = parts[idx].upper()
+        idx += 1
+
+        # Priority for MX/SRV
+        priority = None
+        if record_type in ("MX", "SRV") and idx + 1 < len(parts) and parts[idx].isdigit():
+            priority = int(parts[idx])
+            idx += 1
+
+        value = " ".join(parts[idx:])
+
+        # Skip SOA records (we generate those)
+        if record_type == "SOA":
+            continue
+
+        valid_types = {"A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA", "PTR"}
+        if record_type not in valid_types:
+            continue
+
+        rec = DnsRecord(
+            zone_id=zone_id,
+            record_type=record_type,
+            name=name,
+            value=value.strip('"'),
+            ttl=ttl,
+            priority=priority,
+        )
+        db.add(rec)
+        imported += 1
+
+    await db.flush()
+
+    # Sync to BIND
+    all_records = await _fetch_zone_records(db, zone_id)
+    bind_warn = await _sync_zone_to_bind(zone.zone_name, all_records)
+
+    # Try agent too
+    agent_warn = await _try_agent(
+        request,
+        lambda ag: ag._request(
             "POST",
             f"/dns/zone/{zone.zone_name}/import",
             json_body={"zone_data": content},
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error importing zone: {exc}",
-        )
+        ),
+        f"import_zone({zone.zone_name})",
+    )
 
-    _log(db, request, current_user.id, "dns.import_zone", f"Imported zone file for {zone.zone_name}")
-    return {"detail": "Zone imported successfully.", "records_imported": result.get("records_imported", 0)}
+    _log(db, request, current_user.id, "dns.import_zone", f"Imported {imported} records for {zone.zone_name}")
+
+    result = {"detail": "Zone imported successfully.", "records_imported": imported}
+    return _attach_warnings(result, bind_warn, agent_warn)
 
 
 @router.get("/zones/{zone_id}/export", status_code=status.HTTP_200_OK)
@@ -334,25 +551,13 @@ async def export_zone(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Export zone as a BIND-format zone file generated from DB records."""
     zone = await _get_zone_or_404(zone_id, db, current_user)
+    records = await _fetch_zone_records(db, zone_id)
 
-    # Build BIND-format zone file from DB records
-    records_result = await db.execute(
-        select(DnsRecord).where(DnsRecord.zone_id == zone_id)
-    )
-    records = records_result.scalars().all()
-
-    lines = [
-        f"; Zone file for {zone.zone_name}",
-        f"$ORIGIN {zone.zone_name}.",
-        f"$TTL 3600",
-        "",
-    ]
-    for r in records:
-        priority_part = f"{r.priority} " if r.priority is not None else ""
-        lines.append(f"{r.name}\t{r.ttl}\tIN\t{r.record_type}\t{priority_part}{r.value}")
+    bind_content = generate_zone_file(zone.zone_name, records)
 
     return {
         "zone_name": zone.zone_name,
-        "bind_format": "\n".join(lines),
+        "bind_format": bind_content,
     }

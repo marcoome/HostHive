@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import re
+import subprocess
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -16,6 +20,9 @@ from api.models.users import User
 from api.schemas.ftp import FtpAccountCreate, FtpAccountResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+FTPD_PASSWD = "/etc/proftpd/ftpd.passwd"
 
 
 def _is_admin(user: User) -> bool:
@@ -39,6 +46,95 @@ async def _get_ftp_or_404(
 def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, details: str):
     client_ip = request.client.host if request.client else "unknown"
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
+
+
+# --------------------------------------------------------------------------
+# Direct ProFTPD management (no agent)
+# --------------------------------------------------------------------------
+
+def _direct_create_ftp_user(username: str, password: str, home_dir: str) -> None:
+    """Create an FTP user in /etc/proftpd/ftpd.passwd using ftpasswd."""
+    result = subprocess.run(
+        [
+            "ftpasswd", "--passwd",
+            "--name=" + username,
+            "--uid=33",
+            "--gid=33",
+            "--home=" + home_dir,
+            "--shell=/bin/false",
+            "--file=" + FTPD_PASSWD,
+            "--stdin",
+        ],
+        input=password,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ftpasswd create failed: {result.stderr.strip()}")
+    # Ensure home dir exists
+    subprocess.run(["mkdir", "-p", home_dir], capture_output=True, timeout=5)
+    subprocess.run(["chown", "33:33", home_dir], capture_output=True, timeout=5)
+    _reload_proftpd()
+
+
+def _direct_delete_ftp_user(username: str) -> None:
+    """Remove an FTP user from /etc/proftpd/ftpd.passwd."""
+    try:
+        with open(FTPD_PASSWD, "r") as f:
+            lines = f.readlines()
+        # Each line starts with username:
+        pattern = re.compile(r"^" + re.escape(username) + r":")
+        new_lines = [line for line in lines if not pattern.match(line)]
+        if len(new_lines) == len(lines):
+            logger.warning("FTP user %s not found in %s", username, FTPD_PASSWD)
+        with open(FTPD_PASSWD, "w") as f:
+            f.writelines(new_lines)
+    except FileNotFoundError:
+        logger.warning("%s does not exist, nothing to remove", FTPD_PASSWD)
+    _reload_proftpd()
+
+
+def _direct_update_ftp_password(username: str, password: str, home_dir: str) -> None:
+    """Update the password for an existing FTP user (ftpasswd overwrites the entry)."""
+    result = subprocess.run(
+        [
+            "ftpasswd", "--passwd",
+            "--name=" + username,
+            "--uid=33",
+            "--gid=33",
+            "--home=" + home_dir,
+            "--shell=/bin/false",
+            "--file=" + FTPD_PASSWD,
+            "--change-password",
+            "--stdin",
+        ],
+        input=password,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ftpasswd update failed: {result.stderr.strip()}")
+    _reload_proftpd()
+
+
+def _reload_proftpd() -> None:
+    """Reload ProFTPD so it picks up password file changes."""
+    result = subprocess.run(
+        ["systemctl", "reload", "proftpd"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        # Reload failed, try restart as fallback
+        subprocess.run(
+            ["systemctl", "restart", "proftpd"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -92,19 +188,7 @@ async def create_ftp_account(
             detail=f"Home directory must be under {expected_prefix}",
         )
 
-    agent = request.app.state.agent
-    try:
-        await agent.create_ftp_account(
-            username=body.username,
-            password=body.password,
-            home_dir=body.home_dir,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error creating FTP account: {exc}",
-        )
-
+    # Save to DB first
     acct = FtpAccount(
         user_id=current_user.id,
         username=body.username,
@@ -113,6 +197,32 @@ async def create_ftp_account(
     )
     db.add(acct)
     await db.flush()
+
+    # Try agent first, fall back to direct ProFTPD management
+    provisioned = False
+    agent = request.app.state.agent
+    try:
+        await agent.create_ftp_account(
+            username=body.username,
+            password=body.password,
+            home_dir=body.home_dir,
+        )
+        provisioned = True
+    except Exception as exc:
+        logger.warning("Agent error creating FTP account, falling back to direct: %s", exc)
+
+    if not provisioned:
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, _direct_create_ftp_user, body.username, body.password, body.home_dir,
+            )
+        except Exception as exc:
+            logger.error("Direct FTP user creation also failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to provision FTP account: {exc}",
+            )
 
     _log(db, request, current_user.id, "ftp.create", f"Created FTP account {body.username}")
     return FtpAccountResponse.model_validate(acct)
@@ -195,6 +305,7 @@ async def get_ftp_account(
 async def update_ftp_account(
     ftp_id: uuid.UUID,
     is_active: bool = Query(None),
+    password: str = Query(None, min_length=8, max_length=128),
     request: Request = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -202,6 +313,32 @@ async def update_ftp_account(
     acct = await _get_ftp_or_404(ftp_id, db, current_user)
     if is_active is not None:
         acct.is_active = is_active
+
+    # Update password on the system if provided
+    if password is not None:
+        acct.password_hash = hash_password(password)
+        # Try agent first, fall back to direct
+        provisioned = False
+        agent = request.app.state.agent
+        try:
+            await agent.create_ftp_account(
+                username=acct.username,
+                password=password,
+                home_dir=acct.home_dir,
+            )
+            provisioned = True
+        except Exception as exc:
+            logger.warning("Agent error updating FTP password, falling back to direct: %s", exc)
+
+        if not provisioned:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, _direct_update_ftp_password, acct.username, password, acct.home_dir,
+                )
+            except Exception as exc:
+                logger.error("Direct FTP password update also failed: %s", exc)
+
     db.add(acct)
     await db.flush()
 
@@ -220,15 +357,26 @@ async def delete_ftp_account(
     current_user: User = Depends(get_current_user),
 ):
     acct = await _get_ftp_or_404(ftp_id, db, current_user)
-    agent = request.app.state.agent
 
+    # Try agent first, fall back to direct
+    deleted = False
+    agent = request.app.state.agent
     try:
         await agent.delete_ftp_account(acct.username)
+        deleted = True
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error deleting FTP account: {exc}",
-        )
+        logger.warning("Agent error deleting FTP account, falling back to direct: %s", exc)
+
+    if not deleted:
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _direct_delete_ftp_user, acct.username)
+        except Exception as exc:
+            logger.error("Direct FTP user deletion also failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete FTP account from system: {exc}",
+            )
 
     _log(db, request, current_user.id, "ftp.delete", f"Deleted FTP account {acct.username}")
     await db.delete(acct)

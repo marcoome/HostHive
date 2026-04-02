@@ -132,15 +132,33 @@ class TrafficHeatmapResponse(BaseModel):
 
 class RealtimeStatsResponse(BaseModel):
     cpu_percent: float
+    cpu_per_core: List[float] = Field(default_factory=list, description="Per-core CPU usage percentages.")
     memory_percent: float
-    memory_used_mb: int
-    memory_total_mb: int
+    memory_used: int = Field(0, description="Memory used in bytes.")
+    memory_total: int = Field(0, description="Total memory in bytes.")
+    # Legacy aliases kept for backward compat
+    memory_used_mb: int = 0
+    memory_total_mb: int = 0
     disk_percent: float
-    disk_used_gb: float
-    disk_total_gb: float
-    load_avg_1: float
-    load_avg_5: float
-    load_avg_15: float
-    network_rx_bytes: int
-    network_tx_bytes: int
-    active_connections: int
+    disk_used: int = Field(0, description="Disk used in bytes.")
+    disk_total: int = Field(0, description="Disk total in bytes.")
+    disk_used_gb: float = 0.0
+    disk_total_gb: float = 0.0
+    disk_read_bytes: int = 0
+    disk_write_bytes: int = 0
+    net_bytes_sent: int = 0
+    net_bytes_recv: int = 0
+    # Legacy aliases
+    network_rx_bytes: int = 0
+    network_tx_bytes: int = 0
+    load_1: float = 0.0
+    load_5: float = 0.0
+    load_15: float = 0.0
+    # Legacy aliases
+    load_avg_1: float = 0.0
+    load_avg_5: float = 0.0
+    load_avg_15: float = 0.0
+    uptime_seconds: float = 0.0
+    processes: int = 0
+    connections: int = 0
+    active_connections: int = 0
