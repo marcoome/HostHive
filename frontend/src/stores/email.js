@@ -11,7 +11,7 @@ export const useEmailStore = defineStore('email', () => {
     loading.value = true
     try {
       const { data } = await client.get('/email/mailboxes')
-      mailboxes.value = data
+      mailboxes.value = Array.isArray(data) ? data : (data.items || [])
     } finally {
       loading.value = false
     }
@@ -39,7 +39,7 @@ export const useEmailStore = defineStore('email', () => {
     loading.value = true
     try {
       const { data } = await client.get('/email/aliases')
-      aliases.value = data
+      aliases.value = Array.isArray(data) ? data : (data.aliases || data.items || [])
     } finally {
       loading.value = false
     }

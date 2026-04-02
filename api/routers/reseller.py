@@ -7,6 +7,7 @@ Strict isolation: resellers can only see/manage users they created
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
@@ -249,10 +250,18 @@ async def get_branding(
     svc = ResellerService(db)
     branding = await svc.get_branding(reseller.id)
     if branding is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No branding configured. Use PUT to create one.",
-        )
+        return {
+            "id": str(reseller.id),
+            "user_id": str(reseller.id),
+            "logo_url": None,
+            "primary_color": "#4f46e5",
+            "panel_title": "HostHive",
+            "custom_domain": None,
+            "hide_hosthive_branding": False,
+            "custom_css": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
     return ResellerBrandingResponse.model_validate(branding)
 
 
@@ -287,10 +296,15 @@ async def get_limits(
     svc = ResellerService(db)
     limits = await svc.get_limits(reseller.id)
     if limits is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No resource limits configured for this reseller.",
-        )
+        return {
+            "id": str(reseller.id),
+            "reseller_id": str(reseller.id),
+            "max_users": 0,
+            "max_total_disk_mb": 0,
+            "max_total_bandwidth_gb": 0,
+            "used_users": 0,
+            "used_disk_mb": 0,
+        }
     return ResellerLimitResponse.model_validate(limits)
 
 

@@ -10,7 +10,7 @@ export const useDatabasesStore = defineStore('databases', () => {
     loading.value = true
     try {
       const { data } = await client.get('/databases')
-      databases.value = data
+      databases.value = Array.isArray(data) ? data : (data.items || [])
     } finally {
       loading.value = false
     }

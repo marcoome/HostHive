@@ -10,7 +10,7 @@ export const useFtpStore = defineStore('ftp', () => {
     loading.value = true
     try {
       const { data } = await client.get('/ftp/accounts')
-      accounts.value = data
+      accounts.value = Array.isArray(data) ? data : (data.items || [])
     } finally {
       loading.value = false
     }

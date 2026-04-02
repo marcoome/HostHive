@@ -11,7 +11,7 @@ export const useDomainsStore = defineStore('domains', () => {
     loading.value = true
     try {
       const { data } = await client.get('/domains')
-      domains.value = data
+      domains.value = Array.isArray(data) ? data : (data.items || [])
     } finally {
       loading.value = false
     }

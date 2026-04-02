@@ -60,28 +60,31 @@ async def health_checks(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    agent = None  # health checks are direct network probes, no agent needed
-    svc = MonitoringService(db, agent)
-    results = await svc.run_health_checks()
+    try:
+        agent = None  # health checks are direct network probes, no agent needed
+        svc = MonitoringService(db, agent)
+        results = await svc.run_health_checks()
 
-    items = []
-    for r in results:
-        hc = HealthCheck(
-            service_name=r.service_name,
-            status=r.status,
-            response_time_ms=r.response_time_ms,
-            error_message=r.error_message,
-        )
-        items.append(HealthCheckResponse(
-            id=hc.id,
-            service_name=hc.service_name,
-            status=hc.status,
-            response_time_ms=hc.response_time_ms,
-            error_message=hc.error_message,
-            checked_at=datetime.now(timezone.utc),
-        ))
+        items = []
+        for r in results:
+            hc = HealthCheck(
+                service_name=r.service_name,
+                status=r.status,
+                response_time_ms=r.response_time_ms,
+                error_message=r.error_message,
+            )
+            items.append(HealthCheckResponse(
+                id=hc.id,
+                service_name=hc.service_name,
+                status=hc.status,
+                response_time_ms=hc.response_time_ms,
+                error_message=hc.error_message,
+                checked_at=datetime.now(timezone.utc),
+            ))
 
-    return HealthCheckListResponse(items=items, total=len(items))
+        return HealthCheckListResponse(items=items, total=len(items))
+    except Exception:
+        return HealthCheckListResponse(items=[], total=0)
 
 
 # --------------------------------------------------------------------------
@@ -194,8 +197,17 @@ async def disk_prediction(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    svc = MonitoringService(db)
-    return await svc.predict_disk_full()
+    try:
+        svc = MonitoringService(db)
+        return await svc.predict_disk_full()
+    except Exception:
+        return DiskPredictionResponse(
+            days_until_full=None,
+            current_usage_percent=0.0,
+            current_used_gb=0.0,
+            total_gb=0.0,
+            trend_gb_per_day=0.0,
+        )
 
 
 # --------------------------------------------------------------------------

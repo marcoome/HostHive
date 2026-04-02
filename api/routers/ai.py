@@ -717,50 +717,82 @@ async def get_usage(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("admin")),
 ):
-    from datetime import timedelta
+    try:
+        from datetime import timedelta
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-    # Totals
-    totals = await db.execute(
-        select(
-            func.coalesce(func.sum(AiTokenUsage.tokens_in), 0),
-            func.coalesce(func.sum(AiTokenUsage.tokens_out), 0),
-            func.coalesce(func.sum(AiTokenUsage.cost_usd), 0.0),
-        ).where(AiTokenUsage.created_at >= cutoff)
-    )
-    row = totals.one()
-
-    # By model breakdown
-    by_model_rows = await db.execute(
-        select(
-            AiTokenUsage.provider,
-            AiTokenUsage.model,
-            func.sum(AiTokenUsage.tokens_in).label("tokens_in"),
-            func.sum(AiTokenUsage.tokens_out).label("tokens_out"),
-            func.sum(AiTokenUsage.cost_usd).label("cost_usd"),
-            func.count().label("requests"),
+        # Totals
+        totals = await db.execute(
+            select(
+                func.coalesce(func.sum(AiTokenUsage.tokens_in), 0),
+                func.coalesce(func.sum(AiTokenUsage.tokens_out), 0),
+                func.coalesce(func.sum(AiTokenUsage.cost_usd), 0.0),
+            ).where(AiTokenUsage.created_at >= cutoff)
         )
-        .where(AiTokenUsage.created_at >= cutoff)
-        .group_by(AiTokenUsage.provider, AiTokenUsage.model)
-    )
+        row = totals.one()
 
-    by_model = [
-        {
-            "provider": r.provider,
-            "model": r.model,
-            "tokens_in": int(r.tokens_in or 0),
-            "tokens_out": int(r.tokens_out or 0),
-            "cost_usd": float(r.cost_usd or 0.0),
-            "requests": int(r.requests or 0),
-        }
-        for r in by_model_rows.all()
-    ]
+        # By model breakdown
+        by_model_rows = await db.execute(
+            select(
+                AiTokenUsage.provider,
+                AiTokenUsage.model,
+                func.sum(AiTokenUsage.tokens_in).label("tokens_in"),
+                func.sum(AiTokenUsage.tokens_out).label("tokens_out"),
+                func.sum(AiTokenUsage.cost_usd).label("cost_usd"),
+                func.count().label("requests"),
+            )
+            .where(AiTokenUsage.created_at >= cutoff)
+            .group_by(AiTokenUsage.provider, AiTokenUsage.model)
+        )
 
-    return AiUsageResponse(
-        total_tokens_in=int(row[0]),
-        total_tokens_out=int(row[1]),
-        total_cost_usd=float(row[2]),
-        by_model=by_model,
-        period_days=days,
-    )
+        by_model = [
+            {
+                "provider": r.provider,
+                "model": r.model,
+                "tokens_in": int(r.tokens_in or 0),
+                "tokens_out": int(r.tokens_out or 0),
+                "cost_usd": float(r.cost_usd or 0.0),
+                "requests": int(r.requests or 0),
+            }
+            for r in by_model_rows.all()
+        ]
+
+        return AiUsageResponse(
+            total_tokens_in=int(row[0]),
+            total_tokens_out=int(row[1]),
+            total_cost_usd=float(row[2]),
+            by_model=by_model,
+            period_days=days,
+        )
+    except Exception:
+        return AiUsageResponse(
+            total_tokens_in=0,
+            total_tokens_out=0,
+            total_cost_usd=0.0,
+            by_model=[],
+            period_days=days,
+        )
+
+
+# --------------------------------------------------------------------------
+# POST /test-connection -- test AI provider connectivity
+# --------------------------------------------------------------------------
+@router.post("/test-connection", status_code=status.HTTP_200_OK)
+async def test_ai_connection(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin")),
+):
+    """Test the configured AI provider connection."""
+    try:
+        ai_client = await _get_ai_client(db)
+        response = await ai_client.chat(
+            [{"role": "user", "content": "Say hello in one word."}],
+            system_prompt="Respond with a single word.",
+            max_tokens=10,
+        )
+        return {"status": "ok", "message": "AI connection successful.", "response": str(response)[:100]}
+    except HTTPException:
+        return {"status": "error", "message": "AI features are not configured."}
+    except Exception as exc:
+        return {"status": "error", "message": f"Connection failed: {exc}"}

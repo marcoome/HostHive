@@ -91,6 +91,19 @@ async def create_backup(
 
 
 # --------------------------------------------------------------------------
+# POST / -- alias for create (frontend compatibility)
+# --------------------------------------------------------------------------
+@router.post("", status_code=status.HTTP_202_ACCEPTED)
+async def create_backup_alias(
+    body: BackupCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await create_backup(body=body, request=request, db=db, current_user=current_user)
+
+
+# --------------------------------------------------------------------------
 # POST /{id}/restore -- restore backup via agent
 # --------------------------------------------------------------------------
 @router.post("/{backup_id}/restore", status_code=status.HTTP_200_OK)

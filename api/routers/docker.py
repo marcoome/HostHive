@@ -185,6 +185,20 @@ async def deploy_container(
 
 
 # ---------------------------------------------------------------------------
+# POST /containers — alias for deploy (frontend compatibility)
+# ---------------------------------------------------------------------------
+
+@router.post("/containers", response_model=ContainerResponse, status_code=status.HTTP_201_CREATED)
+async def deploy_container_alias(
+    body: ContainerDeploy,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await deploy_container(body=body, request=request, db=db, current_user=current_user)
+
+
+# ---------------------------------------------------------------------------
 # POST /containers/{id}/start, /stop, /restart
 # ---------------------------------------------------------------------------
 

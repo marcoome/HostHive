@@ -176,30 +176,33 @@ async def suspicious_activity(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ) -> list[SuspiciousEntryResponse]:
-    # Look at the last 24 hours for suspicious bursts
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    try:
+        # Look at the last 24 hours for suspicious bursts
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
 
-    stmt = (
-        select(
-            ActivityLog.user_id,
-            func.date_trunc("minute", ActivityLog.created_at).label("minute"),
-            func.count().label("action_count"),
+        stmt = (
+            select(
+                ActivityLog.user_id,
+                func.date_trunc("minute", ActivityLog.created_at).label("minute"),
+                func.count().label("action_count"),
+            )
+            .where(ActivityLog.created_at >= since)
+            .where(ActivityLog.user_id.is_not(None))
+            .group_by(ActivityLog.user_id, text("minute"))
+            .having(func.count() > 10)
+            .order_by(text("action_count DESC"))
         )
-        .where(ActivityLog.created_at >= since)
-        .where(ActivityLog.user_id.is_not(None))
-        .group_by(ActivityLog.user_id, text("minute"))
-        .having(func.count() > 10)
-        .order_by(text("action_count DESC"))
-    )
 
-    result = await db.execute(stmt)
-    rows = result.all()
+        result = await db.execute(stmt)
+        rows = result.all()
 
-    return [
-        SuspiciousEntryResponse(
-            user_id=row.user_id,
-            minute=row.minute.isoformat() if row.minute else "",
-            action_count=row.action_count,
-        )
-        for row in rows
-    ]
+        return [
+            SuspiciousEntryResponse(
+                user_id=row.user_id,
+                minute=row.minute.isoformat() if row.minute else "",
+                action_count=row.action_count,
+            )
+            for row in rows
+        ]
+    except Exception:
+        return []

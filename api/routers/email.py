@@ -119,8 +119,170 @@ async def create_mailbox(
     return EmailAccountResponse.model_validate(acct)
 
 
+# ==========================================================================
+# Alias routes for frontend compatibility (/mailboxes/...)
+# IMPORTANT: These MUST be defined BEFORE /{email_id} to avoid FastAPI
+# matching "mailboxes" as a UUID path parameter.
+# ==========================================================================
+
+@router.get("/mailboxes", status_code=status.HTTP_200_OK)
+async def list_mailboxes_alias(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await list_mailboxes(skip=skip, limit=limit, db=db, current_user=current_user)
+
+
+@router.post("/mailboxes", response_model=EmailAccountResponse, status_code=status.HTTP_201_CREATED)
+async def create_mailbox_alias(
+    body: EmailAccountCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await create_mailbox(body=body, request=request, db=db, current_user=current_user)
+
+
+@router.get("/mailboxes/{email_id}", response_model=EmailAccountResponse, status_code=status.HTTP_200_OK)
+async def get_mailbox_alias(
+    email_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return EmailAccountResponse.model_validate(await _get_email_or_404(email_id, db, current_user))
+
+
+@router.put("/mailboxes/{email_id}", response_model=EmailAccountResponse, status_code=status.HTTP_200_OK)
+async def update_mailbox_alias(
+    email_id: uuid.UUID,
+    quota_mb: int = Query(None, ge=1),
+    is_active: bool = Query(None),
+    request: Request = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await update_mailbox(
+        email_id=email_id, quota_mb=quota_mb, is_active=is_active,
+        request=request, db=db, current_user=current_user,
+    )
+
+
+@router.delete("/mailboxes/{email_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_mailbox_alias(
+    email_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await delete_mailbox(email_id=email_id, request=request, db=db, current_user=current_user)
+
+
+# ==========================================================================
+# Aliases (/aliases/...)
+# IMPORTANT: These MUST be defined BEFORE /{email_id} routes.
+# ==========================================================================
+
+@router.post("/aliases", status_code=status.HTTP_201_CREATED)
+async def create_alias(
+    body: AliasCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent.create_mail_alias(source=body.source, destination=body.destination)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error creating alias: {exc}",
+        )
+
+    _log(db, request, current_user.id, "email.create_alias", f"Created alias {body.source} -> {body.destination}")
+    return {"source": body.source, "destination": body.destination, "status": "created"}
+
+
+@router.get("/aliases", status_code=status.HTTP_200_OK)
+async def list_aliases(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent._request("GET", "/mail/aliases")
+    except Exception:
+        result = {"aliases": []}
+    return result
+
+
+@router.delete("/aliases/{alias_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_alias(
+    alias_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    agent = request.app.state.agent
+    try:
+        await agent._request("DELETE", f"/mail/alias/{alias_id}")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error deleting alias: {exc}",
+        )
+
+    _log(db, request, current_user.id, "email.delete_alias", f"Deleted alias {alias_id}")
+
+
+# ==========================================================================
+# Mail queue (admin only) -- must be before /{email_id}
+# ==========================================================================
+
+@router.get("/queue", status_code=status.HTTP_200_OK)
+async def mail_queue(
+    request: Request,
+    admin: User = Depends(_admin),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent._request("GET", "/mail/queue")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error fetching mail queue: {exc}",
+        )
+    return result
+
+
+@router.post("/queue/flush", status_code=status.HTTP_200_OK)
+async def flush_mail_queue(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    agent = request.app.state.agent
+    try:
+        result = await agent._request("POST", "/mail/queue/flush")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error flushing queue: {exc}",
+        )
+
+    client_ip = request.client.host if request.client else "unknown"
+    db.add(ActivityLog(
+        user_id=admin.id,
+        action="email.flush_queue",
+        details="Flushed mail queue",
+        ip_address=client_ip,
+    ))
+    return result
+
+
 # --------------------------------------------------------------------------
-# GET /{id} -- mailbox detail
+# GET /{id} -- mailbox detail (MUST be after all static path routes)
 # --------------------------------------------------------------------------
 @router.get("/{email_id}", response_model=EmailAccountResponse, status_code=status.HTTP_200_OK)
 async def get_mailbox(
@@ -179,104 +341,3 @@ async def delete_mailbox(
     _log(db, request, current_user.id, "email.delete", f"Deleted mailbox {acct.address}")
     await db.delete(acct)
     await db.flush()
-
-
-# --------------------------------------------------------------------------
-# Aliases
-# --------------------------------------------------------------------------
-
-@router.post("/aliases", status_code=status.HTTP_201_CREATED)
-async def create_alias(
-    body: AliasCreate,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    agent = request.app.state.agent
-    try:
-        result = await agent.create_mail_alias(source=body.source, destination=body.destination)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error creating alias: {exc}",
-        )
-
-    _log(db, request, current_user.id, "email.create_alias", f"Created alias {body.source} -> {body.destination}")
-    return {"source": body.source, "destination": body.destination, "status": "created"}
-
-
-@router.get("/aliases", status_code=status.HTTP_200_OK)
-async def list_aliases(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-):
-    agent = request.app.state.agent
-    try:
-        result = await agent._request("GET", "/mail/aliases")
-    except Exception:
-        result = {"aliases": []}
-    return result
-
-
-@router.delete("/aliases/{alias_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_alias(
-    alias_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    agent = request.app.state.agent
-    try:
-        await agent._request("DELETE", f"/mail/alias/{alias_id}")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error deleting alias: {exc}",
-        )
-
-    _log(db, request, current_user.id, "email.delete_alias", f"Deleted alias {alias_id}")
-
-
-# --------------------------------------------------------------------------
-# Mail queue (admin only)
-# --------------------------------------------------------------------------
-
-@router.get("/queue", status_code=status.HTTP_200_OK)
-async def mail_queue(
-    request: Request,
-    admin: User = Depends(_admin),
-):
-    agent = request.app.state.agent
-    try:
-        result = await agent._request("GET", "/mail/queue")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error fetching mail queue: {exc}",
-        )
-    return result
-
-
-@router.post("/queue/flush", status_code=status.HTTP_200_OK)
-async def flush_mail_queue(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    admin: User = Depends(_admin),
-):
-    agent = request.app.state.agent
-    try:
-        result = await agent._request("POST", "/mail/queue/flush")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error flushing queue: {exc}",
-        )
-
-    client_ip = request.client.host if request.client else "unknown"
-    db.add(ActivityLog(
-        user_id=admin.id,
-        action="email.flush_queue",
-        details="Flushed mail queue",
-        ip_address=client_ip,
-    ))
-    return result

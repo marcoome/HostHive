@@ -114,8 +114,66 @@ async def create_ftp_account(
     return FtpAccountResponse.model_validate(acct)
 
 
+# ==========================================================================
+# Alias routes for frontend compatibility (/accounts/...)
+# IMPORTANT: These MUST be defined BEFORE /{ftp_id} to avoid FastAPI
+# matching "accounts" as a UUID path parameter.
+# ==========================================================================
+
+@router.get("/accounts", status_code=status.HTTP_200_OK)
+async def list_ftp_accounts_alias(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await list_ftp_accounts(skip=skip, limit=limit, db=db, current_user=current_user)
+
+
+@router.post("/accounts", response_model=FtpAccountResponse, status_code=status.HTTP_201_CREATED)
+async def create_ftp_account_alias(
+    body: FtpAccountCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await create_ftp_account(body=body, request=request, db=db, current_user=current_user)
+
+
+@router.get("/accounts/{ftp_id}", response_model=FtpAccountResponse, status_code=status.HTTP_200_OK)
+async def get_ftp_account_alias(
+    ftp_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return FtpAccountResponse.model_validate(await _get_ftp_or_404(ftp_id, db, current_user))
+
+
+@router.put("/accounts/{ftp_id}", response_model=FtpAccountResponse, status_code=status.HTTP_200_OK)
+async def update_ftp_account_alias(
+    ftp_id: uuid.UUID,
+    is_active: bool = Query(None),
+    request: Request = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await update_ftp_account(
+        ftp_id=ftp_id, is_active=is_active, request=request, db=db, current_user=current_user,
+    )
+
+
+@router.delete("/accounts/{ftp_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_ftp_account_alias(
+    ftp_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await delete_ftp_account(ftp_id=ftp_id, request=request, db=db, current_user=current_user)
+
+
 # --------------------------------------------------------------------------
-# GET /{id} -- FTP account detail
+# GET /{id} -- FTP account detail (MUST be after all static path routes)
 # --------------------------------------------------------------------------
 @router.get("/{ftp_id}", response_model=FtpAccountResponse, status_code=status.HTTP_200_OK)
 async def get_ftp_account(

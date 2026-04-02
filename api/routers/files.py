@@ -109,6 +109,18 @@ class ExtractRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# GET /tree -- file tree stub for frontend compatibility
+# --------------------------------------------------------------------------
+@router.get("/tree", status_code=status.HTTP_200_OK)
+async def get_file_tree(
+    path: str = Query("/", max_length=4096),
+    current_user: User = Depends(get_current_user),
+):
+    """Stub for file tree - returns empty tree."""
+    return {"path": path, "children": []}
+
+
+# --------------------------------------------------------------------------
 # GET /list -- directory listing
 # --------------------------------------------------------------------------
 @router.get("/list", response_model=FileListResponse, status_code=status.HTTP_200_OK)

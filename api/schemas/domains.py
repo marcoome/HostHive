@@ -6,13 +6,25 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class DomainCreate(BaseModel):
-    domain_name: str = Field(..., min_length=3, max_length=255)
+    domain_name: str = Field(default=None, min_length=3, max_length=255)
     document_root: Optional[str] = None
     php_version: str = Field(default="8.2", pattern=r"^\d+\.\d+$")
+
+    # Frontend alias field
+    name: Optional[str] = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_frontend_fields(cls, values):
+        """Accept 'name' from frontend and map to 'domain_name'."""
+        if isinstance(values, dict):
+            if "name" in values and "domain_name" not in values:
+                values["domain_name"] = values["name"]
+        return values
 
 
 class DomainUpdate(BaseModel):
@@ -35,4 +47,13 @@ class DomainResponse(BaseModel):
     is_active: bool
     created_at: datetime
 
+    # Frontend-friendly alias
+    name: Optional[str] = None
+
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def populate_frontend_fields(self):
+        """Provide 'name' as alias for 'domain_name' in the response."""
+        self.name = self.domain_name
+        return self
