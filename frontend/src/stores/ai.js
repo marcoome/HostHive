@@ -134,8 +134,19 @@ export const useAiStore = defineStore('ai', () => {
 
   async function fetchSettings() {
     const { data } = await client.get('/ai/settings')
-    settings.value = { ...settings.value, ...data }
-    return data
+    // Map backend snake_case to frontend camelCase
+    settings.value = {
+      provider: data.provider || 'openai',
+      model: data.model || 'gpt-4o',
+      apiKey: data.api_key || data.apiKey || '',
+      baseUrl: data.base_url || data.baseUrl || '',
+      autoFix: data.auto_fix_enabled ?? data.autoFix ?? false,
+      logAnalysisInterval: data.log_analysis_interval || data.logAnalysisInterval || 'daily',
+      tokenLimit: data.max_tokens_per_request || data.tokenLimit || 2000,
+      isEnabled: data.is_enabled ?? data.isEnabled ?? false,
+      hasApiKey: data.has_api_key ?? data.hasApiKey ?? false,
+    }
+    return settings.value
   }
 
   async function updateSettings(newSettings) {

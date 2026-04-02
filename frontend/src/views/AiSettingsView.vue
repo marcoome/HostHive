@@ -331,7 +331,12 @@ function resetForm() {
 }
 
 async function save() {
-  await ai.updateSettings(form.value)
+  const data = { ...form.value }
+  // Don't send placeholder dots as API key
+  if (data.apiKey && data.apiKey.startsWith('••')) {
+    delete data.apiKey
+  }
+  await ai.updateSettings(data)
 }
 
 // When the provider changes, clear fetched models and reset model selection
@@ -348,6 +353,10 @@ onMounted(async () => {
   try {
     await ai.fetchSettings()
     form.value = { ...ai.settings }
+    // API key is never returned for security - show placeholder if configured
+    if (ai.settings.hasApiKey && !form.value.apiKey) {
+      form.value.apiKey = '••••••••••••••••••••••••••••••••'
+    }
   } catch {}
 
   try {
