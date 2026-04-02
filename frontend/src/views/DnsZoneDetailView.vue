@@ -339,7 +339,12 @@ async function addRecord() {
   addingRecord.value = true
   try {
     const payload = { ...newRecord.value }
-    if (!showPriority(payload.type)) delete payload.priority
+    // Backend expects record_type, frontend uses type
+    if (payload.type && !payload.record_type) {
+      payload.record_type = payload.type
+      delete payload.type
+    }
+    if (!showPriority(payload.record_type || payload.type)) delete payload.priority
     await dns.createRecord(zoneId, payload)
     notifications.success(`${newRecord.value.type} record added`)
     newRecord.value = { type: 'A', name: '@', value: '', ttl: 3600, priority: 10 }
