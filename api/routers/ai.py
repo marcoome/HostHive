@@ -946,11 +946,36 @@ class AiTestRequest(BaseModel):
 @router.post("/test-connection", status_code=status.HTTP_200_OK)
 async def test_ai_connection(
     body: AiTestRequest = AiTestRequest(),
+    request: Request = None,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Test AI provider connection using credentials from the request body."""
-    if not body.api_key:
-        return {"status": "error", "message": "No API key provided."}
+    api_key = body.api_key
+
+    # If no key or placeholder dots, try to get from saved config
+    if not api_key or api_key.startswith('••') or api_key.startswith('***'):
+        # Try Redis first
+        try:
+            redis = request.app.state.redis
+            config = await redis.hgetall("hosthive:ai:config")
+            if config and config.get("api_key"):
+                api_key = config["api_key"]
+        except Exception:
+            pass
+
+        # Try DB
+        if not api_key or api_key.startswith('••'):
+            try:
+                result = await db.execute(select(AiSettings).limit(1))
+                ai_settings = result.scalar_one_or_none()
+                if ai_settings and ai_settings.api_key_encrypted:
+                    api_key = decrypt_value(ai_settings.api_key_encrypted, settings.SECRET_KEY)
+            except Exception:
+                pass
+
+    if not api_key or api_key.startswith('••'):
+        return {"status": "error", "message": "No API key configured. Enter your API key and save first."}
 
     try:
         import httpx
@@ -962,7 +987,7 @@ async def test_ai_connection(
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
                     f"{base_url}/models",
-                    headers={"Authorization": f"Bearer {body.api_key}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     timeout=10,
                 )
                 if resp.status_code == 200:
@@ -973,7 +998,7 @@ async def test_ai_connection(
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
                     "https://api.anthropic.com/v1/models",
-                    headers={"x-api-key": body.api_key, "anthropic-version": "2023-06-01"},
+                    headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
                     timeout=10,
                 )
                 if resp.status_code == 200:
