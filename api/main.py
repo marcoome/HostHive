@@ -136,7 +136,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=[
+        "https://panel.example.com",
+        f"https://{settings.server_ip}:8443",  # Allow self-hosted IP
+        "http://localhost:5173",  # Allow dev frontend
+        "https://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
