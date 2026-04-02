@@ -13,7 +13,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +97,7 @@ def _generate_waf_conf(domain: str, mode: str = "detect") -> str:
     lines = [
         f"# HostHive WAF configuration for {domain}",
         f"# Mode: {mode}",
-        f"# Generated: {datetime.utcnow().isoformat()}Z",
+        f"# Generated: {datetime.now(timezone.utc).isoformat()}Z",
         "",
         "# Load default WAF rules",
         f"include {WAF_DEFAULT_RULES};",
@@ -248,7 +248,7 @@ def enable_waf(domain: str) -> dict[str, Any]:
 
     # Update metadata
     meta["enabled"] = True
-    meta["enabled_at"] = datetime.utcnow().isoformat() + "Z"
+    meta["enabled_at"] = datetime.now(timezone.utc).isoformat() + "Z"
     _write_meta(domain, meta)
 
     # Reload Nginx
@@ -272,7 +272,7 @@ def disable_waf(domain: str) -> dict[str, Any]:
     # Update metadata
     meta = _read_meta(domain)
     meta["enabled"] = False
-    meta["disabled_at"] = datetime.utcnow().isoformat() + "Z"
+    meta["disabled_at"] = datetime.now(timezone.utc).isoformat() + "Z"
     _write_meta(domain, meta)
 
     # Reload Nginx

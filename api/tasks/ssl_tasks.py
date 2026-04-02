@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
@@ -31,7 +31,7 @@ def auto_renew_expiring_certs(self) -> dict:
     from api.models.ssl_certificates import SSLCertificate, CertProvider
 
     logger.info("Checking for SSL certificates expiring within 30 days")
-    cutoff = datetime.utcnow() + timedelta(days=30)
+    cutoff = datetime.now(timezone.utc) + timedelta(days=30)
 
     with get_sync_session() as session:
         expiring = session.execute(
@@ -61,7 +61,7 @@ def auto_renew_expiring_certs(self) -> dict:
                 cert.cert_path = result.get("cert_path", cert.cert_path)
                 cert.key_path = result.get("key_path", cert.key_path)
                 cert.expires_at = datetime.fromisoformat(result["expires_at"])
-                cert.last_renewed_at = datetime.utcnow()
+                cert.last_renewed_at = datetime.now(timezone.utc)
                 renewed += 1
 
                 logger.info(
@@ -101,19 +101,19 @@ def check_cert_expiry(self) -> dict:
     from api.tasks.notification_tasks import send_notification
 
     logger.info("Checking for SSL certificates expiring within 14 days")
-    cutoff = datetime.utcnow() + timedelta(days=14)
+    cutoff = datetime.now(timezone.utc) + timedelta(days=14)
 
     with get_sync_session() as session:
         expiring = session.execute(
             select(SSLCertificate).where(
                 SSLCertificate.expires_at < cutoff,
-                SSLCertificate.expires_at > datetime.utcnow(),
+                SSLCertificate.expires_at > datetime.now(timezone.utc),
             )
         ).scalars().all()
 
         alerted = 0
         for cert in expiring:
-            days_left = (cert.expires_at - datetime.utcnow()).days
+            days_left = (cert.expires_at - datetime.now(timezone.utc)).days
             message = (
                 f"SSL certificate for {cert.domain_name} expires in "
                 f"{days_left} day{'s' if days_left != 1 else ''}. "

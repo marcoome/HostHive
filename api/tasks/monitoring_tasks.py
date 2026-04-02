@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete
 
@@ -295,7 +295,7 @@ def cleanup_old_health_checks(self) -> dict:
     from api.models.monitoring import AnomalyAlert, HealthCheck
 
     logger.info("Cleaning up old health checks and acknowledged anomalies")
-    cutoff = datetime.utcnow() - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
     with get_sync_session() as session:
         hc_result = session.execute(
@@ -304,7 +304,7 @@ def cleanup_old_health_checks(self) -> dict:
         hc_deleted = hc_result.rowcount
 
         # Also clean up old acknowledged anomalies
-        anomaly_cutoff = datetime.utcnow() - timedelta(days=30)
+        anomaly_cutoff = datetime.now(timezone.utc) - timedelta(days=30)
         an_result = session.execute(
             delete(AnomalyAlert).where(
                 AnomalyAlert.created_at < anomaly_cutoff,

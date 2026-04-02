@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select
 
@@ -208,7 +208,7 @@ def cleanup_ai_conversations(self) -> dict:
     from api.models.ai import AiConversation
 
     logger.info("Starting AI conversation cleanup")
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
     with get_sync_session() as session:
         try:

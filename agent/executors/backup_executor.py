@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ def _user_backup_dir(username: str) -> Path:
 
 
 def _timestamp() -> str:
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 # ------------------------------------------------------------------

@@ -13,7 +13,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,7 @@ def _generate_reverse_proxy(domain: str, port: int, ssl: bool = False) -> str:
     upstream = f"app_{domain.replace('.', '_')}"
 
     config = f"""# HostHive managed reverse proxy for {domain}
-# Generated: {datetime.utcnow().isoformat()}Z
+# Generated: {datetime.now(timezone.utc).isoformat()}Z
 
 upstream {upstream} {{
     server 127.0.0.1:{port};
@@ -260,7 +260,7 @@ def deploy_nodejs_app(
         "port": port,
         "entry_point": entry_point,
         "service_name": service_name,
-        "deployed_at": datetime.utcnow().isoformat() + "Z",
+        "deployed_at": datetime.now(timezone.utc).isoformat() + "Z",
     }
     _write_meta(domain, meta)
 
@@ -377,7 +377,7 @@ def deploy_python_app(
         "port": port,
         "app_module": app_module,
         "service_name": service_name,
-        "deployed_at": datetime.utcnow().isoformat() + "Z",
+        "deployed_at": datetime.now(timezone.utc).isoformat() + "Z",
     }
     _write_meta(domain, meta)
 

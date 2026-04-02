@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select, delete
@@ -105,7 +105,7 @@ def cleanup_old_backups(self) -> dict:
     from api.models.backups import Backup
 
     logger.info("Starting cleanup of old backups")
-    cutoff = datetime.utcnow() - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
     with get_sync_session() as session:
         # Fetch old completed backups to delete their files via agent

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import delete
@@ -85,7 +85,7 @@ def cleanup_old_stats(self) -> dict:
     from api.models.server_stats import ServerStat
 
     logger.info("Cleaning up server stats older than 30 days")
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
     with get_sync_session() as session:
         result = session.execute(

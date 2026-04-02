@@ -191,9 +191,9 @@ async def get_realtime_visitors(domain: str) -> Dict[str, Any]:
 
     def _count_recent_visitors() -> Dict[str, Any]:
         """Parse the tail of the access log for recent unique IPs."""
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        cutoff = datetime.utcnow() - timedelta(minutes=5)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
         unique_ips: set[str] = set()
         total_hits = 0
 

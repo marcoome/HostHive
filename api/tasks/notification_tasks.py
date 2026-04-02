@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -33,7 +33,7 @@ def send_expiry_alerts(self) -> dict:
     from api.models.domains import Domain
 
     logger.info("Checking for expiring SSL certificates and domains")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     ssl_cutoff = now + timedelta(days=14)
     alerts_sent = 0
 
