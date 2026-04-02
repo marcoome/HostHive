@@ -21,7 +21,7 @@ from api.models.email_accounts import EmailAccount
 from api.models.ftp_accounts import FtpAccount
 from api.models.packages import Package
 from api.models.server_stats import ServerStat
-from api.models.ssl_certificates import SslCertificate
+from api.models.ssl_certificates import SSLCertificate as SslCertificate
 from api.models.users import User, UserRole
 from api.models.monitoring import (
     AnomalyAlert,
