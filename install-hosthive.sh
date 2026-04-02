@@ -205,26 +205,18 @@ else
     success "System user 'hosthive' already exists"
 fi
 
-# ─── Step 4: Deploy application source code ───
-step 4 $TOTAL_STEPS "Deploying application source code"
+# ─── Step 4: Verify application source code ───
+step 4 $TOTAL_STEPS "Verifying application source code"
 
-# Copy project source from the repository into /opt/hosthive.
-# The installer script lives inside the repo, so SCRIPT_DIR points to the repo root.
-for component in api agent config data scripts tests frontend; do
-    if [[ -d "${SCRIPT_DIR}/${component}" ]]; then
-        cp -a "${SCRIPT_DIR}/${component}" "${INSTALL_DIR}/"
-        success "Deployed ${component}/"
-    else
-        warn "${component}/ not found in source, skipping"
+# The bootstrap installer (install.sh) clones the repo directly into /opt/hosthive,
+# so all source files are already in place. Just verify key dirs exist.
+for component in api agent config data frontend; do
+    if [[ ! -d "${INSTALL_DIR}/${component}" ]]; then
+        fail "Missing ${component}/ directory. Re-run the bootstrap installer."
     fi
 done
 
-# Copy pyproject.toml if present (needed for tooling config)
-if [[ -f "${SCRIPT_DIR}/pyproject.toml" ]]; then
-    cp "${SCRIPT_DIR}/pyproject.toml" "${INSTALL_DIR}/"
-fi
-
-success "Application source deployed to ${INSTALL_DIR}"
+success "Application source verified in ${INSTALL_DIR}"
 
 # ─── Step 5: Generate secrets ───
 step 5 $TOTAL_STEPS "Generating secrets"
