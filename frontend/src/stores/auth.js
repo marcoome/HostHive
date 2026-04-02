@@ -26,7 +26,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function logout() {
     try {
-      await client.post('/auth/logout')
+      await client.post('/auth/logout', { refresh_token: tokens.value.refresh })
     } catch {
       // Ignore logout API errors
     } finally {

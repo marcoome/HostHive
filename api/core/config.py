@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List
+from urllib.parse import quote_plus
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,15 +22,21 @@ class Settings(BaseSettings):
 
     # ── Database ────────────────────────────────────────────────────────
     DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://hosthive:changeme@127.0.0.1:5432/hosthive",
+        default="",
         description="Async PostgreSQL connection string (asyncpg driver).",
     )
 
+    # ── Database components (from installer secrets.env) ───────────────
+    DB_USER: str = Field(default="hosthive", description="PostgreSQL username.")
+    DB_PASSWORD: str = Field(default="", description="PostgreSQL password.")
+    DB_NAME: str = Field(default="hosthive", description="PostgreSQL database name.")
+
     # ── Redis ───────────────────────────────────────────────────────────
     REDIS_URL: str = Field(
-        default="redis://127.0.0.1:6379/0",
+        default="",
         description="Redis connection URL used for caching and rate-limiting.",
     )
+    REDIS_PASSWORD: str = Field(default="", description="Redis password (from installer).")
 
     # ── Secrets / Keys ──────────────────────────────────────────────────
     SECRET_KEY: str = Field(
@@ -38,10 +45,35 @@ class Settings(BaseSettings):
         description="Main secret used to sign JWTs and session data.",
     )
     AGENT_SECRET: str = Field(
-        ...,
-        min_length=32,
+        default="",
         description="Shared HMAC secret for API <-> Agent communication.",
     )
+
+    @model_validator(mode="after")
+    def _build_connection_urls(self) -> "Settings":
+        """Construct DATABASE_URL and REDIS_URL from components if not set."""
+        if not self.DATABASE_URL:
+            password = quote_plus(self.DB_PASSWORD) if self.DB_PASSWORD else "changeme"
+            self.DATABASE_URL = (
+                f"postgresql+asyncpg://{self.DB_USER}:{password}"
+                f"@127.0.0.1:5432/{self.DB_NAME}"
+            )
+        if not self.REDIS_URL:
+            if self.REDIS_PASSWORD:
+                self.REDIS_URL = f"redis://:{quote_plus(self.REDIS_PASSWORD)}@127.0.0.1:6379/0"
+            else:
+                self.REDIS_URL = "redis://127.0.0.1:6379/0"
+        if not self.AGENT_SECRET:
+            # Derive from SECRET_KEY so the API can start even if AGENT_SECRET
+            # was not explicitly provided (older secrets.env files).
+            import hashlib
+            self.AGENT_SECRET = hashlib.sha256(
+                (self.SECRET_KEY + ":agent").encode()
+            ).hexdigest()
+        # Support legacy ADMIN_USER env var from older installers
+        if self.ADMIN_USER and self.admin_username == "admin":
+            self.admin_username = self.ADMIN_USER
+        return self
 
     # ── Agent connection ────────────────────────────────────────────────
     AGENT_URL: str = Field(
@@ -81,9 +113,8 @@ class Settings(BaseSettings):
     )
 
     # ── Installer-generated fields ─────────────────────────────────────
-    database_password: str = Field(default="", description="PostgreSQL password (from installer).")
-    redis_password: str = Field(default="", description="Redis password (from installer).")
     admin_username: str = Field(default="admin", description="Initial admin username.")
+    ADMIN_USER: str = Field(default="", description="Legacy env var for admin username.")
     admin_password: str = Field(default="", description="Initial admin password.")
     admin_email: str = Field(default="admin@localhost", description="Initial admin email.")
     server_ip: str = Field(default="127.0.0.1", description="Server public IP.")

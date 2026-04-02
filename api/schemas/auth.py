@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from api.schemas.users import UserResponse
+
 
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=64)
@@ -15,6 +17,11 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int = Field(description="Access token lifetime in seconds.")
+
+
+class LoginResponse(TokenResponse):
+    """Token response enriched with the authenticated user profile."""
+    user: UserResponse
 
 
 class RefreshRequest(BaseModel):

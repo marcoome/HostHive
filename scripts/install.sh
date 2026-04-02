@@ -129,6 +129,7 @@ else
     REDIS_PASSWORD="$(generate_password)"
     ADMIN_PASSWORD="$(generate_password)"
     SECRET_KEY="$(generate_password)"
+    AGENT_SECRET="$(generate_password)"
 
     cat > "${SECRETS_FILE}" <<SECRETS_EOF
 # HostHive secrets — generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -140,6 +141,10 @@ REDIS_PASSWORD=${REDIS_PASSWORD}
 ADMIN_USER=admin
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
 SECRET_KEY=${SECRET_KEY}
+AGENT_SECRET=${AGENT_SECRET}
+DATABASE_URL=postgresql+asyncpg://hosthive:${DB_PASSWORD}@127.0.0.1:5432/hosthive
+REDIS_URL=redis://:${REDIS_PASSWORD}@127.0.0.1:6379/0
+ADMIN_USERNAME=admin
 SECRETS_EOF
 
     chmod 600 "${SECRETS_FILE}"
@@ -188,6 +193,7 @@ log "Installing Python packages into virtualenv..."
     "pydantic" \
     "passlib[bcrypt]" \
     "python-jose[cryptography]" \
+    "pydantic-settings" \
     "python-multipart" \
     "aiofiles" \
     "paramiko" \

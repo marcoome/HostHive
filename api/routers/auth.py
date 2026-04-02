@@ -28,6 +28,7 @@ from api.schemas.auth import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
+    LoginResponse,
     RefreshRequest,
     TokenResponse,
 )
@@ -41,7 +42,7 @@ _REFRESH_PREFIX = "hosthive:refresh:"
 # --------------------------------------------------------------------------
 # POST /login
 # --------------------------------------------------------------------------
-@router.post("/login", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+@router.post("/login", response_model=LoginResponse, status_code=status.HTTP_200_OK)
 async def login(
     body: LoginRequest,
     request: Request,
@@ -93,10 +94,11 @@ async def login(
         ip_address=client_ip,
     ))
 
-    return TokenResponse(
+    return LoginResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=UserResponse.model_validate(user),
     )
 
 
