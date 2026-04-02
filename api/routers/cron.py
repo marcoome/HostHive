@@ -1,15 +1,23 @@
-"""Cron jobs router -- /api/v1/cron."""
+"""Cron jobs router -- /api/v1/cron.
+
+Includes predefined common tasks, cron expression builder/validator,
+and execution logging.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import subprocess
 import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -309,3 +317,461 @@ async def run_cron_now(
 
     _log(db, request, current_user.id, "cron.run_now", f"Manually ran cron job {cron_id}")
     return {"detail": "Job execution triggered.", "result": result}
+
+
+# ==========================================================================
+# Predefined tasks, cron expression builder/validator, execution logs
+# ==========================================================================
+
+# ---------------------------------------------------------------------------
+# Schemas for new endpoints
+# ---------------------------------------------------------------------------
+
+class CronExpressionParts(BaseModel):
+    minute: str = Field(default="*", description="Minute (0-59, */N, or *)")
+    hour: str = Field(default="*", description="Hour (0-23, */N, or *)")
+    day_of_month: str = Field(default="*", description="Day of month (1-31, */N, or *)")
+    month: str = Field(default="*", description="Month (1-12, */N, or *)")
+    day_of_week: str = Field(default="*", description="Day of week (0-7 where 0,7=Sun, */N, or *)")
+
+
+class CronBuildRequest(BaseModel):
+    parts: Optional[CronExpressionParts] = None
+    preset: Optional[str] = Field(
+        default=None,
+        description="Named preset: every_minute, every_5_minutes, every_15_minutes, "
+                    "every_30_minutes, hourly, daily, daily_3am, weekly, monthly",
+    )
+
+
+class CronValidateRequest(BaseModel):
+    expression: str = Field(..., min_length=5, max_length=128)
+
+
+class PredefinedTaskCreate(BaseModel):
+    task_type: str = Field(
+        ...,
+        description="One of: backup_daily, backup_weekly, logrotate, cache_clear, "
+                    "ssl_renew, db_optimize, disk_usage_report",
+    )
+    custom_params: dict = Field(
+        default_factory=dict,
+        description="Optional overrides (e.g. backup_path, domain).",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cron expression presets
+# ---------------------------------------------------------------------------
+
+_CRON_PRESETS: dict[str, str] = {
+    "every_minute": "* * * * *",
+    "every_5_minutes": "*/5 * * * *",
+    "every_15_minutes": "*/15 * * * *",
+    "every_30_minutes": "*/30 * * * *",
+    "hourly": "0 * * * *",
+    "daily": "0 0 * * *",
+    "daily_3am": "0 3 * * *",
+    "weekly": "0 0 * * 0",
+    "monthly": "0 0 1 * *",
+}
+
+# ---------------------------------------------------------------------------
+# Predefined tasks
+# ---------------------------------------------------------------------------
+
+_PREDEFINED_TASKS: dict[str, dict] = {
+    "backup_daily": {
+        "schedule": "0 2 * * *",
+        "command_template": "tar -czf /home/{username}/backups/daily-$(date +\\%Y\\%m\\%d).tar.gz /home/{username}/web/ 2>/dev/null",
+        "description": "Daily backup of all web files at 2:00 AM",
+    },
+    "backup_weekly": {
+        "schedule": "0 3 * * 0",
+        "command_template": "tar -czf /home/{username}/backups/weekly-$(date +\\%Y\\%m\\%d).tar.gz /home/{username}/web/ 2>/dev/null",
+        "description": "Weekly backup of all web files (Sunday 3:00 AM)",
+    },
+    "logrotate": {
+        "schedule": "0 0 * * *",
+        "command_template": "find /home/{username}/web/*/logs -name '*.log' -size +100M -exec truncate -s 0 {{}} \\;",
+        "description": "Daily log rotation -- truncate logs over 100MB",
+    },
+    "cache_clear": {
+        "schedule": "0 */6 * * *",
+        "command_template": "find /home/{username}/web/*/public_html -path '*/cache/*' -type f -mtime +7 -delete 2>/dev/null",
+        "description": "Clear cache files older than 7 days (every 6 hours)",
+    },
+    "ssl_renew": {
+        "schedule": "0 4 * * 1",
+        "command_template": "certbot renew --quiet --deploy-hook 'systemctl reload nginx'",
+        "description": "Weekly SSL certificate renewal check (Monday 4:00 AM)",
+    },
+    "db_optimize": {
+        "schedule": "0 5 * * 0",
+        "command_template": "mysqlcheck --optimize --all-databases 2>/dev/null || true",
+        "description": "Weekly MySQL database optimization (Sunday 5:00 AM)",
+    },
+    "disk_usage_report": {
+        "schedule": "0 6 * * 1",
+        "command_template": "du -sh /home/{username}/web/*/ > /home/{username}/disk_report.txt 2>/dev/null",
+        "description": "Weekly disk usage report (Monday 6:00 AM)",
+    },
+}
+
+# Execution log directory
+CRON_LOG_DIR = Path("/var/log/hosthive/cron")
+
+
+# ---------------------------------------------------------------------------
+# Cron expression validator
+# ---------------------------------------------------------------------------
+
+def _validate_cron_field(value: str, min_val: int, max_val: int, field_name: str) -> bool:
+    """Validate a single cron expression field."""
+    if value == "*":
+        return True
+
+    # Handle */N (step)
+    if value.startswith("*/"):
+        step = value[2:]
+        return step.isdigit() and 1 <= int(step) <= max_val
+
+    # Handle ranges: N-M
+    if "-" in value and "," not in value:
+        parts = value.split("-")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return min_val <= int(parts[0]) <= max_val and min_val <= int(parts[1]) <= max_val
+
+    # Handle lists: N,M,O
+    if "," in value:
+        for part in value.split(","):
+            part = part.strip()
+            if not part.isdigit():
+                return False
+            if not (min_val <= int(part) <= max_val):
+                return False
+        return True
+
+    # Handle range with step: N-M/S
+    if "/" in value:
+        range_part, step = value.split("/", 1)
+        if not step.isdigit():
+            return False
+        if range_part == "*":
+            return True
+        if "-" in range_part:
+            parts = range_part.split("-")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                return min_val <= int(parts[0]) <= max_val and min_val <= int(parts[1]) <= max_val
+        return False
+
+    # Simple number
+    if value.isdigit():
+        return min_val <= int(value) <= max_val
+
+    return False
+
+
+def _validate_cron_expression(expr: str) -> tuple[bool, str]:
+    """Validate a full 5-field cron expression. Returns (valid, message)."""
+    parts = expr.strip().split()
+    if len(parts) != 5:
+        return False, f"Expected 5 fields, got {len(parts)}."
+
+    field_specs = [
+        ("minute", 0, 59),
+        ("hour", 0, 23),
+        ("day of month", 1, 31),
+        ("month", 1, 12),
+        ("day of week", 0, 7),
+    ]
+
+    for i, (name, min_v, max_v) in enumerate(field_specs):
+        if not _validate_cron_field(parts[i], min_v, max_v, name):
+            return False, f"Invalid {name} field: '{parts[i]}'."
+
+    return True, "Valid cron expression."
+
+
+def _describe_cron(expr: str) -> str:
+    """Generate a human-readable description of a cron expression."""
+    parts = expr.strip().split()
+    if len(parts) != 5:
+        return "Invalid expression"
+
+    minute, hour, dom, month, dow = parts
+
+    descriptions = []
+
+    # Special common patterns
+    if expr == "* * * * *":
+        return "Every minute"
+    if minute.startswith("*/"):
+        return f"Every {minute[2:]} minutes"
+    if expr == "0 * * * *":
+        return "Every hour (at minute 0)"
+    if expr == "0 0 * * *":
+        return "Daily at midnight"
+    if expr == "0 0 * * 0":
+        return "Every Sunday at midnight"
+    if expr == "0 0 1 * *":
+        return "First day of every month at midnight"
+
+    if minute != "*":
+        descriptions.append(f"at minute {minute}")
+    if hour != "*":
+        descriptions.append(f"at hour {hour}")
+    if dom != "*":
+        descriptions.append(f"on day {dom} of month")
+    if month != "*":
+        descriptions.append(f"in month {month}")
+    if dow != "*":
+        day_names = {
+            "0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday",
+            "4": "Thursday", "5": "Friday", "6": "Saturday", "7": "Sunday",
+        }
+        dow_desc = day_names.get(dow, f"day {dow}")
+        descriptions.append(f"on {dow_desc}")
+
+    return ", ".join(descriptions) if descriptions else "Custom schedule"
+
+
+# ---------------------------------------------------------------------------
+# POST /validate -- validate cron expression
+# ---------------------------------------------------------------------------
+
+@router.post("/validate")
+async def validate_cron_expression(
+    body: CronValidateRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Validate a cron expression and return a human-readable description."""
+    valid, message = _validate_cron_expression(body.expression)
+    description = _describe_cron(body.expression) if valid else None
+
+    return {
+        "expression": body.expression,
+        "valid": valid,
+        "message": message,
+        "description": description,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /build -- build cron expression from parts or preset
+# ---------------------------------------------------------------------------
+
+@router.post("/build")
+async def build_cron_expression(
+    body: CronBuildRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Build a cron expression from individual parts or a named preset."""
+    if body.preset:
+        preset_lower = body.preset.lower().replace(" ", "_")
+        if preset_lower not in _CRON_PRESETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown preset '{body.preset}'. "
+                       f"Available: {', '.join(sorted(_CRON_PRESETS.keys()))}",
+            )
+        expression = _CRON_PRESETS[preset_lower]
+    elif body.parts:
+        expression = (
+            f"{body.parts.minute} {body.parts.hour} "
+            f"{body.parts.day_of_month} {body.parts.month} "
+            f"{body.parts.day_of_week}"
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either 'preset' or 'parts'.",
+        )
+
+    valid, message = _validate_cron_expression(expression)
+    description = _describe_cron(expression) if valid else None
+
+    return {
+        "expression": expression,
+        "valid": valid,
+        "message": message,
+        "description": description,
+        "presets_available": list(_CRON_PRESETS.keys()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /presets -- list available presets
+# ---------------------------------------------------------------------------
+
+@router.get("/presets")
+async def list_cron_presets(
+    current_user: User = Depends(get_current_user),
+):
+    """List all available cron schedule presets."""
+    return {
+        "presets": {
+            name: {
+                "expression": expr,
+                "description": _describe_cron(expr),
+            }
+            for name, expr in _CRON_PRESETS.items()
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /predefined-tasks -- list predefined task templates
+# ---------------------------------------------------------------------------
+
+@router.get("/predefined-tasks")
+async def list_predefined_tasks(
+    current_user: User = Depends(get_current_user),
+):
+    """List all predefined common task templates."""
+    return {
+        "tasks": {
+            name: {
+                "schedule": task["schedule"],
+                "description": task["description"],
+                "schedule_description": _describe_cron(task["schedule"]),
+            }
+            for name, task in _PREDEFINED_TASKS.items()
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /predefined-tasks -- create cron job from predefined template
+# ---------------------------------------------------------------------------
+
+@router.post("/predefined-tasks", response_model=CronJobResponse, status_code=status.HTTP_201_CREATED)
+async def create_predefined_task(
+    body: PredefinedTaskCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a cron job from a predefined task template."""
+    if body.task_type not in _PREDEFINED_TASKS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown task type '{body.task_type}'. "
+                   f"Available: {', '.join(sorted(_PREDEFINED_TASKS.keys()))}",
+        )
+
+    template = _PREDEFINED_TASKS[body.task_type]
+    command = template["command_template"].format(
+        username=current_user.username,
+        **body.custom_params,
+    )
+    schedule = body.custom_params.get("schedule", template["schedule"])
+
+    # Ensure backup directory exists for backup tasks
+    if "backup" in body.task_type:
+        backup_dir = Path(f"/home/{current_user.username}/backups")
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+    job = CronJob(
+        user_id=current_user.id,
+        schedule=schedule,
+        command=command,
+    )
+    db.add(job)
+    await db.flush()
+
+    agent = request.app.state.agent
+    try:
+        await _sync_crontab(db, current_user, agent)
+    except Exception as exc:
+        logger.warning("Agent error syncing crontab after predefined task create: %s", exc)
+
+    _log(
+        db, request, current_user.id, "cron.create_predefined",
+        f"Created predefined task '{body.task_type}': {schedule} {command[:80]}",
+    )
+    return CronJobResponse.model_validate(job)
+
+
+# ---------------------------------------------------------------------------
+# GET /{id}/logs -- last N execution logs
+# ---------------------------------------------------------------------------
+
+@router.get("/{cron_id}/logs")
+async def get_cron_logs(
+    cron_id: uuid.UUID,
+    lines: int = Query(default=50, ge=1, le=500, description="Number of log lines to return"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the last N execution log entries for a cron job.
+
+    Logs are stored at /var/log/hosthive/cron/{job_id}.log and also
+    fetched from the system journal.
+    """
+    job = await _get_cron_or_404(cron_id, db, current_user)
+
+    logs: list[dict] = []
+
+    # 1. Check dedicated log file
+    log_file = CRON_LOG_DIR / f"{cron_id}.log"
+    if log_file.exists():
+        try:
+            content = log_file.read_text(encoding="utf-8", errors="replace")
+            log_lines = content.strip().split("\n")
+            # Take last N lines
+            recent = log_lines[-lines:] if len(log_lines) > lines else log_lines
+            for entry in recent:
+                logs.append({"source": "hosthive", "line": entry})
+        except Exception as exc:
+            logger.warning("Could not read cron log %s: %s", log_file, exc)
+
+    # 2. Check syslog / journal for cron entries by this user
+    result = subprocess.run(
+        [
+            "journalctl", "-u", "cron",
+            "--no-pager", "-n", str(lines),
+            "--output", "short-iso",
+            "-g", current_user.username,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line and job.command[:30] in line:
+                logs.append({"source": "journal", "line": line})
+
+    # 3. Also check the activity log from DB
+    result_db = await db.execute(
+        select(ActivityLog)
+        .where(
+            ActivityLog.user_id == current_user.id,
+            ActivityLog.action.in_(["cron.run_now", "cron.create", "cron.update", "cron.delete"]),
+            ActivityLog.details.contains(str(cron_id)),
+        )
+        .order_by(ActivityLog.id.desc())
+        .limit(lines)
+    )
+    activity_entries = result_db.scalars().all()
+    for entry in activity_entries:
+        logs.append({
+            "source": "activity_log",
+            "action": entry.action,
+            "details": entry.details,
+            "ip": entry.ip_address,
+        })
+
+    return {
+        "cron_id": str(cron_id),
+        "job_schedule": job.schedule,
+        "job_command": job.command,
+        "last_run": job.last_run.isoformat() if job.last_run else None,
+        "total_entries": len(logs),
+        "logs": logs[-lines:],
+    }

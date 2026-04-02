@@ -194,6 +194,7 @@ from api.routers import (  # noqa: E402
     auth_router,
     backups_router,
     branding_router,
+    cache_router,
     cron_router,
     databases_router,
     dns_router,
@@ -202,6 +203,7 @@ from api.routers import (  # noqa: E402
     files_router,
     ftp_router,
     packages_router,
+    php_router,
     server_router,
     ssl_router,
     users_router,
@@ -263,6 +265,8 @@ app.include_router(docker_router,        prefix=f"{_v1}/docker",       tags=["Do
 app.include_router(wordpress_router,     prefix=f"{_v1}/wordpress",    tags=["WordPress"])
 app.include_router(settings_router,      prefix=f"{_v1}/settings",     tags=["Settings"])
 app.include_router(mcp_router,           prefix=f"{_v1}/mcp",          tags=["MCP"])
+app.include_router(cache_router,          prefix=f"{_v1}/cache",         tags=["Cache"])
+app.include_router(php_router,           prefix=f"{_v1}/php",           tags=["PHP"])
 app.include_router(dashboard_router,     prefix=f"{_v1}/dashboard",     tags=["Dashboard"])
 app.include_router(metrics_router,       prefix="/metrics",             tags=["Metrics"])
 
