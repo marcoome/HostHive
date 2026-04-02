@@ -899,35 +899,73 @@ async def save_ai_config(
 # GET /models -- fetch available models for current provider
 # --------------------------------------------------------------------------
 @router.get("/models", status_code=status.HTTP_200_OK)
-async def list_ai_models(request: Request, admin: User = Depends(_admin)):
+async def list_ai_models(request: Request, current_user: User = Depends(get_current_user)):
     redis = request.app.state.redis
     config = await redis.hgetall("hosthive:ai:config")
     if not config or not config.get("api_key"):
         return {"models": [], "detail": "No AI provider configured."}
 
     provider = config.get("provider", "openai")
+    api_key = config.get("api_key", "")
     models = []
 
-    if provider == "openai":
-        models = [
-            {"id": "gpt-4o", "name": "GPT-4o"},
-            {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
-            {"id": "gpt-4-turbo", "name": "GPT-4 Turbo"},
-            {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
-        ]
-    elif provider == "anthropic":
-        models = [
-            {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4"},
-            {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5"},
-            {"id": "claude-opus-4-20250514", "name": "Claude Opus 4"},
-        ]
-    elif provider == "openrouter":
-        models = [
-            {"id": "openai/gpt-4o", "name": "GPT-4o (OpenRouter)"},
-            {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4 (OpenRouter)"},
-            {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro (OpenRouter)"},
-            {"id": "meta-llama/llama-3.1-405b", "name": "Llama 3.1 405B (OpenRouter)"},
-        ]
+    try:
+        import httpx
+        if provider == "openai":
+            async with httpx.AsyncClient() as http:
+                resp = await http.get("https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"}, timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    all_models = data.get("data", [])
+                    # Filter to chat models only
+                    chat_prefixes = ("gpt-4", "gpt-3.5", "o1", "o3", "chatgpt")
+                    for m in sorted(all_models, key=lambda x: x.get("id", "")):
+                        mid = m.get("id", "")
+                        if any(mid.startswith(p) for p in chat_prefixes):
+                            models.append({"id": mid, "name": mid})
+
+        elif provider == "anthropic":
+            async with httpx.AsyncClient() as http:
+                resp = await http.get("https://api.anthropic.com/v1/models",
+                    headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"}, timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for m in data.get("data", []):
+                        mid = m.get("id", "")
+                        models.append({"id": mid, "name": m.get("display_name", mid)})
+
+        elif provider == "openrouter":
+            async with httpx.AsyncClient() as http:
+                resp = await http.get("https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"}, timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for m in data.get("data", [])[:100]:  # Limit to 100
+                        mid = m.get("id", "")
+                        models.append({"id": mid, "name": m.get("name", mid)})
+
+        elif provider == "ollama":
+            base_url = config.get("base_url") or "http://localhost:11434"
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(f"{base_url}/api/tags", timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for m in data.get("models", []):
+                        mid = m.get("name", "")
+                        models.append({"id": mid, "name": mid})
+    except Exception as exc:
+        logger.warning("Failed to fetch models from %s: %s", provider, exc)
+
+    # Fallback to hardcoded if API fetch failed
+    if not models:
+        fallback = {
+            "openai": [{"id": "gpt-4o", "name": "gpt-4o"}, {"id": "gpt-4o-mini", "name": "gpt-4o-mini"}, {"id": "gpt-4-turbo", "name": "gpt-4-turbo"}, {"id": "gpt-3.5-turbo", "name": "gpt-3.5-turbo"}],
+            "anthropic": [{"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4"}, {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5"}, {"id": "claude-opus-4-20250514", "name": "Claude Opus 4"}],
+            "openrouter": [{"id": "openai/gpt-4o", "name": "GPT-4o"}, {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4"}, {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro"}],
+            "ollama": [{"id": "llama3", "name": "llama3"}, {"id": "mistral", "name": "mistral"}],
+        }
+        models = fallback.get(provider, [])
 
     return {"models": models, "provider": provider}
 
