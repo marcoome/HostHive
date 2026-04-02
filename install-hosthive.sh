@@ -180,10 +180,15 @@ apt-get update -qq >> "$LOG_FILE" 2>&1 &
 spinner $! "Updating package lists"
 success "Package lists updated"
 
+# Pre-seed debconf for non-interactive installs
+debconf-set-selections <<< "phpmyadmin phpmyadmin/dbconfig-install boolean false" 2>/dev/null || true
+debconf-set-selections <<< "phpmyadmin phpmyadmin/reconfigure-webserver multiselect none" 2>/dev/null || true
+debconf-set-selections <<< "roundcube roundcube/dbconfig-install boolean false" 2>/dev/null || true
+
 # Install packages in groups for better error handling
 PACKAGES_CORE="nginx postgresql redis-server python3 python3-venv python3-pip git curl wget unzip htop openssl"
 PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav opendkim opendkim-tools rspamd roundcube roundcube-plugins roundcube-pgsql"
-PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl"
+PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-pgsql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl php${PHP_VERSION}-soap php${PHP_VERSION}-bcmath php${PHP_VERSION}-readline php${PHP_VERSION}-opcache phpmyadmin"
 PACKAGES_DNS="bind9 bind9utils"
 PACKAGES_FTP="proftpd-basic"
 PACKAGES_SEC="fail2ban ufw"
@@ -672,8 +677,85 @@ success "Nginx configured on HTTPS port 8443"
 configure_email_server
 configure_roundcube
 
-# Reload nginx to pick up Roundcube config
-nginx -t >> "$LOG_FILE" 2>&1 || warn "Nginx config test failed after Roundcube setup"
+# ─── Configure phpMyAdmin (non-interactive) ───
+configure_phpmyadmin() {
+    log "Configuring phpMyAdmin..."
+
+    # Pre-seed debconf to avoid interactive prompts
+    debconf-set-selections <<< "phpmyadmin phpmyadmin/dbconfig-install boolean false"
+    debconf-set-selections <<< "phpmyadmin phpmyadmin/reconfigure-webserver multiselect none"
+
+    # Ensure phpMyAdmin is installed
+    if [[ ! -d /usr/share/phpmyadmin ]]; then
+        apt-get install -y -qq phpmyadmin >> "$LOG_FILE" 2>&1 || warn "phpMyAdmin installation failed"
+    fi
+
+    # Create phpMyAdmin config for MariaDB
+    if [[ -d /usr/share/phpmyadmin ]]; then
+        cat > /etc/phpmyadmin/config-db.php << 'PMAEOF'
+<?php
+$dbuser='phpmyadmin';
+$dbpass='';
+$basepath='';
+$dbname='phpmyadmin';
+$dbserver='localhost';
+$dbport='3306';
+$dbtype='mysql';
+PMAEOF
+
+        # Create blowfish secret for cookie auth
+        PMA_SECRET=$(openssl rand -hex 16)
+        cat > /etc/phpmyadmin/conf.d/hosthive.php << PMACONF
+<?php
+\$cfg['blowfish_secret'] = '${PMA_SECRET}';
+\$cfg['Servers'][1]['auth_type'] = 'cookie';
+\$cfg['Servers'][1]['host'] = 'localhost';
+\$cfg['Servers'][1]['compress'] = false;
+\$cfg['Servers'][1]['AllowNoPassword'] = false;
+\$cfg['LoginCookieValidity'] = 36000;
+\$cfg['MaxRows'] = 50;
+\$cfg['UploadDir'] = '';
+\$cfg['SaveDir'] = '';
+\$cfg['ThemeDefault'] = 'pmahomme';
+PMACONF
+
+        # Set permissions
+        chown -R www-data:www-data /etc/phpmyadmin
+        chmod 640 /etc/phpmyadmin/config-db.php
+        chmod 640 /etc/phpmyadmin/conf.d/hosthive.php
+
+        # Grant phpMyAdmin user access to MariaDB
+        mysql -u root -e "CREATE USER IF NOT EXISTS 'phpmyadmin'@'localhost' IDENTIFIED BY '';" >> "$LOG_FILE" 2>&1 || true
+        mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'phpmyadmin'@'localhost' WITH GRANT OPTION;" >> "$LOG_FILE" 2>&1 || true
+        mysql -u root -e "FLUSH PRIVILEGES;" >> "$LOG_FILE" 2>&1 || true
+
+        success "phpMyAdmin configured"
+    else
+        warn "phpMyAdmin not found at /usr/share/phpmyadmin"
+    fi
+}
+configure_phpmyadmin
+
+# ─── Configure sudoers for hosthive user ───
+log "Configuring sudoers for hosthive..."
+cat > /etc/sudoers.d/hosthive << 'SUDOEOF'
+# HostHive panel — allow hosthive user to manage system services
+hosthive ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/sbin/ufw, /usr/bin/fail2ban-client, /usr/bin/tail, /usr/bin/certbot, /usr/sbin/rndc, /usr/bin/crontab, /usr/bin/mysql, /usr/bin/mysqldump, /usr/bin/ftpasswd, /bin/tar, /bin/chown, /usr/sbin/nginx, /usr/bin/doveadm, /usr/sbin/exim4, /usr/bin/pg_dump, /usr/bin/psql, /usr/bin/clamscan, /usr/bin/apt, /usr/bin/apt-get, /usr/sbin/apache2ctl, /usr/bin/varnishadm, /usr/bin/ss, /usr/sbin/smartctl, /usr/bin/ip, /usr/sbin/logrotate, /usr/bin/setquota, /usr/bin/quota, /usr/sbin/repquota, /usr/bin/phpenmod, /usr/bin/phpdismod, /usr/sbin/a2ensite, /usr/sbin/a2dissite, /usr/sbin/a2enmod, /usr/bin/hostnamectl, /usr/bin/reboot
+SUDOEOF
+chmod 440 /etc/sudoers.d/hosthive
+success "Sudoers configured for hosthive user"
+
+# ─── Create required directories ───
+mkdir -p /etc/bind/zones /opt/hosthive/backups /var/mail/vhosts
+chown -R hosthive:hosthive /opt/hosthive/backups
+
+# ─── Install psutil for monitoring ───
+"${INSTALL_DIR}/venv/bin/pip" install psutil >> "$LOG_FILE" 2>&1 &
+spinner $! "Installing psutil for monitoring"
+success "psutil installed"
+
+# Reload nginx to pick up Roundcube + phpMyAdmin config
+nginx -t >> "$LOG_FILE" 2>&1 || warn "Nginx config test failed"
 systemctl reload nginx >> "$LOG_FILE" 2>&1
 
 # ─── Step 11: Install systemd services ───
