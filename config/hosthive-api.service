@@ -24,7 +24,7 @@ Restart=always
 RestartSec=5
 
 # Security hardening
-NoNewPrivileges=true
+NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=false
 ReadWritePaths=/opt/hosthive /var/log/hosthive
