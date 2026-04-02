@@ -228,6 +228,10 @@ from api.routers import (  # noqa: E402
     settings_router,
     mcp_router,
     dashboard_router,
+    security_router,
+    system_router,
+    ip_manager_router,
+    logs_router,
 )
 
 _v1 = "/api/v1"
@@ -268,6 +272,10 @@ app.include_router(mcp_router,           prefix=f"{_v1}/mcp",          tags=["MC
 app.include_router(cache_router,          prefix=f"{_v1}/cache",         tags=["Cache"])
 app.include_router(php_router,           prefix=f"{_v1}/php",           tags=["PHP"])
 app.include_router(dashboard_router,     prefix=f"{_v1}/dashboard",     tags=["Dashboard"])
+app.include_router(security_router,      prefix=f"{_v1}/security",     tags=["Security"])
+app.include_router(system_router,        prefix=f"{_v1}/system",       tags=["System"])
+app.include_router(ip_manager_router,    prefix=f"{_v1}/ip",           tags=["IP Management"])
+app.include_router(logs_router,          prefix=f"{_v1}/logs",         tags=["Logs"])
 app.include_router(metrics_router,       prefix="/metrics",             tags=["Metrics"])
 
 

@@ -38,6 +38,10 @@ from api.routers.mcp import router as mcp_router
 from api.routers.cache import router as cache_router
 from api.routers.php import router as php_router
 from api.routers.dashboard import router as dashboard_router
+from api.routers.security import router as security_router
+from api.routers.system import router as system_router
+from api.routers.ip_manager import router as ip_manager_router
+from api.routers.logs import router as logs_router
 
 __all__ = [
     "ai_router",
@@ -78,4 +82,8 @@ __all__ = [
     "cache_router",
     "php_router",
     "dashboard_router",
+    "security_router",
+    "system_router",
+    "ip_manager_router",
+    "logs_router",
 ]
