@@ -66,4 +66,5 @@ class Package(TimestampedBase):
     # When you need package.users, query explicitly with selectinload.
     users: Mapped[List["User"]] = relationship(
         back_populates="package", lazy="noload",
+        foreign_keys="[User.package_id]",
     )
