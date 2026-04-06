@@ -152,6 +152,13 @@ fi
 SERVER_IP=$(hostname -I | awk '{print $1}')
 success "Server IP: ${SERVER_IP}"
 
+# Fix hostname resolution (prevents sudo warnings)
+CURRENT_HOSTNAME=$(hostname)
+if ! grep -q "$CURRENT_HOSTNAME" /etc/hosts 2>/dev/null; then
+    echo "127.0.1.1 $CURRENT_HOSTNAME" >> /etc/hosts
+    success "Added hostname to /etc/hosts"
+fi
+
 # Detect PHP version available for this Debian release
 PHP_VERSION="8.2"
 if [[ "$VERSION_ID" == "13" ]]; then
@@ -188,7 +195,7 @@ debconf-set-selections <<< "roundcube roundcube/dbconfig-install boolean false" 
 
 # Install packages in groups for better error handling
 PACKAGES_CORE="nginx postgresql redis-server python3 python3-venv python3-pip git curl wget unzip htop openssl"
-PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav opendkim opendkim-tools rspamd roundcube roundcube-plugins roundcube-pgsql"
+PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav clamav-daemon clamav-freshclam opendkim opendkim-tools rspamd roundcube roundcube-plugins roundcube-pgsql"
 PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-pgsql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl php${PHP_VERSION}-soap php${PHP_VERSION}-bcmath php${PHP_VERSION}-readline php${PHP_VERSION}-opcache php${PHP_VERSION}-redis phpmyadmin phppgadmin"
 PACKAGES_DNS="bind9 bind9utils"
 PACKAGES_FTP="proftpd-basic"
@@ -1012,6 +1019,11 @@ configure_security() {
 
     # ClamAV setup
     if command -v freshclam &>/dev/null; then
+        # Ensure ClamAV log directory and permissions
+        mkdir -p /var/log/clamav
+        touch /var/log/clamav/freshclam.log /var/log/clamav/clamav.log
+        chown -R clamav:clamav /var/log/clamav
+        chmod 640 /var/log/clamav/*.log
         # Stop freshclam if running, update virus definitions
         systemctl stop clamav-freshclam 2>/dev/null || true
         freshclam --quiet 2>/dev/null || true
