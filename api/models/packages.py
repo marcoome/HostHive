@@ -65,6 +65,6 @@ class Package(TimestampedBase):
     # greenlet loop that causes MissingGreenlet errors.
     # When you need package.users, query explicitly with selectinload.
     users: Mapped[List["User"]] = relationship(
-        back_populates="package", lazy="noload",
+        lazy="noload",
         primaryjoin="Package.id == foreign(User.package_id)",
     )
