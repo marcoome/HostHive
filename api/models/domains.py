@@ -55,11 +55,13 @@ class Domain(Base):
         back_populates="parent_domain",
         cascade="all, delete-orphan",
         lazy="selectin",
+        foreign_keys=[parent_domain_id],
     )
     parent_domain: Mapped[Optional["Domain"]] = relationship(
         "Domain",
         back_populates="subdomains",
-        remote_side=[id],
+        remote_side="Domain.id",
+        foreign_keys=[parent_domain_id],
         lazy="selectin",
     )
 
