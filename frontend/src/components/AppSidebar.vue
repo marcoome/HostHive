@@ -14,12 +14,10 @@
   >
     <!-- Logo -->
     <div class="h-[60px] flex items-center px-5" :style="{ borderBottom: '1px solid rgba(var(--border-rgb), 0.3)' }">
-      <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: var(--primary);">
-          <span class="text-white font-bold text-sm">H</span>
-        </div>
+      <router-link to="/dashboard" class="flex items-center gap-2.5 no-underline">
+        <img :src="logoSrc" alt="HostHive" class="w-8 h-8 flex-shrink-0" />
         <span class="text-lg font-semibold" :style="{ color: 'var(--text-primary)' }">HostHive</span>
-      </div>
+      </router-link>
       <!-- Mobile close button -->
       <button
         class="ml-auto p-2 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[rgba(var(--surface-rgb),0.5)] md:hidden min-w-[44px] min-h-[44px] flex items-center justify-center"
@@ -122,6 +120,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useSidebarStore } from '@/stores/sidebar'
+import logoSrc from '@/assets/logo-icon.svg'
 
 const { t } = useI18n()
 const auth = useAuthStore()

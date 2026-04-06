@@ -43,3 +43,8 @@ class ResellerLimit(TimestampedBase):
     used_users: Mapped[int] = mapped_column(Integer, default=0)
     used_disk_mb: Mapped[int] = mapped_column(Integer, default=0)
     used_bandwidth_gb: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # API rate-limiting quotas
+    api_rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=100)
+    api_rate_limit_per_hour: Mapped[int] = mapped_column(Integer, default=3000)
+    api_burst_limit: Mapped[int] = mapped_column(Integer, default=20)

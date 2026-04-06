@@ -51,6 +51,7 @@ from api.routers.translations import router as translations_router
 from api.routers.migration import router as migration_router
 from api.routers.redirects import router as redirects_router
 from api.routers.mailing_lists import router as mailing_lists_router
+from api.routers.cluster import router as cluster_router
 from api.routers.runtime import router as runtime_router
 
 __all__ = [
@@ -106,4 +107,5 @@ __all__ = [
     "redirects_router",
     "mailing_lists_router",
     "runtime_router",
+    "cluster_router",
 ]

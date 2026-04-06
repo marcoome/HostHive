@@ -45,6 +45,7 @@ from api.models.notifications import Notification, NotificationLevel
 from api.models.resources import ResourceLimit
 from api.models.webauthn import WebAuthnCredential
 from api.models.antivirus import QuarantineEntry, ScanResult, ScanStatus
+from api.models.cluster import ClusterAssignment, ClusterNode
 from api.models.dns_cluster import DnsClusterNode
 from api.models.integrations import (
     ApiKey,
@@ -78,6 +79,8 @@ __all__ = [
     "Backup",
     "BackupFrequency",
     "BackupType",
+    "ClusterAssignment",
+    "ClusterNode",
     "CronJob",
     "Database",
     "DatabaseUser",

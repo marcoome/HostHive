@@ -6,10 +6,13 @@ Strict isolation: resellers can only see/manage users they created
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+
+logger = logging.getLogger("hosthive.reseller")
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,6 +24,9 @@ from api.models.packages import Package
 from api.models.reseller import ResellerBranding, ResellerLimit
 from api.models.users import User, UserRole
 from api.schemas.reseller import (
+    RateLimitResponse,
+    RateLimitUpdate,
+    RateLimitUsageResponse,
     ResellerBrandingCreate,
     ResellerBrandingResponse,
     ResellerBrandingUpdate,
@@ -36,6 +42,7 @@ from api.services.reseller_service import ResellerService
 router = APIRouter()
 
 _reseller = require_role("reseller", "admin")
+_admin = require_role("admin")
 
 
 # --------------------------------------------------------------------------
@@ -312,6 +319,9 @@ async def get_limits(
             "used_users": 0,
             "used_disk_mb": 0,
             "used_bandwidth_gb": 0.0,
+            "api_rate_limit_per_minute": 100,
+            "api_rate_limit_per_hour": 3000,
+            "api_burst_limit": 20,
         }
     return ResellerLimitResponse.model_validate(limits)
 
@@ -544,3 +554,147 @@ async def delete_reseller_package(
 
     await db.delete(pkg)
     await db.flush()
+
+
+# ==========================================================================
+# Rate Limit management endpoints
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# GET /rate-limits -- current reseller rate limit settings
+# --------------------------------------------------------------------------
+@router.get("/rate-limits", response_model=RateLimitResponse, status_code=status.HTTP_200_OK)
+async def get_rate_limits(
+    db: AsyncSession = Depends(get_db),
+    reseller: User = Depends(_reseller),
+):
+    """Return the current API rate-limit configuration for this reseller."""
+    result = await db.execute(
+        select(ResellerLimit).where(ResellerLimit.reseller_id == reseller.id)
+    )
+    limits = result.scalar_one_or_none()
+    if limits is None:
+        # Return defaults when no limits row exists
+        return RateLimitResponse(
+            reseller_id=reseller.id,
+            api_rate_limit_per_minute=100,
+            api_rate_limit_per_hour=3000,
+            api_burst_limit=20,
+        )
+    return RateLimitResponse(
+        reseller_id=limits.reseller_id,
+        api_rate_limit_per_minute=limits.api_rate_limit_per_minute,
+        api_rate_limit_per_hour=limits.api_rate_limit_per_hour,
+        api_burst_limit=limits.api_burst_limit,
+    )
+
+
+# --------------------------------------------------------------------------
+# PUT /rate-limits -- update rate limits (admin only)
+# --------------------------------------------------------------------------
+@router.put("/rate-limits", response_model=RateLimitResponse, status_code=status.HTTP_200_OK)
+async def update_rate_limits(
+    body: RateLimitUpdate,
+    request: Request,
+    reseller_id: uuid.UUID = Query(..., description="ID of the reseller whose limits to update"),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(_admin),
+):
+    """Update API rate limits for a specific reseller. Admin only."""
+    result = await db.execute(
+        select(ResellerLimit).where(ResellerLimit.reseller_id == reseller_id)
+    )
+    limits = result.scalar_one_or_none()
+    if limits is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reseller limits not found. Create reseller limits first.",
+        )
+
+    update_data = body.model_dump(exclude_unset=True)
+
+    # Validate: per-minute must be <= per-hour
+    new_per_minute = update_data.get("api_rate_limit_per_minute", limits.api_rate_limit_per_minute)
+    new_per_hour = update_data.get("api_rate_limit_per_hour", limits.api_rate_limit_per_hour)
+    if new_per_minute > new_per_hour:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="api_rate_limit_per_minute cannot exceed api_rate_limit_per_hour.",
+        )
+
+    for field, value in update_data.items():
+        setattr(limits, field, value)
+
+    db.add(limits)
+    await db.flush()
+
+    _log(db, request, admin.id, "admin.update_reseller_rate_limits",
+         f"Updated rate limits for reseller {reseller_id}: {list(update_data.keys())}")
+
+    return RateLimitResponse(
+        reseller_id=limits.reseller_id,
+        api_rate_limit_per_minute=limits.api_rate_limit_per_minute,
+        api_rate_limit_per_hour=limits.api_rate_limit_per_hour,
+        api_burst_limit=limits.api_burst_limit,
+    )
+
+
+# --------------------------------------------------------------------------
+# GET /rate-limits/usage -- current usage stats from Redis
+# --------------------------------------------------------------------------
+@router.get("/rate-limits/usage", response_model=RateLimitUsageResponse, status_code=status.HTTP_200_OK)
+async def get_rate_limit_usage(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    reseller: User = Depends(_reseller),
+):
+    """Return live API rate-limit usage for this reseller (calls this minute/hour)."""
+    import time as _time
+
+    result = await db.execute(
+        select(ResellerLimit).where(ResellerLimit.reseller_id == reseller.id)
+    )
+    limits = result.scalar_one_or_none()
+    limit_per_minute = limits.api_rate_limit_per_minute if limits else 100
+    limit_per_hour = limits.api_rate_limit_per_hour if limits else 3000
+    burst_limit = limits.api_burst_limit if limits else 20
+
+    # Read counters from Redis
+    redis_client = getattr(request.app.state, "redis", None)
+    used_minute = 0
+    used_hour = 0
+    now = _time.time()
+
+    if redis_client is not None:
+        try:
+            reseller_id_str = str(reseller.id)
+            minute_key = f"ratelimit:reseller:{reseller_id_str}:minute"
+            hour_key = f"ratelimit:reseller:{reseller_id_str}:hour"
+
+            # Clean stale entries then count
+            pipe = redis_client.pipeline()
+            pipe.zremrangebyscore(minute_key, "-inf", now - 60)
+            pipe.zcard(minute_key)
+            pipe.zremrangebyscore(hour_key, "-inf", now - 3600)
+            pipe.zcard(hour_key)
+            results = await pipe.execute()
+
+            used_minute = results[1]
+            used_hour = results[3]
+        except Exception as exc:
+            logger.debug("Failed to read rate-limit usage from Redis: %s", exc)
+
+    from datetime import datetime, timezone
+
+    return RateLimitUsageResponse(
+        reseller_id=reseller.id,
+        api_rate_limit_per_minute=limit_per_minute,
+        api_rate_limit_per_hour=limit_per_hour,
+        api_burst_limit=burst_limit,
+        used_this_minute=used_minute,
+        used_this_hour=used_hour,
+        remaining_this_minute=max(0, limit_per_minute - used_minute),
+        remaining_this_hour=max(0, limit_per_hour - used_hour),
+        minute_resets_at=datetime.fromtimestamp(now + 60, tz=timezone.utc),
+        hour_resets_at=datetime.fromtimestamp(now + 3600, tz=timezone.utc),
+    )

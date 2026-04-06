@@ -1,0 +1,127 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deployment environment"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+      skip_migrations:
+        description: "Skip database migrations"
+        required: false
+        default: false
+        type: boolean
+      skip_frontend_build:
+        description: "Skip frontend rebuild"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  DEPLOY_PATH: /opt/novapanel
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Validate inputs
+        run: |
+          echo "Deploying to: ${{ inputs.environment }}"
+          echo "Skip migrations: ${{ inputs.skip_migrations }}"
+          echo "Skip frontend build: ${{ inputs.skip_frontend_build }}"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            echo "=== NovaPanel Deployment ==="
+            echo "Environment: ${{ inputs.environment }}"
+            echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+
+            cd ${{ env.DEPLOY_PATH }}
+
+            # Pull latest code
+            echo "--- Pulling latest code ---"
+            git fetch origin
+            git pull origin main
+
+            # Activate Python virtual environment
+            source venv/bin/activate
+
+            # Install/update Python dependencies
+            echo "--- Installing Python dependencies ---"
+            pip install -r requirements.txt --quiet
+
+            # Build frontend
+            if [ "${{ inputs.skip_frontend_build }}" != "true" ]; then
+              echo "--- Building frontend ---"
+              cd frontend
+              npm ci --silent
+              npm run build
+              cd ..
+            else
+              echo "--- Skipping frontend build ---"
+            fi
+
+            # Run database migrations
+            if [ "${{ inputs.skip_migrations }}" != "true" ]; then
+              echo "--- Running database migrations ---"
+              alembic upgrade head
+            else
+              echo "--- Skipping migrations ---"
+            fi
+
+            # Restart services
+            echo "--- Restarting services ---"
+            sudo systemctl restart novapanel-api
+            sudo systemctl restart novapanel-agent
+            sudo systemctl restart novapanel-worker
+
+            # Wait and verify services are running
+            sleep 3
+            echo ""
+            echo "--- Service Status ---"
+            systemctl is-active novapanel-api && echo "API: running" || echo "API: FAILED"
+            systemctl is-active novapanel-agent && echo "Agent: running" || echo "Agent: FAILED"
+            systemctl is-active novapanel-worker && echo "Worker: running" || echo "Worker: FAILED"
+
+            echo ""
+            echo "=== Deployment complete ==="
+
+      - name: Health check
+        if: inputs.environment == 'production'
+        run: |
+          sleep 5
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://${{ secrets.DEPLOY_HOST }}:8443/api/health || echo "000")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Health check passed (HTTP $HTTP_STATUS)"
+          else
+            echo "WARNING: Health check returned HTTP $HTTP_STATUS"
+            echo "The services may still be starting up. Check the server logs."
+            exit 1
+          fi
+
+      - name: Notify deployment result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "Deployment to ${{ inputs.environment }} succeeded."
+          else
+            echo "Deployment to ${{ inputs.environment }} failed. Check logs above."
+          fi

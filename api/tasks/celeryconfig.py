@@ -106,6 +106,23 @@ beat_schedule = {
         "options": {"queue": "maintenance"},
     },
 
+    # ── Multi-Server Cluster ──────────────────────────────────────────
+    "cluster_heartbeat": {
+        "task": "api.tasks.cluster_tasks.cluster_heartbeat",
+        "schedule": 30.0,  # every 30 seconds
+        "options": {"queue": "cluster"},
+    },
+    "cluster_health_check": {
+        "task": "api.tasks.cluster_tasks.cluster_health_check",
+        "schedule": 300.0,  # every 5 minutes
+        "options": {"queue": "cluster"},
+    },
+    "cluster_auto_balance": {
+        "task": "api.tasks.cluster_tasks.cluster_auto_balance",
+        "schedule": crontab(hour=3, minute=30),  # daily at 03:30 UTC
+        "options": {"queue": "cluster"},
+    },
+
     # ── DNS Cluster ────────────────────────────────────────────────────
     "dns_cluster_verify_sync": {
         "task": "api.tasks.dns_cluster_tasks.verify_cluster_sync",
@@ -151,6 +168,7 @@ task_routes = {
     "api.tasks.notification_tasks.*": {"queue": "notifications"},
     "api.tasks.monitoring_tasks.*": {"queue": "monitoring"},
     "api.tasks.ai_tasks.*": {"queue": "ai"},
+    "api.tasks.cluster_tasks.*": {"queue": "cluster"},
     "api.tasks.dns_cluster_tasks.*": {"queue": "dns"},
     "api.tasks.waf_tasks.*": {"queue": "security"},
     "api.tasks.migration_tasks.*": {"queue": "migration"},

@@ -61,6 +61,7 @@ app.autodiscover_tasks([
     "api.tasks.notification_tasks",
     "api.tasks.monitoring_tasks",
     "api.tasks.integration_tasks",
+    "api.tasks.cluster_tasks",
     "api.tasks.dns_cluster_tasks",
     "api.tasks.waf_tasks",
     "api.tasks.migration_tasks",

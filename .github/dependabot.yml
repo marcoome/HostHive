@@ -1,0 +1,83 @@
+version: 2
+
+updates:
+  # Python (pip) dependencies
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 10
+    reviewers:
+      - "m.omelyash"
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "deps(py):"
+    groups:
+      fastapi:
+        patterns:
+          - "fastapi*"
+          - "uvicorn*"
+          - "starlette*"
+      sqlalchemy:
+        patterns:
+          - "sqlalchemy*"
+          - "alembic*"
+          - "asyncpg*"
+      security:
+        patterns:
+          - "bcrypt*"
+          - "cryptography*"
+          - "python-jose*"
+          - "py-webauthn*"
+
+  # Node.js (npm) dependencies
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 10
+    reviewers:
+      - "m.omelyash"
+    labels:
+      - dependencies
+      - javascript
+    commit-message:
+      prefix: "deps(js):"
+    groups:
+      vue:
+        patterns:
+          - "vue*"
+          - "pinia*"
+          - "@vue*"
+      vite:
+        patterns:
+          - "vite*"
+          - "@vitejs*"
+      tailwind:
+        patterns:
+          - "tailwindcss*"
+          - "postcss*"
+          - "autoprefixer*"
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "ci:"

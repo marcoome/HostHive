@@ -61,8 +61,46 @@ class ResellerLimitResponse(BaseModel):
     used_users: int
     used_disk_mb: int
     used_bandwidth_gb: float = 0.0
+    api_rate_limit_per_minute: int = 100
+    api_rate_limit_per_hour: int = 3000
+    api_burst_limit: int = 20
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# API Rate Limits
+# ---------------------------------------------------------------------------
+
+class RateLimitUpdate(BaseModel):
+    """Schema for updating reseller API rate limits (admin only)."""
+    api_rate_limit_per_minute: Optional[int] = Field(None, ge=1, le=100000, description="Max API calls per minute")
+    api_rate_limit_per_hour: Optional[int] = Field(None, ge=1, le=1000000, description="Max API calls per hour")
+    api_burst_limit: Optional[int] = Field(None, ge=1, le=10000, description="Burst allowance (concurrent request spike)")
+
+
+class RateLimitResponse(BaseModel):
+    """Current rate limit settings for a reseller."""
+    reseller_id: uuid.UUID
+    api_rate_limit_per_minute: int
+    api_rate_limit_per_hour: int
+    api_burst_limit: int
+
+    model_config = {"from_attributes": True}
+
+
+class RateLimitUsageResponse(BaseModel):
+    """Current rate limit usage stats for a reseller."""
+    reseller_id: uuid.UUID
+    api_rate_limit_per_minute: int
+    api_rate_limit_per_hour: int
+    api_burst_limit: int
+    used_this_minute: int
+    used_this_hour: int
+    remaining_this_minute: int
+    remaining_this_hour: int
+    minute_resets_at: datetime
+    hour_resets_at: datetime
 
 
 # ---------------------------------------------------------------------------

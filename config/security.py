@@ -83,3 +83,11 @@ RATE_LIMIT_AUTH_LOGIN: str = "10/minute"
 RATE_LIMIT_AUTH_REFRESH: str = "20/minute"
 RATE_LIMIT_FILE_UPLOAD: str = "30/minute"
 RATE_LIMIT_DEFAULT: str = "100/minute"
+
+# ---------------------------------------------------------------------------
+# Per-reseller API rate-limit defaults
+# ---------------------------------------------------------------------------
+
+RESELLER_RATE_LIMIT_PER_MINUTE: int = 100
+RESELLER_RATE_LIMIT_PER_HOUR: int = 3000
+RESELLER_BURST_LIMIT: int = 20

@@ -713,7 +713,7 @@ onMounted(() => {
 <style scoped>
 /* Shared input style */
 .input-field {
-  @apply w-full px-4 py-2 bg-[var(--surface)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-primary/50;
+  @apply w-full px-4 py-2 bg-[var(--surface)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-50;
 }
 
 /* Collapsible section wrapper */
@@ -741,7 +741,7 @@ onMounted(() => {
 /* Toggle switch */
 .toggle-switch {
   @apply relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out;
-  @apply focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2 focus:ring-offset-[var(--surface)];
+  @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-50 focus:ring-offset-2 focus:ring-offset-[var(--surface)];
 }
 
 .toggle-knob {

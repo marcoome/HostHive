@@ -195,6 +195,7 @@ from api.routers import (  # noqa: E402
     backups_router,
     branding_router,
     cache_router,
+    cluster_router,
     cron_router,
     databases_router,
     directory_privacy_router,
@@ -284,6 +285,7 @@ app.include_router(wordpress_router,     prefix=f"{_v1}/wordpress",    tags=["Wo
 app.include_router(settings_router,      prefix=f"{_v1}/settings",     tags=["Settings"])
 app.include_router(mcp_router,           prefix=f"{_v1}/mcp",          tags=["MCP"])
 app.include_router(cache_router,          prefix=f"{_v1}/cache",         tags=["Cache"])
+app.include_router(cluster_router,       prefix=f"{_v1}/cluster",       tags=["Cluster"])
 app.include_router(php_router,           prefix=f"{_v1}/php",           tags=["PHP"])
 app.include_router(dashboard_router,     prefix=f"{_v1}/dashboard",     tags=["Dashboard"])
 app.include_router(security_router,      prefix=f"{_v1}/security",     tags=["Security"])
