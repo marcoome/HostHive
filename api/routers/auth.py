@@ -14,6 +14,7 @@ from api.core.database import get_db
 from api.core.security import (
     check_brute_force,
     clear_login_failures,
+    create_2fa_pending_token,
     create_access_token,
     create_refresh_token,
     get_current_user,
@@ -44,7 +45,7 @@ _REFRESH_PREFIX = "hosthive:refresh:"
 # --------------------------------------------------------------------------
 # POST /login
 # --------------------------------------------------------------------------
-@router.post("/login", response_model=LoginResponse, status_code=status.HTTP_200_OK)
+@router.post("/login", status_code=status.HTTP_200_OK)
 @limiter.limit("10/minute")
 async def login(
     body: LoginRequest,
@@ -77,6 +78,15 @@ async def login(
         )
 
     await clear_login_failures(redis, client_ip)
+
+    # If 2FA is enabled, return a short-lived pending token instead of full access
+    if user.totp_enabled:
+        pending_token = create_2fa_pending_token(user.id)
+        return {
+            "requires_2fa": True,
+            "pending_token": pending_token,
+            "detail": "Two-factor authentication required. Use /api/v1/auth/2fa/login to complete.",
+        }
 
     access_token = create_access_token(
         user.id, user.role.value, user.password_changed_at,
@@ -261,31 +271,11 @@ async def me(current_user: User = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
-# Stub endpoints for frontend compatibility
+# 2FA (TOTP) sub-router
 # ---------------------------------------------------------------------------
+from api.routers.totp import router as totp_router  # noqa: E402
 
-@router.get("/2fa/status", status_code=status.HTTP_200_OK)
-async def get_2fa_status(current_user: User = Depends(get_current_user)):
-    """Check if 2FA is enabled for the current user."""
-    return {"enabled": False, "method": None}
-
-
-@router.post("/2fa/setup", status_code=status.HTTP_200_OK)
-async def setup_2fa(current_user: User = Depends(get_current_user)):
-    """Initialize 2FA setup."""
-    return {"detail": "2FA is not yet implemented.", "qr_code": None, "secret": None}
-
-
-@router.post("/2fa/verify", status_code=status.HTTP_200_OK)
-async def verify_2fa(current_user: User = Depends(get_current_user)):
-    """Verify 2FA code."""
-    return {"detail": "2FA is not yet implemented.", "verified": False}
-
-
-@router.post("/2fa/disable", status_code=status.HTTP_200_OK)
-async def disable_2fa(current_user: User = Depends(get_current_user)):
-    """Disable 2FA."""
-    return {"detail": "2FA is not yet implemented."}
+router.include_router(totp_router, prefix="/2fa")
 
 
 @router.get("/sessions", status_code=status.HTTP_200_OK)

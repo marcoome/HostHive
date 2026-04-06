@@ -52,15 +52,15 @@
         <StatusBadge :status="row.status" :label="row.status" />
       </template>
       <template #actions="{ row }">
-        <div class="flex items-center justify-end gap-2">
-          <button class="btn-ghost text-xs px-2 py-1" @click="showCredentials(row)">
+        <div class="flex items-center justify-end gap-1 flex-wrap">
+          <button class="btn-ghost text-xs px-2 py-1.5 min-h-[36px]" @click="showCredentials(row)">
             Credentials
           </button>
-          <button class="btn-ghost text-xs px-2 py-1" @click="openEditModal(row)">
+          <button class="btn-ghost text-xs px-2 py-1.5 min-h-[36px]" @click="openEditModal(row)">
             Edit
           </button>
           <button
-            class="btn-ghost text-xs px-2 py-1 text-error hover:text-error"
+            class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-error hover:text-error"
             @click="confirmDelete(row)"
           >
             Delete

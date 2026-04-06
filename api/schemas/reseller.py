@@ -60,6 +60,7 @@ class ResellerLimitResponse(BaseModel):
     max_total_bandwidth_gb: int
     used_users: int
     used_disk_mb: int
+    used_bandwidth_gb: float = 0.0
 
     model_config = {"from_attributes": True}
 
@@ -119,3 +120,4 @@ class ResellerStatsResponse(BaseModel):
     used_users: int
     max_users: int
     max_bandwidth_gb: int
+    used_bandwidth_gb: float = 0.0

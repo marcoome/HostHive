@@ -34,7 +34,9 @@
             <span class="text-white font-bold text-2xl">H</span>
           </div>
           <h1 class="text-2xl font-bold" :style="{ color: 'var(--text-primary)' }">HostHive</h1>
-          <p class="text-sm mt-1" :style="{ color: 'var(--text-muted)' }">Sign in to your control panel</p>
+          <p class="text-sm mt-1" :style="{ color: 'var(--text-muted)' }">
+            {{ step === '2fa' ? 'Two-factor authentication' : 'Sign in to your control panel' }}
+          </p>
         </div>
 
         <!-- Error message -->
@@ -50,59 +52,162 @@
           {{ errorMessage }}
         </div>
 
-        <!-- Form -->
-        <form @submit.prevent="handleLogin" class="space-y-5">
-          <div>
-            <label for="username" class="input-label">Username</label>
-            <input
-              id="username"
-              v-model="username"
-              type="text"
-              placeholder="Enter your username"
-              autocomplete="username"
-              required
-              class="w-full"
-              :disabled="loading"
-            />
-          </div>
-
-          <div>
-            <label for="password" class="input-label">Password</label>
-            <input
-              id="password"
-              v-model="password"
-              type="password"
-              placeholder="Enter your password"
-              autocomplete="current-password"
-              required
-              class="w-full"
-              :disabled="loading"
-            />
-          </div>
-
-          <div class="flex items-center justify-between">
-            <label class="flex items-center gap-2 cursor-pointer">
+        <!-- Step 1: Credentials -->
+        <template v-if="step === 'credentials'">
+          <form @submit.prevent="handleLogin" class="space-y-5">
+            <div>
+              <label for="username" class="input-label">Username</label>
               <input
-                type="checkbox"
-                v-model="remember"
-                class="w-4 h-4 rounded"
+                id="username"
+                v-model="username"
+                type="text"
+                placeholder="Enter your username"
+                autocomplete="username"
+                required
+                class="w-full"
+                :disabled="loading"
               />
-              <span class="text-sm" :style="{ color: 'var(--text-muted)' }">Remember me</span>
-            </label>
-            <router-link to="/forgot-password" class="text-sm link">
-              Forgot password?
-            </router-link>
+            </div>
+
+            <div>
+              <label for="password" class="input-label">Password</label>
+              <input
+                id="password"
+                v-model="password"
+                type="password"
+                placeholder="Enter your password"
+                autocomplete="current-password"
+                required
+                class="w-full"
+                :disabled="loading"
+              />
+            </div>
+
+            <div class="flex items-center justify-between">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  v-model="remember"
+                  class="w-4 h-4 rounded"
+                />
+                <span class="text-sm" :style="{ color: 'var(--text-muted)' }">Remember me</span>
+              </label>
+              <router-link to="/forgot-password" class="text-sm link">
+                Forgot password?
+              </router-link>
+            </div>
+
+            <button
+              type="submit"
+              class="btn-primary w-full py-2.5"
+              :disabled="loading || !username || !password"
+            >
+              <span v-if="loading" class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              <span v-else>Sign in</span>
+            </button>
+          </form>
+
+          <!-- Divider -->
+          <div class="relative my-6">
+            <div class="absolute inset-0 flex items-center">
+              <div class="w-full border-t" :style="{ borderColor: 'var(--border)' }"></div>
+            </div>
+            <div class="relative flex justify-center text-xs">
+              <span class="px-3" :style="{ background: 'var(--surface)', color: 'var(--text-muted)' }">or</span>
+            </div>
           </div>
 
+          <!-- Passkey button -->
           <button
-            type="submit"
-            class="btn-primary w-full py-2.5"
-            :disabled="loading || !username || !password"
+            type="button"
+            class="btn-secondary w-full py-2.5 flex items-center justify-center gap-2"
+            :disabled="loading"
+            @click="handlePasskeyLogin"
           >
-            <span v-if="loading" class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-            <span v-else>Sign in</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/>
+              <circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>
+            </svg>
+            <span>Sign in with Passkey</span>
           </button>
-        </form>
+        </template>
+
+        <!-- Step 2: Two-Factor Authentication -->
+        <template v-if="step === '2fa'">
+          <form @submit.prevent="handle2FA" class="space-y-5">
+            <template v-if="!useBackupCode">
+              <div>
+                <label for="totp-code" class="input-label">Authentication Code</label>
+                <p class="text-xs mb-2" :style="{ color: 'var(--text-muted)' }">
+                  Enter the 6-digit code from your authenticator app.
+                </p>
+                <input
+                  id="totp-code"
+                  ref="totpInput"
+                  v-model="totpCode"
+                  type="text"
+                  inputmode="numeric"
+                  maxlength="6"
+                  placeholder="000000"
+                  autocomplete="one-time-code"
+                  required
+                  class="w-full text-center text-lg tracking-[0.5em] font-mono"
+                  :disabled="loading"
+                  @input="onTotpInput"
+                />
+              </div>
+            </template>
+
+            <template v-else>
+              <div>
+                <label for="backup-code" class="input-label">Backup Code</label>
+                <p class="text-xs mb-2" :style="{ color: 'var(--text-muted)' }">
+                  Enter one of your backup recovery codes.
+                </p>
+                <input
+                  id="backup-code"
+                  ref="backupInput"
+                  v-model="backupCode"
+                  type="text"
+                  placeholder="xxxx-xxxx-xxxx"
+                  autocomplete="off"
+                  required
+                  class="w-full text-center font-mono"
+                  :disabled="loading"
+                />
+              </div>
+            </template>
+
+            <button
+              type="submit"
+              class="btn-primary w-full py-2.5"
+              :disabled="loading || (!useBackupCode && totpCode.length !== 6) || (useBackupCode && !backupCode)"
+            >
+              <span v-if="loading" class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              <span v-else>Verify</span>
+            </button>
+
+            <div class="text-center">
+              <button
+                type="button"
+                class="text-sm link"
+                @click="toggleBackupCode"
+              >
+                {{ useBackupCode ? 'Use authenticator code' : 'Use backup code' }}
+              </button>
+            </div>
+
+            <div class="text-center">
+              <button
+                type="button"
+                class="text-sm link"
+                @click="backToCredentials"
+              >
+                Back to sign in
+              </button>
+            </div>
+          </form>
+        </template>
       </div>
 
       <p class="text-center text-xs mt-6" :style="{ color: 'var(--text-muted)' }">
@@ -113,12 +218,13 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useNotificationsStore } from '@/stores/notifications'
 import { useThemeStore } from '@/stores/theme'
 import ParallaxBackground from '@/components/ParallaxBackground.vue'
+import client from '@/api/client'
 
 const router = useRouter()
 const route = useRoute()
@@ -132,6 +238,20 @@ const remember = ref(false)
 const loading = ref(false)
 const errorMessage = ref('')
 
+// 2FA state
+const step = ref('credentials') // 'credentials' | '2fa'
+const totpCode = ref('')
+const backupCode = ref('')
+const useBackupCode = ref(false)
+const totpInput = ref(null)
+const backupInput = ref(null)
+
+function navigateAfterLogin() {
+  notifications.success('Welcome back!')
+  const redirect = route.query.redirect || '/dashboard'
+  router.push(redirect)
+}
+
 async function handleLogin() {
   if (!username.value || !password.value) return
 
@@ -139,13 +259,148 @@ async function handleLogin() {
   errorMessage.value = ''
 
   try {
-    await auth.login(username.value, password.value)
-    notifications.success('Welcome back!')
-    const redirect = route.query.redirect || '/dashboard'
-    router.push(redirect)
+    const data = await auth.login(username.value, password.value)
+    if (data.requires_2fa) {
+      step.value = '2fa'
+      await nextTick()
+      totpInput.value?.focus()
+    } else {
+      navigateAfterLogin()
+    }
   } catch (err) {
     const msg = err.response?.data?.detail || err.response?.data?.message || 'Invalid credentials. Please try again.'
     errorMessage.value = msg
+  } finally {
+    loading.value = false
+  }
+}
+
+function onTotpInput() {
+  // Strip non-digits
+  totpCode.value = totpCode.value.replace(/\D/g, '')
+}
+
+async function handle2FA() {
+  const code = useBackupCode.value ? backupCode.value.trim() : totpCode.value.trim()
+  if (!code) return
+
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    await auth.verify2FA(code, useBackupCode.value)
+    navigateAfterLogin()
+  } catch (err) {
+    const msg = err.response?.data?.detail || err.response?.data?.message || 'Invalid verification code. Please try again.'
+    errorMessage.value = msg
+  } finally {
+    loading.value = false
+  }
+}
+
+function toggleBackupCode() {
+  useBackupCode.value = !useBackupCode.value
+  errorMessage.value = ''
+  nextTick(() => {
+    if (useBackupCode.value) {
+      backupInput.value?.focus()
+    } else {
+      totpInput.value?.focus()
+    }
+  })
+}
+
+function backToCredentials() {
+  step.value = 'credentials'
+  totpCode.value = ''
+  backupCode.value = ''
+  useBackupCode.value = false
+  errorMessage.value = ''
+  auth.clear2FAState()
+}
+
+// --- WebAuthn / Passkey Login ---
+
+function base64UrlToBuffer(base64url) {
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = base64.length % 4 === 0 ? '' : '='.repeat(4 - (base64.length % 4))
+  const binary = atob(base64 + pad)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes.buffer
+}
+
+function bufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte)
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+async function handlePasskeyLogin() {
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    // 1. Get challenge options from the server
+    const { data: options } = await client.post('/auth/webauthn/authenticate/options')
+
+    // 2. Prepare the credential request
+    const publicKeyOptions = {
+      challenge: base64UrlToBuffer(options.challenge),
+      timeout: options.timeout || 60000,
+      rpId: options.rpId || window.location.hostname,
+      userVerification: options.userVerification || 'preferred'
+    }
+
+    if (options.allowCredentials && options.allowCredentials.length > 0) {
+      publicKeyOptions.allowCredentials = options.allowCredentials.map(cred => ({
+        id: base64UrlToBuffer(cred.id),
+        type: cred.type || 'public-key',
+        transports: cred.transports
+      }))
+    }
+
+    // 3. Call WebAuthn browser API
+    const credential = await navigator.credentials.get({ publicKey: publicKeyOptions })
+
+    // 4. Send assertion to server
+    const assertionPayload = {
+      id: credential.id,
+      rawId: bufferToBase64Url(credential.rawId),
+      type: credential.type,
+      response: {
+        authenticatorData: bufferToBase64Url(credential.response.authenticatorData),
+        clientDataJSON: bufferToBase64Url(credential.response.clientDataJSON),
+        signature: bufferToBase64Url(credential.response.signature),
+        userHandle: credential.response.userHandle
+          ? bufferToBase64Url(credential.response.userHandle)
+          : null
+      }
+    }
+
+    const data = await auth.webauthnLogin(assertionPayload)
+
+    if (data.requires_2fa) {
+      step.value = '2fa'
+      await nextTick()
+      totpInput.value?.focus()
+    } else {
+      navigateAfterLogin()
+    }
+  } catch (err) {
+    if (err.name === 'NotAllowedError') {
+      errorMessage.value = 'Passkey authentication was cancelled or not allowed.'
+    } else if (err.name === 'SecurityError') {
+      errorMessage.value = 'Passkey authentication is not available on this connection.'
+    } else {
+      const msg = err.response?.data?.detail || err.response?.data?.message || 'Passkey authentication failed. Please try again.'
+      errorMessage.value = msg
+    }
   } finally {
     loading.value = false
   }

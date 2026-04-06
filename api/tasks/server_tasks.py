@@ -96,3 +96,195 @@ def cleanup_old_stats(self) -> dict:
 
     logger.info("Deleted %d old server stat records (cutoff: %s)", deleted, cutoff)
     return {"deleted_count": deleted, "cutoff": cutoff.isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# Antivirus scanning
+# ---------------------------------------------------------------------------
+
+@app.task(
+    name="api.tasks.server_tasks.run_antivirus_scan",
+    bind=True,
+    max_retries=1,
+    default_retry_delay=60,
+    soft_time_limit=1800,  # 30 min soft limit
+    time_limit=2100,       # 35 min hard limit
+)
+def run_antivirus_scan(self, scan_id: str, scan_path: str) -> dict:
+    """Run a ClamAV scan on the given path, quarantining infected files.
+
+    Updates the ScanResult record in the database with progress and results.
+    Infected files are moved to /opt/hosthive/quarantine/ and recorded as
+    QuarantineEntry rows.
+    """
+    import os
+    import subprocess
+    import uuid as _uuid
+    from pathlib import Path
+
+    from api.models.antivirus import QuarantineEntry, ScanResult, ScanStatus
+
+    quarantine_dir = Path("/opt/hosthive/quarantine")
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Starting antivirus scan %s on path: %s", scan_id, scan_path)
+
+    with get_sync_session() as session:
+        scan = session.get(ScanResult, _uuid.UUID(scan_id))
+        if scan is None:
+            logger.error("Scan record %s not found", scan_id)
+            return {"error": "Scan record not found"}
+
+        scan.status = ScanStatus.RUNNING
+        scan.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.commit()
+
+    # Run clamscan with --move to quarantine infected files
+    try:
+        result = subprocess.run(
+            [
+                "sudo", "clamscan",
+                "--infected",
+                "--recursive",
+                f"--move={quarantine_dir}",
+                "--log=/var/log/clamav/scan.log",
+                scan_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1800,  # 30 min
+        )
+    except subprocess.TimeoutExpired:
+        with get_sync_session() as session:
+            scan = session.get(ScanResult, _uuid.UUID(scan_id))
+            if scan:
+                scan.status = ScanStatus.FAILED
+                scan.error_message = "Scan timed out after 30 minutes"
+                scan.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.commit()
+        return {"error": "Scan timed out"}
+    except Exception as exc:
+        with get_sync_session() as session:
+            scan = session.get(ScanResult, _uuid.UUID(scan_id))
+            if scan:
+                scan.status = ScanStatus.FAILED
+                scan.error_message = str(exc)
+                scan.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.commit()
+        return {"error": str(exc)}
+
+    # Parse clamscan output
+    infected_files: list[dict] = []
+    files_scanned = 0
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "FOUND" in line:
+            # Format: /path/to/file: ThreatName FOUND
+            parts = line.rsplit(":", 1)
+            if len(parts) == 2:
+                file_path = parts[0].strip()
+                threat = parts[1].replace("FOUND", "").strip()
+                infected_files.append({"file": file_path, "threat": threat})
+        elif "OK" in line:
+            files_scanned += 1
+
+    # Also parse the summary section for accurate totals
+    for line in result.stdout.splitlines():
+        if line.startswith("Scanned files:"):
+            try:
+                files_scanned = int(line.split(":")[1].strip())
+            except (ValueError, IndexError):
+                pass
+
+    files_scanned = max(files_scanned, len(infected_files))
+
+    # Record results and quarantine entries
+    with get_sync_session() as session:
+        scan = session.get(ScanResult, _uuid.UUID(scan_id))
+        if scan is None:
+            return {"error": "Scan record not found after scan"}
+
+        scan.status = ScanStatus.COMPLETED
+        scan.files_scanned = files_scanned
+        scan.infected_count = len(infected_files)
+        scan.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        scan.quarantined_files = {
+            "files": infected_files,
+            "clamscan_returncode": result.returncode,
+        }
+
+        for inf in infected_files:
+            original = inf["file"]
+            filename = os.path.basename(original)
+            qpath = quarantine_dir / filename
+
+            entry = QuarantineEntry(
+                scan_id=scan.id,
+                original_path=original,
+                quarantine_path=str(qpath),
+                threat_name=inf["threat"],
+                file_size=qpath.stat().st_size if qpath.exists() else None,
+            )
+            session.add(entry)
+
+        session.commit()
+
+    logger.info(
+        "Antivirus scan %s completed: %d files scanned, %d infected",
+        scan_id, files_scanned, len(infected_files),
+    )
+    return {
+        "scan_id": scan_id,
+        "files_scanned": files_scanned,
+        "infected_count": len(infected_files),
+        "status": "completed",
+    }
+
+
+@app.task(
+    name="api.tasks.server_tasks.scheduled_antivirus_scan",
+    bind=True,
+    max_retries=1,
+    default_retry_delay=300,
+    soft_time_limit=3600,
+    time_limit=3900,
+)
+def scheduled_antivirus_scan(self) -> dict:
+    """Nightly scheduled scan of all user home directories.
+
+    Creates a ScanResult record attributed to the first admin user,
+    then delegates to run_antivirus_scan.
+    """
+    import uuid as _uuid
+
+    from sqlalchemy import select as sa_select
+
+    from api.models.antivirus import ScanResult, ScanStatus
+    from api.models.users import User, UserRole
+
+    logger.info("Starting scheduled nightly antivirus scan")
+
+    with get_sync_session() as session:
+        # Find an admin user to attribute the scan to
+        result = session.execute(
+            sa_select(User).where(User.role == UserRole.ADMIN).limit(1)
+        )
+        admin = result.scalar_one_or_none()
+        if admin is None:
+            logger.error("No admin user found for scheduled scan attribution")
+            return {"error": "No admin user found"}
+
+        scan = ScanResult(
+            user_id=admin.id,
+            scan_path="/home",
+            status=ScanStatus.PENDING,
+        )
+        session.add(scan)
+        session.commit()
+        scan_id = str(scan.id)
+
+    # Delegate to the main scan task
+    return run_antivirus_scan(scan_id, "/home")

@@ -31,6 +31,8 @@ class DnsZoneResponse(BaseModel):
     domain_id: Optional[uuid.UUID] = None
     zone_name: str
     is_active: bool
+    cloudflare_enabled: bool = False
+    dnssec_enabled: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -66,3 +68,78 @@ class DnsRecordUpdate(BaseModel):
 
 class DnsZoneDetailResponse(DnsZoneResponse):
     records: List[DnsRecordResponse] = []
+    cloudflare_enabled: bool = False
+    dnssec_enabled: bool = False
+    dnssec_algorithm: str = "ECDSAP256SHA256"
+    ds_record: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare integration schemas
+# ---------------------------------------------------------------------------
+
+class CloudflareEnableRequest(BaseModel):
+    api_key: str = Field(..., min_length=1)
+    email: str = Field(..., min_length=1)
+    cf_zone_id: str = Field(..., min_length=1)
+
+
+class CloudflareStatusResponse(BaseModel):
+    enabled: bool
+    cf_zone_id: Optional[str] = None
+    email: Optional[str] = None
+
+
+class CloudflareProxyToggle(BaseModel):
+    proxied: bool = True
+
+
+# ---------------------------------------------------------------------------
+# DNSSEC schemas
+# ---------------------------------------------------------------------------
+
+class DnssecEnableRequest(BaseModel):
+    algorithm: str = Field(
+        default="ECDSAP256SHA256",
+        pattern=r"^(ECDSAP256SHA256|ECDSAP384SHA384|RSASHA256|RSASHA512)$",
+        description="DNSSEC signing algorithm",
+    )
+
+
+class DnssecStatusResponse(BaseModel):
+    enabled: bool = False
+    algorithm: Optional[str] = None
+    ds_record: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# DNS Cluster schemas
+# ---------------------------------------------------------------------------
+
+class DnsClusterNodeCreate(BaseModel):
+    hostname: str = Field(..., min_length=1, max_length=255)
+    ip_address: str = Field(..., min_length=1, max_length=45)
+    port: int = Field(default=53, ge=1, le=65535)
+    api_url: str = Field(..., min_length=1, max_length=512)
+    api_key: str = Field(..., min_length=1)
+    role: str = Field(default="slave", pattern=r"^(master|slave)$")
+
+
+class DnsClusterNodeResponse(BaseModel):
+    id: uuid.UUID
+    hostname: str
+    ip_address: str
+    port: int
+    api_url: str
+    role: str
+    is_active: bool
+    last_sync_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DnsClusterStatusResponse(BaseModel):
+    nodes: List[DnsClusterNodeResponse] = []
+    total_zones: int = 0
+    last_full_sync: Optional[str] = None

@@ -231,6 +231,115 @@ APP_CATALOG: list[CatalogApp] = [
         requires_database=True,
         database_types=["postgresql"],
     ),
+    # --- New apps ---
+    CatalogApp(
+        slug="mediawiki",
+        name="MediaWiki",
+        version="1.42",
+        description="The wiki engine that powers Wikipedia, ideal for knowledge bases.",
+        category="CMS",
+        icon="mediawiki",
+        website="https://www.mediawiki.org",
+        min_php="8.1",
+        requires_database=True,
+        database_types=["mysql", "postgresql"],
+    ),
+    CatalogApp(
+        slug="bookstack",
+        name="BookStack",
+        version="24.10",
+        description="Simple, self-hosted wiki and documentation platform.",
+        category="CMS",
+        icon="bookstack",
+        website="https://www.bookstackapp.com",
+        min_php="8.2",
+        requires_database=True,
+        database_types=["mysql"],
+    ),
+    CatalogApp(
+        slug="phpbb",
+        name="phpBB",
+        version="3.3",
+        description="Free and open-source bulletin board forum software.",
+        category="Forum",
+        icon="phpbb",
+        website="https://www.phpbb.com",
+        min_php="8.1",
+        requires_database=True,
+        database_types=["mysql", "postgresql"],
+    ),
+    CatalogApp(
+        slug="discourse",
+        name="Discourse",
+        version="3.3",
+        description="Modern, Docker-based discussion forum for civilized communities.",
+        category="Forum",
+        icon="discourse",
+        website="https://www.discourse.org",
+        requires_database=False,
+    ),
+    CatalogApp(
+        slug="invoiceninja",
+        name="Invoice Ninja",
+        version="5.10",
+        description="Open-source invoicing, payments, and time-tracking platform.",
+        category="Productivity",
+        icon="invoiceninja",
+        website="https://invoiceninja.com",
+        requires_database=True,
+        database_types=["mysql"],
+    ),
+    CatalogApp(
+        slug="uptimekuma",
+        name="Uptime Kuma",
+        version="1.23",
+        description="Easy-to-use self-hosted monitoring tool with a beautiful UI.",
+        category="Monitoring",
+        icon="uptimekuma",
+        website="https://uptime.kuma.pet",
+        requires_database=False,
+    ),
+    CatalogApp(
+        slug="grafana",
+        name="Grafana",
+        version="11.4",
+        description="Open-source analytics and interactive visualization platform.",
+        category="Monitoring",
+        icon="grafana",
+        website="https://grafana.com",
+        requires_database=False,
+    ),
+    CatalogApp(
+        slug="portainer",
+        name="Portainer",
+        version="2.21",
+        description="Lightweight Docker management UI for containers and images.",
+        category="DevOps",
+        icon="portainer",
+        website="https://www.portainer.io",
+        requires_database=False,
+    ),
+    CatalogApp(
+        slug="minio",
+        name="MinIO",
+        version="2024.12",
+        description="High-performance S3-compatible object storage for private clouds.",
+        category="DevOps",
+        icon="minio",
+        website="https://min.io",
+        requires_database=False,
+    ),
+    CatalogApp(
+        slug="adminer",
+        name="Adminer",
+        version="4.8",
+        description="Full-featured database management in a single PHP file.",
+        category="Tools",
+        icon="adminer",
+        website="https://www.adminer.org",
+        min_php="8.0",
+        requires_database=False,
+    ),
 ]
 
 _CATALOG_BY_SLUG = {app.slug: app for app in APP_CATALOG}
@@ -306,7 +415,10 @@ async def install_catalog_app(
                 "db_password": body.db_password,
                 "version": version,
             })
-        elif body.slug in ("joomla", "drupal", "prestashop", "opencart", "magento"):
+        elif body.slug in (
+            "joomla", "drupal", "prestashop", "opencart", "magento",
+            "mediawiki", "bookstack", "phpbb", "roundcube", "adminer",
+        ):
             resp = await agent.post("/apps/install/php", json={
                 "app": body.slug,
                 "domain": body.domain,
@@ -372,28 +484,41 @@ async def install_catalog_app(
                 "path": body.path or "/phpmyadmin",
                 "version": version,
             })
-        elif body.slug == "roundcube":
-            resp = await agent.post("/apps/install/php", json={
-                "app": "roundcube",
-                "domain": body.domain,
-                "path": body.path,
-                "db_name": body.db_name,
-                "db_user": body.db_user,
-                "db_password": body.db_password,
-                "db_type": body.db_type,
-                "version": version,
-            })
-        elif body.slug in ("gitea", "mattermost"):
+        elif body.slug in ("gitea", "mattermost", "minio"):
+            _port_defaults = {"gitea": 3000, "mattermost": 8065, "minio": 9001}
             resp = await agent.post("/apps/install/binary", json={
                 "app": body.slug,
                 "domain": body.domain,
-                "port": body.port or (3000 if body.slug == "gitea" else 8065),
+                "port": body.port or _port_defaults.get(body.slug, 3000),
                 "db_name": body.db_name,
                 "db_user": body.db_user,
                 "db_password": body.db_password,
                 "db_type": body.db_type,
                 "version": version,
             })
+        elif body.slug in ("discourse", "invoiceninja", "uptimekuma", "grafana", "portainer"):
+            _docker_port_defaults = {
+                "discourse": 4200,
+                "invoiceninja": 9080,
+                "uptimekuma": 3001,
+                "grafana": 3100,
+                "portainer": 9443,
+            }
+            install_json = {
+                "app": body.slug,
+                "domain": body.domain,
+                "port": body.port or _docker_port_defaults.get(body.slug, 8080),
+                "version": version,
+            }
+            # Some docker apps still need a DB
+            if body.slug == "invoiceninja":
+                install_json.update({
+                    "db_name": body.db_name,
+                    "db_user": body.db_user,
+                    "db_password": body.db_password,
+                    "db_type": body.db_type,
+                })
+            resp = await agent.post("/apps/install/docker", json=install_json)
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

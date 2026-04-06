@@ -61,29 +61,29 @@
         </template>
 
         <template #actions="{ row }">
-          <div class="flex items-center justify-end gap-2">
+          <div class="flex items-center justify-end gap-1 flex-wrap">
             <button
-              class="btn-ghost text-xs px-2 py-1"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px]"
               @click="openEditModal(row)"
             >
               Edit
             </button>
             <button
               v-if="!row.is_suspended"
-              class="btn-ghost text-xs px-2 py-1 text-warning"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-warning"
               @click="handleSuspend(row)"
             >
               Suspend
             </button>
             <button
               v-else
-              class="btn-ghost text-xs px-2 py-1 text-success"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-success"
               @click="handleUnsuspend(row)"
             >
               Unsuspend
             </button>
             <button
-              class="btn-ghost text-xs px-2 py-1 text-error hover:text-error"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-error hover:text-error"
               @click="confirmDeleteUser(row)"
             >
               Delete

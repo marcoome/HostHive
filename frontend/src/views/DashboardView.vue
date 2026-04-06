@@ -1,12 +1,12 @@
 <template>
   <div class="dashboard" ref="dashboardRef">
     <!-- Page Header -->
-    <div class="flex items-center justify-between mb-6">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
       <div>
         <h1 class="text-2xl font-semibold" :style="{ color: 'var(--text-primary)' }">Dashboard</h1>
         <p class="text-sm mt-1" :style="{ color: 'var(--text-muted)' }">Server overview and monitoring</p>
       </div>
-      <button class="btn-secondary text-sm" @click="refreshAll">
+      <button class="btn-secondary text-sm self-start sm:self-auto min-h-[44px] inline-flex items-center gap-1.5" @click="refreshAll">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="23 4 23 10 17 10"/>
           <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>

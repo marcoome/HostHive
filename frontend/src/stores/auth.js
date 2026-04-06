@@ -7,6 +7,10 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref(JSON.parse(localStorage.getItem('hosthive_user') || 'null'))
   const tokens = ref(JSON.parse(localStorage.getItem('hosthive_tokens') || '{}'))
 
+  // 2FA partial authentication state
+  const partialToken = ref(null)
+  const requires2FA = ref(false)
+
   // Impersonation state
   const impersonating = ref(!!sessionStorage.getItem('hosthive_admin_token'))
   const impersonatedUser = ref(JSON.parse(sessionStorage.getItem('hosthive_impersonated_user') || 'null'))
@@ -17,11 +21,53 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function login(username, password) {
     const { data } = await client.post('/auth/login', { username, password })
+
+    // If 2FA is required, store partial token and signal the login flow
+    if (data.requires_2fa) {
+      partialToken.value = data.partial_token
+      requires2FA.value = true
+      return data
+    }
+
+    _setSession(data)
+    return data
+  }
+
+  async function verify2FA(code, isBackupCode = false) {
+    const payload = isBackupCode
+      ? { partial_token: partialToken.value, backup_code: code }
+      : { partial_token: partialToken.value, code }
+    const { data } = await client.post('/auth/2fa/authenticate', payload)
+    partialToken.value = null
+    requires2FA.value = false
+    _setSession(data)
+    return data
+  }
+
+  async function webauthnLogin(credential) {
+    const { data } = await client.post('/auth/webauthn/authenticate', credential)
+
+    // WebAuthn may also require 2FA in some configurations
+    if (data.requires_2fa) {
+      partialToken.value = data.partial_token
+      requires2FA.value = true
+      return data
+    }
+
+    _setSession(data)
+    return data
+  }
+
+  function clear2FAState() {
+    partialToken.value = null
+    requires2FA.value = false
+  }
+
+  function _setSession(data) {
     tokens.value = { access: data.access_token, refresh: data.refresh_token }
     user.value = data.user
     localStorage.setItem('hosthive_tokens', JSON.stringify(tokens.value))
     localStorage.setItem('hosthive_user', JSON.stringify(user.value))
-    return data
   }
 
   async function logout() {
@@ -120,7 +166,12 @@ export const useAuthStore = defineStore('auth', () => {
     isReseller,
     impersonating,
     impersonatedUser,
+    partialToken,
+    requires2FA,
     login,
+    verify2FA,
+    webauthnLogin,
+    clear2FAState,
     logout,
     refresh,
     fetchProfile,

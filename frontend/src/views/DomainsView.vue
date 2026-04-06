@@ -66,23 +66,23 @@
         </template>
 
         <template #actions="{ row }">
-          <div class="flex items-center justify-end gap-2">
+          <div class="flex items-center justify-end gap-1 flex-wrap">
             <router-link
               :to="{ name: 'domain-detail', params: { id: row.id } }"
-              class="btn-ghost text-xs px-2 py-1"
+              class="btn-ghost text-xs px-3 py-1.5 min-h-[36px] inline-flex items-center"
               title="Edit"
             >
               Edit
             </router-link>
             <button
-              class="btn-ghost text-xs px-2 py-1"
+              class="btn-ghost text-xs px-3 py-1.5 min-h-[36px]"
               title="SSL"
               @click="goToSSL(row)"
             >
               SSL
             </button>
             <button
-              class="btn-ghost text-xs px-2 py-1 text-error hover:text-error"
+              class="btn-ghost text-xs px-3 py-1.5 min-h-[36px] text-error hover:text-error"
               title="Delete"
               @click="confirmDelete(row)"
             >
@@ -127,6 +127,21 @@
           >
             <option v-for="v in phpVersions" :key="v" :value="v">PHP {{ v }}</option>
           </select>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-[var(--text-primary)] mb-1">Web Server</label>
+          <select
+            v-model="form.webserver"
+            class="w-full px-4 py-2 bg-[var(--surface)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
+          >
+            <option value="nginx">Nginx</option>
+            <option value="apache">Apache</option>
+            <option value="nginx_apache">Nginx + Apache (reverse proxy)</option>
+          </select>
+          <p class="mt-1 text-xs text-[var(--text-muted)]">
+            Nginx + Apache uses Nginx as reverse proxy with Apache handling PHP and .htaccess on port 8080.
+          </p>
         </div>
       </form>
 
@@ -185,7 +200,8 @@ const submitting = ref(false)
 
 const form = ref({
   name: '',
-  php_version: '8.2'
+  php_version: '8.2',
+  webserver: 'nginx'
 })
 const formErrors = ref({})
 
@@ -235,11 +251,12 @@ async function handleAdd() {
     await store.create({
       name: form.value.name.trim(),
       document_root: documentRoot.value,
-      php_version: form.value.php_version
+      php_version: form.value.php_version,
+      webserver: form.value.webserver
     })
     notifications.success(`Domain '${form.value.name}' added successfully.`)
     showAddModal.value = false
-    form.value = { name: '', php_version: '8.2' }
+    form.value = { name: '', php_version: '8.2', webserver: 'nginx' }
     formErrors.value = {}
   } catch (err) {
     notifications.error(err.response?.data?.detail || 'Failed to add domain.')
@@ -272,7 +289,7 @@ function goToSSL(domain) {
 // Reset form when modal closes
 watch(showAddModal, (val) => {
   if (!val) {
-    form.value = { name: '', php_version: '8.2' }
+    form.value = { name: '', php_version: '8.2', webserver: 'nginx' }
     formErrors.value = {}
   }
 })

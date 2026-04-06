@@ -1,0 +1,279 @@
+{# default.j2 -- PHP-FPM site with optional SSL and optional FastCGI/proxy cache #}
+{% if cache_enabled and cache_type == 'fastcgi' %}
+# FastCGI cache zone
+fastcgi_cache_path /var/cache/nginx/{{ domain }} levels=1:2 keys_zone={{ domain | replace('.', '_') }}:10m max_size=256m inactive={{ cache_ttl }}s;
+fastcgi_cache_key "$scheme$request_method$host$request_uri";
+{% elif cache_enabled and cache_type == 'proxy' %}
+# Proxy cache zone
+proxy_cache_path /var/cache/nginx/{{ domain }} levels=1:2 keys_zone={{ domain | replace('.', '_') }}:10m max_size=256m inactive={{ cache_ttl }}s;
+proxy_cache_key "$scheme$request_method$host$request_uri";
+{% endif %}
+{% if ssl %}
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name {{ domain }} www.{{ domain }};
+
+    # Redirect all HTTP to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+
+    server_name {{ domain }} www.{{ domain }};
+    root {{ document_root }};
+    index index.php index.html index.htm;
+
+    access_log /var/log/nginx/{{ domain }}.access.log;
+    error_log  /var/log/nginx/{{ domain }}.error.log;
+
+    # SSL configuration
+    ssl_certificate     {{ ssl_certificate }};
+    ssl_certificate_key {{ ssl_certificate_key }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+
+    # OCSP Stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+{% if geo_enabled %}
+
+    # GeoIP geo-blocking (managed by HostHive WAF)
+    if ($geo_blocked) {
+        return 403;
+    }
+{% endif %}
+{% if cache_enabled %}
+    add_header X-Cache-Status $upstream_cache_status always;
+{% endif %}
+
+{% if cache_enabled %}
+    # Cache bypass conditions
+    set $skip_cache 0;
+
+    # Don't cache POST requests
+    if ($request_method = POST) {
+        set $skip_cache 1;
+    }
+
+    # Don't cache URLs with query strings
+    if ($query_string != "") {
+        set $skip_cache 1;
+    }
+
+    # Don't cache logged-in users
+    if ($http_cookie ~* "{{ cache_bypass_cookie }}") {
+        set $skip_cache 1;
+    }
+{% endif %}
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_intercept_errors on;
+{% if cache_enabled and cache_type == 'fastcgi' %}
+
+        # FastCGI cache
+        fastcgi_cache {{ domain | replace('.', '_') }};
+        fastcgi_cache_valid 200 301 302 {{ cache_ttl }}s;
+        fastcgi_cache_valid 404 1m;
+        fastcgi_cache_bypass $skip_cache;
+        fastcgi_no_cache $skip_cache;
+        fastcgi_cache_use_stale error timeout updating http_500 http_503;
+        fastcgi_cache_lock on;
+{% endif %}
+    }
+{% if cache_enabled %}
+
+    # Cache purge location
+    location ~ /purge(/.*) {
+        allow 127.0.0.1;
+        deny all;
+{% if cache_type == 'fastcgi' %}
+        fastcgi_cache_purge {{ domain | replace('.', '_') }} "$scheme$request_method$host$1";
+{% elif cache_type == 'proxy' %}
+        proxy_cache_purge {{ domain | replace('.', '_') }} "$scheme$request_method$host$1";
+{% endif %}
+    }
+{% endif %}
+
+    # Deny access to hidden files
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+{% if hotlink_protection %}
+    # Hotlink protection
+    location ~* \.({{ hotlink_extensions }})$ {
+        valid_referers none blocked server_names{{ ' ' + hotlink_allowed_domains if hotlink_allowed_domains else '' }};
+        if ($invalid_referer) {
+{% if hotlink_redirect_url %}
+            return 301 {{ hotlink_redirect_url }};
+{% else %}
+            return 403;
+{% endif %}
+        }
+    }
+{% endif %}
+
+    # Static file caching
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff2?|ttf|svg|eot)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+{% if custom_error_pages %}
+
+    # Custom error pages
+{% for code, page in custom_error_pages.items() %}
+    error_page {{ code }} {{ page }};
+{% endfor %}
+{% endif %}
+{% if custom_nginx_config %}
+
+    # Custom directives
+{{ custom_nginx_config | indent(4, first=true) }}
+{% endif %}
+}
+{% else %}
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name {{ domain }} www.{{ domain }};
+    root {{ document_root }};
+    index index.php index.html index.htm;
+
+    access_log /var/log/nginx/{{ domain }}.access.log;
+    error_log  /var/log/nginx/{{ domain }}.error.log;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+{% if geo_enabled %}
+
+    # GeoIP geo-blocking (managed by HostHive WAF)
+    if ($geo_blocked) {
+        return 403;
+    }
+{% endif %}
+{% if cache_enabled %}
+    add_header X-Cache-Status $upstream_cache_status always;
+{% endif %}
+
+{% if cache_enabled %}
+    # Cache bypass conditions
+    set $skip_cache 0;
+
+    if ($request_method = POST) {
+        set $skip_cache 1;
+    }
+
+    if ($query_string != "") {
+        set $skip_cache 1;
+    }
+
+    if ($http_cookie ~* "{{ cache_bypass_cookie }}") {
+        set $skip_cache 1;
+    }
+{% endif %}
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php{{ php_version }}-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_intercept_errors on;
+{% if cache_enabled and cache_type == 'fastcgi' %}
+
+        # FastCGI cache
+        fastcgi_cache {{ domain | replace('.', '_') }};
+        fastcgi_cache_valid 200 301 302 {{ cache_ttl }}s;
+        fastcgi_cache_valid 404 1m;
+        fastcgi_cache_bypass $skip_cache;
+        fastcgi_no_cache $skip_cache;
+        fastcgi_cache_use_stale error timeout updating http_500 http_503;
+        fastcgi_cache_lock on;
+{% endif %}
+    }
+{% if cache_enabled %}
+
+    # Cache purge location
+    location ~ /purge(/.*) {
+        allow 127.0.0.1;
+        deny all;
+{% if cache_type == 'fastcgi' %}
+        fastcgi_cache_purge {{ domain | replace('.', '_') }} "$scheme$request_method$host$1";
+{% elif cache_type == 'proxy' %}
+        proxy_cache_purge {{ domain | replace('.', '_') }} "$scheme$request_method$host$1";
+{% endif %}
+    }
+{% endif %}
+
+    # Deny access to hidden files
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+{% if hotlink_protection %}
+    # Hotlink protection
+    location ~* \.({{ hotlink_extensions }})$ {
+        valid_referers none blocked server_names{{ ' ' + hotlink_allowed_domains if hotlink_allowed_domains else '' }};
+        if ($invalid_referer) {
+{% if hotlink_redirect_url %}
+            return 301 {{ hotlink_redirect_url }};
+{% else %}
+            return 403;
+{% endif %}
+        }
+    }
+{% endif %}
+
+    # Static file caching
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff2?|ttf|svg|eot)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+{% if custom_error_pages %}
+
+    # Custom error pages
+{% for code, page in custom_error_pages.items() %}
+    error_page {{ code }} {{ page }};
+{% endfor %}
+{% endif %}
+{% if custom_nginx_config %}
+
+    # Custom directives
+{{ custom_nginx_config | indent(4, first=true) }}
+{% endif %}
+}
+{% endif %}

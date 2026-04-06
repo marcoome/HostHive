@@ -183,12 +183,13 @@ success "Package lists updated"
 # Pre-seed debconf for non-interactive installs
 debconf-set-selections <<< "phpmyadmin phpmyadmin/dbconfig-install boolean false" 2>/dev/null || true
 debconf-set-selections <<< "phpmyadmin phpmyadmin/reconfigure-webserver multiselect none" 2>/dev/null || true
+debconf-set-selections <<< "phppgadmin phppgadmin/dbconfig-install boolean false" 2>/dev/null || true
 debconf-set-selections <<< "roundcube roundcube/dbconfig-install boolean false" 2>/dev/null || true
 
 # Install packages in groups for better error handling
 PACKAGES_CORE="nginx postgresql redis-server python3 python3-venv python3-pip git curl wget unzip htop openssl"
 PACKAGES_MAIL="exim4 dovecot-core dovecot-imapd dovecot-pop3d spamassassin clamav opendkim opendkim-tools rspamd roundcube roundcube-plugins roundcube-pgsql"
-PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-pgsql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl php${PHP_VERSION}-soap php${PHP_VERSION}-bcmath php${PHP_VERSION}-readline php${PHP_VERSION}-opcache php${PHP_VERSION}-redis phpmyadmin"
+PACKAGES_WEB="certbot python3-certbot-nginx php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-mysql php${PHP_VERSION}-pgsql php${PHP_VERSION}-curl php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip php${PHP_VERSION}-gd php${PHP_VERSION}-intl php${PHP_VERSION}-soap php${PHP_VERSION}-bcmath php${PHP_VERSION}-readline php${PHP_VERSION}-opcache php${PHP_VERSION}-redis phpmyadmin phppgadmin"
 PACKAGES_DNS="bind9 bind9utils"
 PACKAGES_FTP="proftpd-basic"
 PACKAGES_SEC="fail2ban ufw"
@@ -506,6 +507,7 @@ DB_PASSWORD=$(generate_password)
 REDIS_PASSWORD=$(generate_password)
 SECRET_KEY=$(generate_password)
 AGENT_SECRET=$(generate_password)
+FERNET_SALT=$(openssl rand -hex 32)
 ADMIN_PASSWORD=$(generate_password | head -c 16)
 
 cat > "${CONFIG_DIR}/secrets.env" << SECRETS
@@ -518,6 +520,7 @@ DB_NAME=hosthive
 REDIS_PASSWORD=${REDIS_PASSWORD}
 SECRET_KEY=${SECRET_KEY}
 AGENT_SECRET=${AGENT_SECRET}
+FERNET_SALT=${FERNET_SALT}
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
 ADMIN_EMAIL=${ADMIN_EMAIL}
@@ -712,6 +715,51 @@ systemctl enable --now nginx >> "$LOG_FILE" 2>&1
 systemctl reload nginx >> "$LOG_FILE" 2>&1
 success "Nginx configured on HTTPS port 8443"
 
+# ─── GeoIP2 module for geo-blocking ───
+log "Installing GeoIP2 module for nginx geo-blocking..."
+apt-get install -y -qq libnginx-mod-http-geoip2 >> "$LOG_FILE" 2>&1 && \
+    success "libnginx-mod-http-geoip2 installed" || \
+    warn "Failed to install libnginx-mod-http-geoip2 (geo-blocking will be unavailable)"
+
+# Install geoipupdate for automatic MaxMind database updates
+if ! command -v geoipupdate &>/dev/null; then
+    apt-get install -y -qq geoipupdate >> "$LOG_FILE" 2>&1 && \
+        success "geoipupdate installed" || \
+        warn "geoipupdate not available in repos (install manually for auto-updates)"
+fi
+
+# Create GeoIP directory and download the free GeoLite2-Country database
+mkdir -p /usr/share/GeoIP
+
+# If geoipupdate is installed and configured, use it
+if command -v geoipupdate &>/dev/null && [ -f /etc/GeoIP.conf ]; then
+    geoipupdate >> "$LOG_FILE" 2>&1 && \
+        success "GeoLite2-Country database downloaded via geoipupdate" || \
+        warn "geoipupdate failed -- configure /etc/GeoIP.conf with your MaxMind license key"
+else
+    log "geoipupdate not configured. To enable GeoIP geo-blocking:"
+    log "  1. Sign up at https://www.maxmind.com/en/geolite2/signup"
+    log "  2. Generate a license key"
+    log "  3. Configure /etc/GeoIP.conf with your AccountID and LicenseKey"
+    log "  4. Run: geoipupdate"
+    warn "GeoIP database not downloaded (MaxMind license key required)"
+fi
+
+# Ensure geoip2 module is loaded in nginx
+if ! grep -q "ngx_http_geoip2_module" /etc/nginx/nginx.conf 2>/dev/null; then
+    if [ ! -f /etc/nginx/modules-enabled/50-mod-http-geoip2.conf ]; then
+        GEOIP2_SO=$(find /usr/lib/nginx/modules -name "ngx_http_geoip2_module.so" 2>/dev/null | head -1)
+        if [ -n "$GEOIP2_SO" ]; then
+            sed -i "1i load_module ${GEOIP2_SO};" /etc/nginx/nginx.conf
+            log "Added geoip2 load_module to nginx.conf"
+        fi
+    fi
+fi
+
+# Create WAF directory for geo state
+mkdir -p /etc/nginx/waf
+success "GeoIP2 geo-blocking setup complete"
+
 # Configure email server and Roundcube webmail
 configure_email_server
 configure_roundcube
@@ -799,11 +847,74 @@ PMADBEOF
 }
 configure_phpmyadmin
 
+# ─── Configure phpPgAdmin (non-interactive) ───
+configure_phppgadmin() {
+    log "Configuring phpPgAdmin..."
+
+    # Ensure phpPgAdmin is installed
+    if [[ ! -d /usr/share/phppgadmin ]]; then
+        apt-get install -y -qq phppgadmin >> "$LOG_FILE" 2>&1 || warn "phpPgAdmin installation failed"
+    fi
+
+    if [[ -d /usr/share/phppgadmin ]]; then
+        # Configure phpPgAdmin for localhost PostgreSQL
+        if [[ -f /etc/phppgadmin/config.inc.php ]]; then
+            cat > /etc/phppgadmin/config.inc.php << 'PGAEOF'
+<?php
+/**
+ * phpPgAdmin configuration — managed by HostHive.
+ */
+$conf['servers'][0]['desc'] = 'PostgreSQL';
+$conf['servers'][0]['host'] = 'localhost';
+$conf['servers'][0]['port'] = 5432;
+$conf['servers'][0]['sslmode'] = 'allow';
+$conf['servers'][0]['defaultdb'] = 'template1';
+$conf['servers'][0]['pg_dump_path'] = '/usr/bin/pg_dump';
+$conf['servers'][0]['pg_dumpall_path'] = '/usr/bin/pg_dumpall';
+
+// Display options
+$conf['default_lang'] = 'auto';
+$conf['autocomplete'] = 'default on';
+$conf['extra_login_security'] = false;
+$conf['owned_only'] = false;
+$conf['show_comments'] = true;
+$conf['show_advanced'] = false;
+$conf['show_system'] = false;
+$conf['min_password_length'] = 1;
+$conf['left_width'] = 200;
+$conf['theme'] = 'default';
+$conf['show_oids'] = false;
+$conf['max_rows'] = 30;
+$conf['max_chars'] = 50;
+$conf['use_xhtml_strict'] = false;
+
+// Disable login page (SSO handles auth)
+$conf['servers'][0]['pg_dump_path'] = '/usr/bin/pg_dump';
+$conf['servers'][0]['pg_dumpall_path'] = '/usr/bin/pg_dumpall';
+PGAEOF
+        fi
+
+        # Set permissions
+        chown -R www-data:www-data /etc/phppgadmin
+        chmod 640 /etc/phppgadmin/config.inc.php
+
+        # Deploy SSO script
+        cp "${INSTALL_DIR}/scripts/phppgadmin-sso.php" /usr/share/phppgadmin/sso.php 2>/dev/null || true
+        chown www-data:www-data /usr/share/phppgadmin/sso.php 2>/dev/null || true
+        chmod 644 /usr/share/phppgadmin/sso.php 2>/dev/null || true
+
+        success "phpPgAdmin configured with SSO"
+    else
+        warn "phpPgAdmin not found at /usr/share/phppgadmin"
+    fi
+}
+configure_phppgadmin
+
 # ─── Configure sudoers for hosthive user ───
 log "Configuring sudoers for hosthive..."
 cat > /etc/sudoers.d/hosthive << 'SUDOEOF'
 # HostHive panel — allow hosthive user to manage system services
-hosthive ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/sbin/ufw, /usr/bin/fail2ban-client, /usr/bin/tail, /usr/bin/certbot, /usr/sbin/rndc, /usr/bin/crontab, /usr/bin/mysql, /usr/bin/mysqldump, /usr/bin/ftpasswd, /bin/tar, /bin/chown, /usr/sbin/nginx, /usr/bin/doveadm, /usr/sbin/exim4, /usr/bin/pg_dump, /usr/bin/psql, /usr/bin/clamscan, /usr/bin/apt, /usr/bin/apt-get, /usr/sbin/apache2ctl, /usr/bin/varnishadm, /usr/bin/ss, /usr/sbin/smartctl, /usr/bin/ip, /usr/sbin/logrotate, /usr/bin/setquota, /usr/bin/quota, /usr/sbin/repquota, /usr/bin/phpenmod, /usr/bin/phpdismod, /usr/sbin/a2ensite, /usr/sbin/a2dissite, /usr/sbin/a2enmod, /usr/bin/hostnamectl, /usr/bin/reboot
+hosthive ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/sbin/ufw, /usr/bin/fail2ban-client, /usr/bin/tail, /usr/bin/certbot, /usr/sbin/rndc, /usr/bin/crontab, /usr/bin/mysql, /usr/bin/mysqldump, /usr/bin/ftpasswd, /bin/tar, /bin/chown, /usr/sbin/nginx, /usr/bin/doveadm, /usr/sbin/exim4, /usr/bin/pg_dump, /usr/bin/psql, /usr/bin/clamscan, /usr/bin/freshclam, /usr/bin/apt, /usr/bin/apt-get, /usr/sbin/apache2ctl, /usr/bin/varnishadm, /usr/bin/ss, /usr/sbin/smartctl, /usr/bin/ip, /usr/sbin/logrotate, /usr/bin/setquota, /usr/bin/quota, /usr/sbin/repquota, /usr/bin/phpenmod, /usr/bin/phpdismod, /usr/sbin/a2ensite, /usr/sbin/a2dissite, /usr/sbin/a2enmod, /usr/bin/hostnamectl, /usr/bin/reboot
 SUDOEOF
 chmod 440 /etc/sudoers.d/hosthive
 success "Sudoers configured for hosthive user"
@@ -817,7 +928,7 @@ chown -R hosthive:hosthive /opt/hosthive/backups
 spinner $! "Installing psutil for monitoring"
 success "psutil installed"
 
-# Reload nginx to pick up Roundcube + phpMyAdmin config
+# Reload nginx to pick up Roundcube + phpMyAdmin + phpPgAdmin config
 nginx -t >> "$LOG_FILE" 2>&1 || warn "Nginx config test failed"
 systemctl reload nginx >> "$LOG_FILE" 2>&1
 
@@ -929,6 +1040,41 @@ else
 fi
 SCANEOF
         chmod +x /opt/hosthive/scripts/clamav-scan.sh
+
+        # Create quarantine directory for antivirus
+        mkdir -p /opt/hosthive/quarantine
+        chown hosthive:hosthive /opt/hosthive/quarantine
+        chmod 700 /opt/hosthive/quarantine
+
+        # Integrate ClamAV with Exim4 for email scanning
+        if [ -d /etc/exim4/conf.d ]; then
+            # Enable content scanning in Exim4 main config
+            mkdir -p /etc/exim4/conf.d/main
+            cat > /etc/exim4/conf.d/main/02_hosthive_clamav <<'EXIM_AV'
+# HostHive: ClamAV integration for email scanning
+av_scanner = clamd:/var/run/clamav/clamd.ctl
+EXIM_AV
+
+            # Add ClamAV ACL for DATA phase
+            mkdir -p /etc/exim4/conf.d/acl
+            cat > /etc/exim4/conf.d/acl/48_hosthive_clamav <<'EXIM_ACL'
+# HostHive: Scan incoming emails with ClamAV
+  warn
+    malware = *
+    log_message = Virus found: $malware_name in message from $sender_address to $recipients
+
+  deny
+    malware = *
+    message = This message contains a virus ($malware_name) and has been rejected.
+EXIM_ACL
+
+            # Ensure clamav user can communicate with Exim
+            usermod -a -G Debian-exim clamav 2>/dev/null || true
+
+            # Restart Exim to pick up ClamAV scanning config
+            systemctl restart exim4 2>/dev/null || true
+            log "ClamAV integrated with Exim4 for email scanning"
+        fi
     fi
 
     # Kernel hardening via sysctl

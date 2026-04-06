@@ -30,6 +30,20 @@ class S3BackupService:
 
     def __init__(self, encrypted_config: str) -> None:
         config = json.loads(decrypt_value(encrypted_config, settings.SECRET_KEY))
+        self._init_from_dict(config)
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "S3BackupService":
+        """Create an instance directly from a plain config dict.
+
+        Use this when the config has already been decrypted (e.g. from the
+        integrations table which uses its own Fernet derivation).
+        """
+        instance = cls.__new__(cls)
+        instance._init_from_dict(config)
+        return instance
+
+    def _init_from_dict(self, config: Dict[str, Any]) -> None:
         self._endpoint: str = config["endpoint"].rstrip("/")
         self._bucket: str = config["bucket"]
         self._access_key: str = config["access_key"]

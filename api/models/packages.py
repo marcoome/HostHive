@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from decimal import Decimal
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, Float, Integer, Numeric, String
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from api.models.base import TimestampedBase
@@ -18,6 +19,13 @@ class Package(TimestampedBase):
     __tablename__ = "packages"
 
     name: Mapped[str] = mapped_column(String(128), unique=True)
+
+    # null = global/admin package; non-null = reseller-owned package
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        default=None,
+        index=True,
+    )
     disk_quota_mb: Mapped[int] = mapped_column(Integer, default=5120)
     bandwidth_gb: Mapped[int] = mapped_column(Integer, default=100)
     max_domains: Mapped[int] = mapped_column(Integer, default=5)
@@ -25,6 +33,9 @@ class Package(TimestampedBase):
     max_email_accounts: Mapped[int] = mapped_column(Integer, default=20)
     max_ftp_accounts: Mapped[int] = mapped_column(Integer, default=5)
     max_cron_jobs: Mapped[int] = mapped_column(Integer, default=5)
+    max_dns_domains: Mapped[int] = mapped_column(Integer, default=10)
+    max_mail_domains: Mapped[int] = mapped_column(Integer, default=10)
+    max_backups: Mapped[int] = mapped_column(Integer, default=5)
     price_monthly: Mapped[Decimal] = mapped_column(
         Numeric(precision=10, scale=2), default=Decimal("0.00"),
     )
@@ -42,6 +53,10 @@ class Package(TimestampedBase):
     redis_memory_mb: Mapped[int] = mapped_column(Integer, default=64)
     memcached_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     memcached_memory_mb: Mapped[int] = mapped_column(Integer, default=64)
+
+    # Shell access
+    shell_access: Mapped[bool] = mapped_column(Boolean, default=False)
+    shell_type: Mapped[str] = mapped_column(String(16), default="nologin")  # nologin, bash, sh, rbash
 
     # Relationships
     # NOTE: Use "noload" to prevent circular eager loading.

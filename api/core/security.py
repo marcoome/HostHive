@@ -75,6 +75,15 @@ def create_refresh_token(user_id: uuid.UUID) -> str:
     )
 
 
+def create_2fa_pending_token(user_id: uuid.UUID) -> str:
+    """Create a short-lived token that only grants access to the 2FA login endpoint."""
+    return _build_token(
+        {"sub": str(user_id)},
+        timedelta(minutes=5),
+        token_type="2fa_pending",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Token verification
 # ---------------------------------------------------------------------------

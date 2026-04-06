@@ -338,6 +338,42 @@
 }
 
 /* ========================================
+   Mobile Responsiveness
+   ======================================== */
+
+/* Prevent horizontal overflow on the root */
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+/* Prevent iOS input zoom (font-size >= 16px) */
+@media screen and (max-width: 640px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+/* Touch-friendly tap targets */
+@media (pointer: coarse) {
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger,
+  .btn-ghost {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* Smooth momentum scrolling on iOS */
+.-webkit-overflow-scrolling-touch {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ========================================
    Badge utilities
    ======================================== */
 

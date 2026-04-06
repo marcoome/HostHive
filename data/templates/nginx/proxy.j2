@@ -1,0 +1,120 @@
+{# proxy.j2 -- Reverse proxy to a backend service #}
+{% if ssl %}
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name {{ domain }} www.{{ domain }};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+
+    server_name {{ domain }} www.{{ domain }};
+
+    access_log /var/log/nginx/{{ domain }}.access.log;
+    error_log  /var/log/nginx/{{ domain }}.error.log;
+
+    # SSL configuration
+    ssl_certificate     {{ ssl_certificate }};
+    ssl_certificate_key {{ ssl_certificate_key }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+{% if geo_enabled %}
+
+    # GeoIP geo-blocking (managed by HostHive WAF)
+    if ($geo_blocked) {
+        return 403;
+    }
+{% endif %}
+
+    location / {
+        proxy_pass http://127.0.0.1:{{ backend_port | default(8080) }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+        proxy_buffering off;
+    }
+{% if custom_error_pages %}
+
+    # Custom error pages
+{% for code, page in custom_error_pages.items() %}
+    error_page {{ code }} {{ page }};
+{% endfor %}
+{% endif %}
+{% if custom_nginx_config %}
+
+    # Custom directives
+{{ custom_nginx_config | indent(4, first=true) }}
+{% endif %}
+}
+{% else %}
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name {{ domain }} www.{{ domain }};
+
+    access_log /var/log/nginx/{{ domain }}.access.log;
+    error_log  /var/log/nginx/{{ domain }}.error.log;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+{% if geo_enabled %}
+
+    # GeoIP geo-blocking (managed by HostHive WAF)
+    if ($geo_blocked) {
+        return 403;
+    }
+{% endif %}
+
+    location / {
+        proxy_pass http://127.0.0.1:{{ backend_port | default(8080) }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+        proxy_buffering off;
+    }
+{% if custom_error_pages %}
+
+    # Custom error pages
+{% for code, page in custom_error_pages.items() %}
+    error_page {{ code }} {{ page }};
+{% endfor %}
+{% endif %}
+{% if custom_nginx_config %}
+
+    # Custom directives
+{{ custom_nginx_config | indent(4, first=true) }}
+{% endif %}
+}
+{% endif %}

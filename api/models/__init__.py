@@ -13,17 +13,21 @@ from api.models.ai import (
 from api.models.backups import Backup, BackupType
 from api.models.base import TimestampedBase
 from api.models.cron_jobs import CronJob
-from api.models.databases import Database, DbType
+from api.models.databases import Database, DatabaseUser, DbType
 from api.models.dns_records import DnsRecord
 from api.models.dns_zones import DnsZone
 from api.models.domains import Domain
 from api.models.email_accounts import EmailAccount
 from api.models.email_aliases import EmailAlias
+from api.models.mailing_list import MailingList, MailingListMember
 from api.models.ftp_accounts import FtpAccount
+from api.models.directory_privacy import DirectoryPrivacy
+from api.models.git_deploy import DeployLog, GitDeployment
 from api.models.packages import Package
+from api.models.redirects import Redirect
 from api.models.server_stats import ServerStat
 from api.models.ssl_certificates import SSLCertificate as SslCertificate
-from api.models.users import User, UserRole
+from api.models.users import BackupFrequency, User, UserRole
 from api.models.monitoring import (
     AnomalyAlert,
     AnomalySeverity,
@@ -36,8 +40,12 @@ from api.models.reseller import ResellerBranding, ResellerLimit
 from api.models.docker import DockerContainer
 from api.models.user_environment import UserEnvironment
 from api.models.apps import App
+from api.models.runtime_app import RuntimeApp
 from api.models.notifications import Notification, NotificationLevel
 from api.models.resources import ResourceLimit
+from api.models.webauthn import WebAuthnCredential
+from api.models.antivirus import QuarantineEntry, ScanResult, ScanStatus
+from api.models.dns_cluster import DnsClusterNode
 from api.models.integrations import (
     ApiKey,
     ApiKeyScope,
@@ -52,6 +60,9 @@ from api.models.integrations import (
 
 __all__ = [
     "ActivityLog",
+    "QuarantineEntry",
+    "ScanResult",
+    "ScanStatus",
     "AiConversation",
     "App",
     "AiInsight",
@@ -65,11 +76,15 @@ __all__ = [
     "ApiKey",
     "ApiKeyScope",
     "Backup",
+    "BackupFrequency",
     "BackupType",
     "CronJob",
     "Database",
+    "DatabaseUser",
     "DbType",
+    "DirectoryPrivacy",
     "DockerContainer",
+    "DnsClusterNode",
     "DnsRecord",
     "DnsZone",
     "Domain",
@@ -77,6 +92,8 @@ __all__ = [
     "EmailAccount",
     "EmailAlias",
     "FtpAccount",
+    "GitDeployment",
+    "DeployLog",
     "HealthCheck",
     "HealthStatus",
     "IncidentSeverity",
@@ -87,9 +104,11 @@ __all__ = [
     "Notification",
     "NotificationLevel",
     "Package",
+    "Redirect",
     "ResellerBranding",
     "ResellerLimit",
     "ResourceLimit",
+    "RuntimeApp",
     "ServerStat",
     "SslCertificate",
     "StatusIncident",
@@ -97,6 +116,7 @@ __all__ = [
     "User",
     "UserRole",
     "UserEnvironment",
+    "WebAuthnCredential",
     "WebhookDirection",
     "WebhookLog",
 ]

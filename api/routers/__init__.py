@@ -6,8 +6,10 @@ from api.routers.users import router as users_router
 from api.routers.domains import router as domains_router
 from api.routers.databases import router as databases_router
 from api.routers.email import router as email_router
+from api.routers.directory_privacy import router as directory_privacy_router
 from api.routers.dns import router as dns_router
 from api.routers.ftp import router as ftp_router
+from api.routers.git_deploy import router as git_deploy_router
 from api.routers.cron import router as cron_router
 from api.routers.ssl import router as ssl_router
 from api.routers.backups import router as backups_router
@@ -33,6 +35,7 @@ from api.routers.waf import router as waf_router
 from api.routers.resources import router as resources_router
 from api.routers.apps import router as apps_router
 from api.routers.email_auth import router as email_auth_router
+from api.routers.email_deliverability import router as email_deliverability_router
 from api.routers.settings import router as settings_router
 from api.routers.mcp import router as mcp_router
 from api.routers.cache import router as cache_router
@@ -42,6 +45,13 @@ from api.routers.security import router as security_router
 from api.routers.system import router as system_router
 from api.routers.ip_manager import router as ip_manager_router
 from api.routers.logs import router as logs_router
+from api.routers.webauthn import router as webauthn_router
+from api.routers.antivirus import router as antivirus_router
+from api.routers.translations import router as translations_router
+from api.routers.migration import router as migration_router
+from api.routers.redirects import router as redirects_router
+from api.routers.mailing_lists import router as mailing_lists_router
+from api.routers.runtime import router as runtime_router
 
 __all__ = [
     "ai_router",
@@ -50,8 +60,10 @@ __all__ = [
     "domains_router",
     "databases_router",
     "email_router",
+    "directory_privacy_router",
     "dns_router",
     "ftp_router",
+    "git_deploy_router",
     "cron_router",
     "ssl_router",
     "backups_router",
@@ -77,6 +89,7 @@ __all__ = [
     "resources_router",
     "apps_router",
     "email_auth_router",
+    "email_deliverability_router",
     "settings_router",
     "mcp_router",
     "cache_router",
@@ -86,4 +99,11 @@ __all__ = [
     "system_router",
     "ip_manager_router",
     "logs_router",
+    "webauthn_router",
+    "antivirus_router",
+    "translations_router",
+    "migration_router",
+    "redirects_router",
+    "mailing_lists_router",
+    "runtime_router",
 ]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -17,9 +19,34 @@ from api.models.users import User
 from api.schemas.packages import PackageCreate, PackageResponse, PackageUpdate
 from api.schemas.users import UserResponse
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 _admin = require_role("admin")
+
+SHELL_PATHS = {
+    "nologin": "/usr/sbin/nologin",
+    "bash": "/bin/bash",
+    "sh": "/bin/sh",
+    "rbash": "/bin/rbash",
+}
+
+
+async def _apply_shell_for_user(username: str, shell_access: bool, shell_type: str) -> None:
+    """Set the login shell for a system user via usermod."""
+    shell = SHELL_PATHS.get(shell_type, "/usr/sbin/nologin") if shell_access else "/usr/sbin/nologin"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "usermod", "-s", shell, username,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            logger.warning("usermod failed for %s (rc=%s)", username, proc.returncode)
+    except Exception as exc:
+        logger.warning("Failed to set shell for %s: %s", username, exc)
 
 
 async def _get_package_or_404(pkg_id: uuid.UUID, db: AsyncSession) -> Package:
@@ -105,10 +132,21 @@ async def update_package(
 ):
     pkg = await _get_package_or_404(pkg_id, db)
     update_data = body.model_dump(exclude_unset=True)
+
+    shell_changed = "shell_access" in update_data or "shell_type" in update_data
+
     for field, value in update_data.items():
         setattr(pkg, field, value)
     db.add(pkg)
     await db.flush()
+
+    # If shell settings changed, apply to all users on this package
+    if shell_changed:
+        users_result = await db.execute(
+            select(User).where(User.package_id == pkg_id)
+        )
+        for user in users_result.scalars().all():
+            await _apply_shell_for_user(user.username, pkg.shell_access, pkg.shell_type)
 
     _log(db, request, admin.id, "packages.update", f"Updated package {pkg.name}")
     return PackageResponse.model_validate(pkg)

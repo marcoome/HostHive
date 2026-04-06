@@ -532,6 +532,453 @@ Model Context Protocol server for AI/LLM tool integration. Uses JSON-RPC protoco
 
 ---
 
+### TOTP Two-Factor Authentication (`/api/v1/auth/2fa`)
+
+TOTP-based two-factor authentication. Mounted under the auth prefix. Setup generates a QR code and backup codes; login requires a pending token from the initial password auth step.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/auth/2fa/status` | Check if 2FA is enabled for current user | Bearer |
+| POST | `/auth/2fa/setup` | Generate TOTP secret, QR code, and backup codes | Bearer |
+| POST | `/auth/2fa/verify` | Verify TOTP code to confirm setup (enables 2FA) | Bearer |
+| POST | `/auth/2fa/disable` | Disable 2FA (requires current TOTP code) | Bearer |
+| POST | `/auth/2fa/login` | Complete login with TOTP code (after password auth) | None (pending token in body) |
+| POST | `/auth/2fa/backup-verify` | Complete login with a one-time backup code | None (pending token in body) |
+
+**Example -- Setup 2FA:**
+
+```http
+POST /api/v1/auth/2fa/setup HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+```json
+{
+  "secret": "JBSWY3DPEHPK3PXP",
+  "otpauth_uri": "otpauth://totp/NovaPanel:admin@example.com?secret=JBSWY3DPEHPK3PXP&issuer=NovaPanel",
+  "qr_code_base64": "iVBORw0KGgo...",
+  "backup_codes": ["a1b2c3d4", "e5f6g7h8", "..."]
+}
+```
+
+---
+
+### WebAuthn / Passkeys (`/api/v1/auth/webauthn`)
+
+FIDO2/WebAuthn passwordless authentication. Supports passkey registration for logged-in users and passwordless login. Challenges are stored in Redis with a 5-minute TTL.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| POST | `/auth/webauthn/register/options` | Generate registration options for a new passkey | Bearer |
+| POST | `/auth/webauthn/register/verify` | Verify attestation and store new credential | Bearer |
+| POST | `/auth/webauthn/login/options` | Generate authentication options (optional username hint) | None |
+| POST | `/auth/webauthn/login/verify` | Verify assertion and return JWT tokens | None |
+| GET | `/auth/webauthn/credentials` | List all WebAuthn credentials for current user | Bearer |
+| DELETE | `/auth/webauthn/credentials/{credential_id}` | Delete a WebAuthn credential | Bearer |
+
+---
+
+### Dashboard (`/api/v1/dashboard`)
+
+Aggregated dashboard statistics. Admins see full server stats and historical data; regular users see only their own resource counts.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/dashboard` | Get dashboard stats (CPU, RAM, disk, resource counts, history) | Bearer |
+
+**Example -- Dashboard Stats (admin):**
+
+```http
+GET /api/v1/dashboard HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+```json
+{
+  "cpu_usage": 12.5,
+  "cpu_cores": 4,
+  "ram_used": 2147483648,
+  "ram_total": 8589934592,
+  "ram_usage": 25.0,
+  "disk_used": 42949672960,
+  "disk_total": 107374182400,
+  "disk_usage": 40,
+  "domains_count": 15,
+  "databases_count": 8,
+  "email_count": 22,
+  "ftp_count": 5,
+  "user_count": 10,
+  "cpu_history": [10.2, 11.5, 12.5],
+  "ram_history": [24.1, 24.8, 25.0],
+  "history_timestamps": ["2026-04-06T10:00:00", "2026-04-06T10:05:00", "2026-04-06T10:10:00"]
+}
+```
+
+---
+
+### PHP (`/api/v1/php`) -- Admin Only
+
+Manage PHP installations, php.ini configuration, extensions, and FPM pools on Debian 12. Only whitelisted php.ini directives may be updated for safety.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/php/versions` | List all installed PHP versions with FPM status | Admin |
+| GET | `/php/{version}/config` | Get parsed php.ini settings for a version and SAPI | Admin |
+| PUT | `/php/{version}/config` | Update php.ini directives (whitelisted only) | Admin |
+| GET | `/php/{version}/extensions` | List loaded and available PHP extensions | Admin |
+| POST | `/php/{version}/extensions` | Enable or disable a PHP extension | Admin |
+| POST | `/php/install/{version}` | Install a new PHP version from Sury repository | Admin |
+| DELETE | `/php/{version}` | Uninstall a PHP version (refuses to remove last) | Admin |
+| GET | `/php/{version}/fpm/status` | Get PHP-FPM service and pool status | Admin |
+
+**Example -- Update PHP Config:**
+
+```http
+PUT /api/v1/php/8.2/config HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "directives": {
+    "memory_limit": "512M",
+    "upload_max_filesize": "128M",
+    "post_max_size": "128M"
+  },
+  "sapi": "fpm"
+}
+```
+
+```json
+{
+  "detail": "PHP 8.2 (fpm) configuration updated.",
+  "updated_directives": {
+    "memory_limit": "512M",
+    "upload_max_filesize": "128M",
+    "post_max_size": "128M"
+  },
+  "ini_path": "/etc/php/8.2/fpm/php.ini",
+  "backup_path": "/etc/php/8.2/fpm/php.ini.bak.hosthive",
+  "warnings": []
+}
+```
+
+---
+
+### Security (`/api/v1/security`) -- Admin Only
+
+Security scanning and hardening: comprehensive audits, ClamAV malware scanning, SSH configuration analysis and hardening, file permission checks, system update management, open port scanning, and login history analysis.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/security/scan` | Run comprehensive security audit (SSH, ports, permissions, updates) | Admin |
+| GET | `/security/malware` | ClamAV service status and last scan summary | Admin |
+| POST | `/security/malware/scan` | Trigger ClamAV scan on a specific path | Admin |
+| GET | `/security/ssh` | Analyze current SSH configuration for security issues | Admin |
+| POST | `/security/ssh/harden` | Apply SSH hardening settings to sshd_config | Admin |
+| GET | `/security/permissions` | Check for common file permission security issues | Admin |
+| GET | `/security/updates` | Check for available system updates | Admin |
+| POST | `/security/updates/apply` | Apply security or system updates | Admin |
+| GET | `/security/ports` | Scan for open listening ports | Admin |
+| GET | `/security/login-history` | Parse recent login attempts from auth.log | Admin |
+
+**Example -- Security Scan:**
+
+```http
+GET /api/v1/security/scan HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+```json
+{
+  "timestamp": "2026-04-06T12:00:00+00:00",
+  "checks": [
+    {"name": "SSH root login", "status": "pass", "score": 10},
+    {"name": "Open ports", "status": "warn", "score": 5}
+  ],
+  "score": 75,
+  "max_score": 100
+}
+```
+
+---
+
+### Settings (`/api/v1/settings`)
+
+User notification preferences.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/settings/notifications` | Get notification preferences for current user | Bearer |
+| PUT | `/settings/notifications` | Update notification preferences | Bearer |
+
+---
+
+### Cache (`/api/v1/cache`) -- Admin Only
+
+Manage Redis, Memcached, Varnish, and PHP OPcache cache services. Includes status monitoring, flushing, and statistics.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/cache/status` | Overview of all cache services (Redis, Memcached, Varnish, OPcache) | Admin |
+| GET | `/cache/redis/info` | Parsed Redis INFO statistics | Admin |
+| POST | `/cache/redis/flush` | Flush entire Redis cache (FLUSHALL) | Admin |
+| POST | `/cache/redis/flush-db/{db_index}` | Flush a specific Redis database (0-15) | Admin |
+| GET | `/cache/opcache/status` | OPcache statistics (memory, hit rate, cached scripts) | Admin |
+| POST | `/cache/opcache/reset` | Reset PHP OPcache (CLI + FPM context) | Admin |
+| GET | `/cache/varnish/status` | Varnish cache statistics | Admin |
+| POST | `/cache/varnish/purge` | Purge entire Varnish cache | Admin |
+| POST | `/cache/varnish/purge-url` | Purge Varnish entries matching a URL pattern | Admin |
+| GET | `/cache/memcached/stats` | Memcached statistics (connections, items, hit/miss) | Admin |
+| POST | `/cache/memcached/flush` | Flush entire Memcached cache | Admin |
+
+**Example -- Redis Info:**
+
+```http
+GET /api/v1/cache/redis/info HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+```json
+{
+  "connected_clients": "5",
+  "used_memory_human": "2.50M",
+  "used_memory_peak_human": "3.10M",
+  "total_commands_processed": "154832",
+  "keyspace_hits": "98421",
+  "keyspace_misses": "1204",
+  "uptime_in_seconds": "432000",
+  "redis_version": "7.0.15",
+  "db_count": 2
+}
+```
+
+---
+
+### Antivirus (`/api/v1/antivirus`) -- Admin Only
+
+ClamAV antivirus management: on-demand scanning (async via Celery), quarantine file management, ClamAV status monitoring, and virus definition database updates.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/antivirus/status` | ClamAV installation status, daemon state, and database info | Admin |
+| POST | `/antivirus/scan` | Trigger full antivirus scan of /home (async via Celery) | Admin |
+| POST | `/antivirus/scan/path` | Trigger antivirus scan on a specific path (async) | Admin |
+| GET | `/antivirus/scans` | List recent scan results (paginated) | Admin |
+| GET | `/antivirus/scans/{scan_id}` | Get scan details including quarantine entries | Admin |
+| POST | `/antivirus/quarantine/{file_id}/restore` | Restore a quarantined file to original location | Admin |
+| POST | `/antivirus/quarantine/{file_id}/delete` | Permanently delete a quarantined file | Admin |
+| POST | `/antivirus/update` | Trigger ClamAV virus definition database update via freshclam | Admin |
+
+**Example -- Trigger Path Scan:**
+
+```http
+POST /api/v1/antivirus/scan/path HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "path": "/home/johndoe"
+}
+```
+
+```json
+{
+  "scan_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "celery_task_id": "abc123-task-id",
+  "status": "pending",
+  "path": "/home/johndoe"
+}
+```
+
+---
+
+### IP Manager (`/api/v1/ip`) -- Admin Only
+
+Manage server IP addresses, IP blacklist (UFW deny rules), and IP whitelist (UFW allow rules).
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/ip/addresses` | List all IP addresses on network interfaces | Admin |
+| POST | `/ip/addresses` | Add an IP address to a network interface | Admin |
+| DELETE | `/ip/addresses/{ip}` | Remove an IP address from a network interface | Admin |
+| GET | `/ip/blacklist` | List all blocked (denied) IPs from UFW/iptables | Admin |
+| POST | `/ip/blacklist` | Block an IP address (UFW deny rule) | Admin |
+| DELETE | `/ip/blacklist/{ip}` | Unblock an IP address (remove UFW deny rule) | Admin |
+| GET | `/ip/whitelist` | List all whitelisted (allowed) IPs from UFW | Admin |
+| POST | `/ip/whitelist` | Whitelist an IP address (UFW allow rule) | Admin |
+
+**Example -- Block IP:**
+
+```http
+POST /api/v1/ip/blacklist HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "ip": "203.0.113.50",
+  "comment": "Brute force attacker"
+}
+```
+
+```json
+{
+  "status": "blocked",
+  "ip": "203.0.113.50",
+  "comment": "Brute force attacker",
+  "detail": "IP 203.0.113.50 has been blocked."
+}
+```
+
+---
+
+### Logs (`/api/v1/logs`) -- Admin Only
+
+Advanced log browsing, searching, rotation, and access log statistics. Extends basic log reading with paginated reading, regex search, logrotate integration, and parsed nginx access stats. Falls back to journalctl when log files are unavailable.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/logs/available` | List all known log files with size and availability | Admin |
+| GET | `/logs/{name}` | Read a log file with pagination (lines, offset, order) | Admin |
+| GET | `/logs/{name}/search` | Search through a log file (regex supported) | Admin |
+| POST | `/logs/rotate` | Force log rotation using logrotate | Admin |
+| GET | `/logs/access-stats` | Parsed nginx access log statistics (top IPs, URIs, status codes) | Admin |
+
+**Example -- Search Logs:**
+
+```http
+GET /api/v1/logs/nginx-error/search?q=502&lines=1000&case_sensitive=false HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+```json
+{
+  "name": "nginx-error",
+  "file": "/var/log/nginx/error.log",
+  "query": "502",
+  "case_sensitive": false,
+  "matches": ["123:2026/04/06 ... 502 Bad Gateway ..."],
+  "match_count": 5,
+  "searched_lines": 1000
+}
+```
+
+---
+
+### System (`/api/v1/system`) -- Admin Only
+
+Detailed system information: OS, kernel, CPU, RAM, disks, network interfaces, SMART disk health, top processes, hostname management, and server reboot control.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/system/info` | Comprehensive system info (OS, kernel, CPU, RAM, disks, uptime) | Admin |
+| GET | `/system/processes` | Top processes sorted by CPU or memory usage | Admin |
+| GET | `/system/network` | Network interfaces, routes, DNS resolvers, public IP | Admin |
+| GET | `/system/disk/smart` | SMART disk health information (requires smartmontools) | Admin |
+| GET | `/system/hostname` | Get current system hostname and FQDN | Admin |
+| PUT | `/system/hostname` | Change system hostname | Admin |
+| POST | `/system/reboot` | Reboot server (requires explicit confirmation) | Admin |
+
+**Example -- Reboot Server:**
+
+```http
+POST /api/v1/system/reboot HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "confirm": true,
+  "delay_minutes": 5
+}
+```
+
+```json
+{
+  "status": "rebooting",
+  "delay_minutes": 5,
+  "detail": "Server reboot initiated. System will reboot in 5 minute(s)."
+}
+```
+
+---
+
+### Translations (`/api/v1/translations`)
+
+i18n language management with AI-powered auto-translation. Manages locale JSON files for the frontend. Includes listing, editing, import/export, missing key detection, and AI batch translation via the unified AIClient.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/translations/languages` | List all available languages with translation progress | Bearer |
+| POST | `/translations/languages` | Add a new language (creates empty locale skeleton) | Admin |
+| DELETE | `/translations/languages/{lang}` | Delete a language (cannot delete English) | Admin |
+| GET | `/translations/{lang}` | Get all translation strings for a language | Bearer |
+| PUT | `/translations/{lang}` | Update translations for a language | Admin |
+| GET | `/translations/missing/{lang}` | List missing/empty keys compared to English | Bearer |
+| POST | `/translations/export/{lang}` | Export language file as JSON download | Bearer |
+| POST | `/translations/import` | Import a JSON translation file (multipart upload) | Admin |
+| POST | `/translations/auto-translate` | AI-powered auto-translation of UI strings (rate limited: 5/min) | Admin |
+
+**Example -- Auto-translate Missing Keys:**
+
+```http
+POST /api/v1/translations/auto-translate HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "target_lang": "de",
+  "all_missing": true
+}
+```
+
+```json
+{
+  "target_lang": "de",
+  "language_name": "German",
+  "translated_count": 42,
+  "translations": {
+    "common": {
+      "save": "Speichern",
+      "cancel": "Abbrechen"
+    }
+  },
+  "saved": true
+}
+```
+
+---
+
+### Migration (`/api/v1/admin/migration`) -- Admin Only
+
+Import server accounts from cPanel and HestiaCP backups. Supports upload (up to 10 GB), analysis, and async execution via Celery.
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| POST | `/admin/migration/upload` | Upload a cPanel or HestiaCP backup file (.tar.gz) | Admin |
+| POST | `/admin/migration/analyze` | Extract and analyze uploaded backup contents | Admin |
+| POST | `/admin/migration/execute` | Start migration asynchronously (requires prior analyze) | Admin |
+| GET | `/admin/migration/status` | Poll migration progress by backup_id | Admin |
+
+**Example -- Upload Backup:**
+
+```http
+POST /api/v1/admin/migration/upload HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: multipart/form-data
+
+[file: backup-johndoe.tar.gz]
+```
+
+```json
+{
+  "backup_id": "abc123def456",
+  "filename": "backup-johndoe.tar.gz",
+  "size_bytes": 524288000,
+  "detail": "Backup uploaded successfully. Call /analyze to inspect contents."
+}
+```
+
+---
+
 ## WebSocket Endpoints
 
 All WebSocket endpoints authenticate via a `token` query parameter containing a valid JWT access token.

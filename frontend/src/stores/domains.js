@@ -49,5 +49,44 @@ export const useDomainsStore = defineStore('domains', () => {
     domains.value = domains.value.filter(d => d.id !== id)
   }
 
-  return { domains, loading, currentDomain, fetchAll, fetchOne, create, update, remove }
+  // --- Subdomain methods ---
+  const subdomains = ref([])
+  const subdomainsLoading = ref(false)
+
+  async function fetchSubdomains(domainId) {
+    if (!domainId) return
+    subdomainsLoading.value = true
+    try {
+      const { data } = await client.get(`/domains/${domainId}/subdomains`)
+      subdomains.value = data.items || []
+      return subdomains.value
+    } finally {
+      subdomainsLoading.value = false
+    }
+  }
+
+  async function createSubdomain(domainId, payload) {
+    const { data } = await client.post(`/domains/${domainId}/subdomains`, payload)
+    subdomains.value.unshift(data)
+    return data
+  }
+
+  async function updateSubdomain(domainId, subId, payload) {
+    const { data } = await client.put(`/domains/${domainId}/subdomains/${subId}`, payload)
+    const idx = subdomains.value.findIndex(s => s.id === subId)
+    if (idx !== -1) subdomains.value[idx] = data
+    return data
+  }
+
+  async function removeSubdomain(domainId, subId) {
+    await client.delete(`/domains/${domainId}/subdomains/${subId}`)
+    subdomains.value = subdomains.value.filter(s => s.id !== subId)
+  }
+
+  return {
+    domains, loading, currentDomain,
+    fetchAll, fetchOne, create, update, remove,
+    subdomains, subdomainsLoading,
+    fetchSubdomains, createSubdomain, updateSubdomain, removeSubdomain,
+  }
 })

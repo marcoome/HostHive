@@ -55,6 +55,18 @@ beat_schedule = {
         "options": {"queue": "mail"},
     },
 
+    "update_quota_usage": {
+        "task": "api.tasks.mail_tasks.update_quota_usage",
+        "schedule": 900.0,  # every 15 minutes
+        "options": {"queue": "mail"},
+    },
+    # ── Antivirus ─────────────────────────────────────────────────────
+    "scheduled_antivirus_scan": {
+        "task": "api.tasks.server_tasks.scheduled_antivirus_scan",
+        "schedule": crontab(hour=1, minute=30),  # nightly at 01:30 UTC
+        "options": {"queue": "security"},
+    },
+
     # ── Notifications ──────────────────────────────────────────────────
     "send_expiry_alerts": {
         "task": "api.tasks.notification_tasks.send_expiry_alerts",
@@ -83,10 +95,31 @@ beat_schedule = {
         "schedule": 3600.0,  # every hour
         "options": {"queue": "monitoring"},
     },
+    "aggregate_reseller_bandwidth": {
+        "task": "api.tasks.monitoring_tasks.aggregate_reseller_bandwidth",
+        "schedule": 3600.0,  # every hour (runs after domain bandwidth)
+        "options": {"queue": "monitoring"},
+    },
     "cleanup_old_health_checks": {
         "task": "api.tasks.monitoring_tasks.cleanup_old_health_checks",
         "schedule": crontab(hour=4, minute=30),  # daily at 04:30 UTC
         "options": {"queue": "maintenance"},
+    },
+
+    # ── DNS Cluster ────────────────────────────────────────────────────
+    "dns_cluster_verify_sync": {
+        "task": "api.tasks.dns_cluster_tasks.verify_cluster_sync",
+        "schedule": 900.0,  # every 15 minutes
+        "options": {"queue": "dns"},
+    },
+
+    # ── WAF / GeoIP ─────────────────────────────────────────────────────
+    "update_geoip_database": {
+        "task": "api.tasks.waf_tasks.update_geoip_database",
+        "schedule": crontab(
+            hour=3, minute=30, day_of_week="wednesday",
+        ),  # weekly on Wednesday at 03:30 UTC
+        "options": {"queue": "security"},
     },
 
     # ── AI ─────────────────────────────────────────────────────────────
@@ -118,4 +151,7 @@ task_routes = {
     "api.tasks.notification_tasks.*": {"queue": "notifications"},
     "api.tasks.monitoring_tasks.*": {"queue": "monitoring"},
     "api.tasks.ai_tasks.*": {"queue": "ai"},
+    "api.tasks.dns_cluster_tasks.*": {"queue": "dns"},
+    "api.tasks.waf_tasks.*": {"queue": "security"},
+    "api.tasks.migration_tasks.*": {"queue": "migration"},
 }

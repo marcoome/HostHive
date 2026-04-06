@@ -21,6 +21,8 @@ from api.models.base import TimestampedBase
 class IntegrationName(str, enum.Enum):
     CLOUDFLARE = "cloudflare"
     S3 = "s3"
+    SFTP = "sftp"
+    RCLONE = "rclone"
     TELEGRAM = "telegram"
     SLACK = "slack"
     DISCORD = "discord"

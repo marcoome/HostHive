@@ -25,6 +25,35 @@
             </div>
           </div>
           <div class="flex items-center gap-3">
+            <!-- Cloudflare status indicator -->
+            <div v-if="dns.cfStatus.enabled" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-orange-500/10 border border-orange-500/20">
+              <span class="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></span>
+              <span class="text-xs font-medium text-orange-400">CF Synced</span>
+            </div>
+            <!-- Cloudflare actions -->
+            <button
+              v-if="dns.cfStatus.enabled"
+              class="btn-secondary text-sm"
+              :disabled="dns.cfLoading"
+              @click="syncToCloudflare"
+            >
+              &#8635; Sync CF
+            </button>
+            <button
+              v-if="dns.cfStatus.enabled"
+              class="btn-secondary text-sm"
+              :disabled="dns.cfLoading"
+              @click="importFromCloudflare"
+            >
+              &#8615; CF Import
+            </button>
+            <button
+              class="text-sm"
+              :class="dns.cfStatus.enabled ? 'btn-ghost text-orange-400 hover:text-orange-300' : 'btn-secondary'"
+              @click="dns.cfStatus.enabled ? disableCloudflare() : (showCfConfig = true)"
+            >
+              {{ dns.cfStatus.enabled ? 'Disable CF' : 'Enable Cloudflare' }}
+            </button>
             <button class="btn-secondary text-sm" @click="exportZone">
               &#8682; Export
             </button>
@@ -35,6 +64,99 @@
         </div>
       </div>
     </div>
+
+    <!-- DNSSEC Section -->
+    <div class="glass rounded-2xl p-6 mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider">DNSSEC</h2>
+        <div class="flex items-center gap-3">
+          <!-- Status indicator -->
+          <div v-if="dns.dnssecStatus.enabled" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-500/10 border border-green-500/20">
+            <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+            <span class="text-xs font-medium text-green-400">DNSSEC Active</span>
+          </div>
+          <div v-else class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-500/10 border border-zinc-500/20">
+            <span class="w-2 h-2 rounded-full bg-zinc-500"></span>
+            <span class="text-xs font-medium text-zinc-400">DNSSEC Inactive</span>
+          </div>
+
+          <!-- Enable / Disable toggle -->
+          <button
+            v-if="dns.dnssecStatus.enabled"
+            class="btn-ghost text-sm text-red-400 hover:text-red-300"
+            :disabled="dns.dnssecLoading"
+            @click="disableDnssec"
+          >
+            Disable DNSSEC
+          </button>
+          <button
+            v-else
+            class="btn-secondary text-sm"
+            :disabled="dns.dnssecLoading"
+            @click="showDnssecConfig = true"
+          >
+            {{ dns.dnssecLoading ? 'Enabling...' : 'Enable DNSSEC' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- DNSSEC details when enabled -->
+      <div v-if="dns.dnssecStatus.enabled" class="space-y-3">
+        <div class="flex items-center gap-6 text-sm text-text-muted">
+          <span>Algorithm: <span class="text-text-primary font-mono">{{ dns.dnssecStatus.algorithm }}</span></span>
+        </div>
+
+        <!-- DS Record for registrar -->
+        <div v-if="dns.dnssecStatus.ds_record">
+          <label class="input-label">DS Record (provide to your domain registrar)</label>
+          <div class="flex items-start gap-2 mt-1">
+            <code class="flex-1 block bg-background/50 border border-border rounded-lg p-3 text-xs font-mono text-text-primary break-all select-all">{{ dns.dnssecStatus.ds_record }}</code>
+            <button
+              class="btn-secondary text-xs px-3 py-2 shrink-0"
+              @click="copyDsRecord"
+              title="Copy DS record"
+            >
+              Copy
+            </button>
+          </div>
+          <p class="text-xs text-text-muted mt-1">
+            Add this DS record at your domain registrar to complete the chain of trust.
+          </p>
+        </div>
+        <div v-else class="text-xs text-text-muted">
+          DS record not yet available. It will appear once zone signing completes.
+        </div>
+      </div>
+    </div>
+
+    <!-- DNSSEC Enable Configuration Modal -->
+    <Modal v-model="showDnssecConfig" title="Enable DNSSEC" size="md">
+      <div class="space-y-4">
+        <p class="text-sm text-text-muted">
+          Enabling DNSSEC will generate signing keys (KSK + ZSK) and sign the zone.
+          After enabling, you will need to add the DS record at your domain registrar.
+        </p>
+        <div>
+          <label class="input-label">Signing Algorithm</label>
+          <select v-model="dnssecConfig.algorithm" class="w-full">
+            <option value="ECDSAP256SHA256">ECDSAP256SHA256 (recommended)</option>
+            <option value="ECDSAP384SHA384">ECDSAP384SHA384</option>
+            <option value="RSASHA256">RSASHA256</option>
+            <option value="RSASHA512">RSASHA512</option>
+          </select>
+        </div>
+      </div>
+      <template #actions>
+        <button class="btn-secondary" @click="showDnssecConfig = false">Cancel</button>
+        <button
+          class="btn-primary"
+          :disabled="dns.dnssecLoading"
+          @click="enableDnssec"
+        >
+          {{ dns.dnssecLoading ? 'Enabling...' : 'Enable DNSSEC' }}
+        </button>
+      </template>
+    </Modal>
 
     <!-- Add Record Form -->
     <div class="glass rounded-2xl p-6 mb-6">
@@ -50,10 +172,49 @@
           <label class="input-label">Name</label>
           <input v-model="newRecord.name" type="text" class="w-full" placeholder="@" />
         </div>
-        <div class="flex-1 min-w-[200px]">
+        <!-- Standard value field (hidden for CAA which uses its own fields) -->
+        <div v-if="newRecord.type !== 'CAA'" class="flex-1 min-w-[200px]">
           <label class="input-label">Value</label>
-          <input v-model="newRecord.value" type="text" class="w-full" placeholder="IP address or hostname" required />
+          <input v-model="newRecord.value" type="text" class="w-full"
+            :placeholder="newRecord.type === 'PTR' ? 'Hostname (e.g. mail.example.com)' : 'IP address or hostname'"
+            :required="newRecord.type !== 'CAA'" />
         </div>
+
+        <!-- CAA-specific fields -->
+        <template v-if="newRecord.type === 'CAA'">
+          <div class="w-24">
+            <label class="input-label">Flags
+              <span class="tooltip-icon" title="0 = non-critical (CA may ignore unknown tags), 128 = critical (CA must understand the tag)">?</span>
+            </label>
+            <select v-model.number="newRecord.caaFlags" class="w-full">
+              <option :value="0">0</option>
+              <option :value="128">128</option>
+            </select>
+          </div>
+          <div class="w-32">
+            <label class="input-label">Tag
+              <span class="tooltip-icon" title="issue = authorize a CA for this domain, issuewild = authorize a CA for wildcard certs, iodef = report policy violations to this URL">?</span>
+            </label>
+            <select v-model="newRecord.caaTag" class="w-full">
+              <option value="issue">issue</option>
+              <option value="issuewild">issuewild</option>
+              <option value="iodef">iodef</option>
+            </select>
+          </div>
+          <div class="flex-1 min-w-[200px]">
+            <label class="input-label">Value
+              <span class="tooltip-icon" title="For issue/issuewild: CA domain (e.g. letsencrypt.org). For iodef: reporting URL (e.g. mailto:admin@example.com)">?</span>
+            </label>
+            <input v-model="newRecord.caaValue" type="text" class="w-full"
+              :placeholder="newRecord.caaTag === 'iodef' ? 'mailto:admin@example.com' : 'letsencrypt.org'" required />
+          </div>
+        </template>
+
+        <!-- PTR tooltip -->
+        <div v-if="newRecord.type === 'PTR'" class="text-xs text-text-muted self-end pb-2">
+          <span class="tooltip-icon" title="PTR records map IP addresses to hostnames (reverse DNS). The name should be the reverse IP (e.g. 1.0.168.192.in-addr.arpa) and the value is the hostname.">?</span>
+        </div>
+
         <div class="w-24">
           <label class="input-label">TTL</label>
           <input v-model.number="newRecord.ttl" type="number" class="w-full" min="60" />
@@ -174,9 +335,17 @@
                   @keydown.enter="saveEdit(record)"
                   @keydown.escape="cancelEdit"
                 />
-                <span v-else class="font-mono text-sm cursor-pointer hover:text-primary transition-colors break-all">
-                  {{ record.value }}
-                </span>
+                <template v-else>
+                  <!-- CAA: display parsed flags, tag, value -->
+                  <span v-if="record.type === 'CAA'" class="font-mono text-sm cursor-pointer hover:text-primary transition-colors break-all">
+                    <span class="badge badge-neutral text-xs mr-1">{{ parseCaa(record.value).flags }}</span>
+                    <span class="badge badge-info text-xs mr-1">{{ parseCaa(record.value).tag }}</span>
+                    <span>{{ parseCaa(record.value).value }}</span>
+                  </span>
+                  <span v-else class="font-mono text-sm cursor-pointer hover:text-primary transition-colors break-all">
+                    {{ record.value }}
+                  </span>
+                </template>
               </td>
 
               <!-- TTL -->
@@ -222,6 +391,16 @@
               <!-- Actions -->
               <td class="px-6 py-3 text-right">
                 <div class="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <!-- Cloudflare proxy toggle (orange cloud) for A/AAAA records -->
+                  <button
+                    v-if="dns.cfStatus.enabled && (record.type === 'A' || record.type === 'AAAA')"
+                    class="btn-ghost text-xs px-2 py-1"
+                    :class="record._cfProxied ? 'text-orange-400' : 'text-text-muted'"
+                    :title="record._cfProxied ? 'CF Proxy ON - click to disable' : 'CF Proxy OFF - click to enable'"
+                    @click="toggleCfProxy(record)"
+                  >
+                    &#9729;
+                  </button>
                   <button
                     class="btn-ghost text-xs px-2 py-1"
                     @click="saveRecordRow(record)"
@@ -277,6 +456,56 @@
       :destructive="true"
       @confirm="deleteRecord"
     />
+
+    <!-- Cloudflare Configuration Modal -->
+    <Modal v-model="showCfConfig" title="Configure Cloudflare" size="md">
+      <div class="space-y-4">
+        <p class="text-sm text-text-muted">
+          Enter your Cloudflare credentials to enable DNS sync. Records will be
+          automatically pushed to Cloudflare when created, updated, or deleted.
+        </p>
+        <div>
+          <label class="input-label">Cloudflare Email</label>
+          <input
+            v-model="cfConfig.email"
+            type="email"
+            class="w-full"
+            placeholder="you@example.com"
+            required
+          />
+        </div>
+        <div>
+          <label class="input-label">API Key (Global API Key)</label>
+          <input
+            v-model="cfConfig.api_key"
+            type="password"
+            class="w-full"
+            placeholder="Enter your Cloudflare Global API Key"
+            required
+          />
+        </div>
+        <div>
+          <label class="input-label">Cloudflare Zone ID</label>
+          <input
+            v-model="cfConfig.cf_zone_id"
+            type="text"
+            class="w-full"
+            placeholder="32-character zone ID from CF dashboard"
+            required
+          />
+        </div>
+      </div>
+      <template #actions>
+        <button class="btn-secondary" @click="showCfConfig = false">Cancel</button>
+        <button
+          class="btn-primary"
+          :disabled="dns.cfLoading || !cfConfig.email || !cfConfig.api_key || !cfConfig.cf_zone_id"
+          @click="enableCloudflare"
+        >
+          {{ dns.cfLoading ? 'Enabling...' : 'Enable Cloudflare' }}
+        </button>
+      </template>
+    </Modal>
   </div>
 </template>
 
@@ -294,7 +523,7 @@ const dns = useDnsStore()
 const notifications = useNotificationsStore()
 const zoneId = route.params.id
 
-const recordTypes = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV']
+const recordTypes = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'CAA', 'PTR']
 const searchQuery = ref('')
 const showImport = ref(false)
 const showDeleteRecordConfirm = ref(false)
@@ -303,12 +532,23 @@ const importingRecords = ref(false)
 const importContent = ref('')
 const recordToDelete = ref(null)
 
+// Cloudflare state
+const showCfConfig = ref(false)
+const cfConfig = ref({ email: '', api_key: '', cf_zone_id: '' })
+
+// DNSSEC state
+const showDnssecConfig = ref(false)
+const dnssecConfig = ref({ algorithm: 'ECDSAP256SHA256' })
+
 const newRecord = ref({
   type: 'A',
   name: '@',
   value: '',
   ttl: 3600,
-  priority: 10
+  priority: 10,
+  caaFlags: 0,
+  caaTag: 'issue',
+  caaValue: ''
 })
 
 const editing = ref(null)
@@ -327,27 +567,49 @@ function showPriority(type) {
   return type === 'MX' || type === 'SRV'
 }
 
+function parseCaa(value) {
+  // CAA value format: "flags tag "value""  e.g. '0 issue "letsencrypt.org"'
+  const match = value && value.match(/^(\d+)\s+(\S+)\s+"?([^"]*)"?$/)
+  if (match) {
+    return { flags: match[1], tag: match[2], value: match[3] }
+  }
+  return { flags: '-', tag: '-', value: value || '' }
+}
+
 onMounted(async () => {
   await Promise.all([
     dns.fetchZone(zoneId),
-    dns.fetchRecords(zoneId)
+    dns.fetchRecords(zoneId),
+    dns.cfFetchStatus(zoneId),
+    dns.dnssecFetchStatus(zoneId)
   ])
 })
 
 async function addRecord() {
-  if (!newRecord.value.value) return
+  const rec = newRecord.value
+  // For CAA, build value from sub-fields; for others, require value
+  if (rec.type === 'CAA') {
+    if (!rec.caaValue) return
+    rec.value = `${rec.caaFlags} ${rec.caaTag} "${rec.caaValue}"`
+  } else {
+    if (!rec.value) return
+  }
   addingRecord.value = true
   try {
-    const payload = { ...newRecord.value }
+    const payload = { ...rec }
     // Backend expects record_type, frontend uses type
     if (payload.type && !payload.record_type) {
       payload.record_type = payload.type
       delete payload.type
     }
+    // Clean up CAA-specific fields before sending
+    delete payload.caaFlags
+    delete payload.caaTag
+    delete payload.caaValue
     if (!showPriority(payload.record_type || payload.type)) delete payload.priority
     await dns.createRecord(zoneId, payload)
-    notifications.success(`${newRecord.value.type} record added`)
-    newRecord.value = { type: 'A', name: '@', value: '', ttl: 3600, priority: 10 }
+    notifications.success(`${rec.type} record added`)
+    newRecord.value = { type: 'A', name: '@', value: '', ttl: 3600, priority: 10, caaFlags: 0, caaTag: 'issue', caaValue: '' }
   } catch (err) {
     notifications.error(err.response?.data?.message || 'Failed to add record')
   } finally {
@@ -444,6 +706,90 @@ async function importRecords() {
     notifications.error(err.response?.data?.message || 'Failed to import records')
   } finally {
     importingRecords.value = false
+  }
+}
+
+// ----- DNSSEC actions -----
+
+async function enableDnssec() {
+  try {
+    await dns.dnssecEnable(zoneId, dnssecConfig.value)
+    notifications.success('DNSSEC enabled successfully')
+    showDnssecConfig.value = false
+    dnssecConfig.value = { algorithm: 'ECDSAP256SHA256' }
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Failed to enable DNSSEC')
+  }
+}
+
+async function disableDnssec() {
+  if (!confirm('Disable DNSSEC? This will remove signing keys and the DS record. You should also remove the DS record from your registrar.')) return
+  try {
+    await dns.dnssecDisable(zoneId)
+    notifications.success('DNSSEC disabled')
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Failed to disable DNSSEC')
+  }
+}
+
+function copyDsRecord() {
+  const ds = dns.dnssecStatus.ds_record
+  if (!ds) return
+  navigator.clipboard.writeText(ds).then(() => {
+    notifications.success('DS record copied to clipboard')
+  }).catch(() => {
+    notifications.error('Failed to copy to clipboard')
+  })
+}
+
+// ----- Cloudflare actions -----
+
+async function enableCloudflare() {
+  try {
+    await dns.cfEnable(zoneId, cfConfig.value)
+    notifications.success('Cloudflare integration enabled')
+    showCfConfig.value = false
+    cfConfig.value = { email: '', api_key: '', cf_zone_id: '' }
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Failed to enable Cloudflare')
+  }
+}
+
+async function disableCloudflare() {
+  try {
+    await dns.cfDisable(zoneId)
+    notifications.success('Cloudflare integration disabled')
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Failed to disable Cloudflare')
+  }
+}
+
+async function syncToCloudflare() {
+  try {
+    const result = await dns.cfSync(zoneId)
+    notifications.success(`Synced ${result?.synced ?? 0} records to Cloudflare`)
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Cloudflare sync failed')
+  }
+}
+
+async function importFromCloudflare() {
+  try {
+    const result = await dns.cfImport(zoneId)
+    notifications.success(`Imported ${result?.records_imported ?? 0} records from Cloudflare`)
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Cloudflare import failed')
+  }
+}
+
+async function toggleCfProxy(record) {
+  const newState = !record._cfProxied
+  try {
+    await dns.cfToggleProxy(zoneId, record.id, newState)
+    record._cfProxied = newState
+    notifications.success(`Proxy ${newState ? 'enabled' : 'disabled'} for ${record.name}`)
+  } catch (err) {
+    notifications.error(err.response?.data?.detail || 'Failed to toggle CF proxy')
   }
 }
 </script>

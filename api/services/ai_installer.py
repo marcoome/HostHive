@@ -227,6 +227,436 @@ APP_CONFIGS: dict[str, dict[str, Any]] = {
         ),
         "cron_cmd": "*/5 * * * * php {doc_root}/console core:archive > /dev/null 2>&1",
     },
+    # ------------------------------------------------------------------
+    # E-Commerce
+    # ------------------------------------------------------------------
+    "prestashop": {
+        "display_name": "PrestaShop",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.1",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "wget -q https://github.com/PrestaShop/PrestaShop/releases/download/8.2.0/prestashop_8.2.0.zip "
+            "-O /tmp/prestashop.zip && "
+            "mkdir -p {doc_root} && "
+            "unzip -q /tmp/prestashop.zip -d {doc_root} && "
+            "rm /tmp/prestashop.zip"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && php install-dev/index_cli.php "
+            "--domain={domain} --db_server=127.0.0.1 --db_name={db_name} "
+            "--db_user={db_user} --db_password='{db_pass}' "
+            "--email=admin@{domain} --password='{admin_pass}' "
+            "--name='{domain} Store' --language=en --country=US && "
+            "rm -rf {doc_root}/install-dev"
+        ),
+    },
+    "magento": {
+        "display_name": "Magento / OpenMage",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.1",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "composer create-project openmage/magento-lts {doc_root} --no-interaction --no-dev"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && php install.php -- "
+            "--license_agreement_accepted yes "
+            "--locale en_US --timezone America/New_York --default_currency USD "
+            "--db_host 127.0.0.1 --db_name {db_name} --db_user {db_user} "
+            "--db_pass '{db_pass}' "
+            "--url https://{domain}/ --use_rewrites yes "
+            "--use_secure yes --secure_base_url https://{domain}/ "
+            "--admin_firstname Admin --admin_lastname User "
+            "--admin_email admin@{domain} "
+            "--admin_username admin --admin_password '{admin_pass}'"
+        ),
+    },
+    # ------------------------------------------------------------------
+    # CMS
+    # ------------------------------------------------------------------
+    "drupal": {
+        "display_name": "Drupal",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.3",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "composer create-project drupal/recommended-project {doc_root} --no-interaction"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && php vendor/bin/drush site:install standard "
+            "--db-url=mysql://{db_user}:'{db_pass}'@127.0.0.1/{db_name} "
+            "--site-name='{domain}' "
+            "--account-name=admin --account-pass='{admin_pass}' "
+            "--account-mail=admin@{domain} -y"
+        ),
+    },
+    "joomla": {
+        "display_name": "Joomla",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.1",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "wget -q https://downloads.joomla.org/cms/joomla5/5-2-0/Joomla_5-2-0-Stable-Full_Package.zip "
+            "-O /tmp/joomla.zip && "
+            "mkdir -p {doc_root} && "
+            "unzip -q /tmp/joomla.zip -d {doc_root} && "
+            "rm /tmp/joomla.zip"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && php installation/joomla.php install "
+            "--site-name='{domain}' "
+            "--admin-user=admin --admin-username=admin "
+            "--admin-password='{admin_pass}' --admin-email=admin@{domain} "
+            "--db-type=mysql --db-host=127.0.0.1 "
+            "--db-name={db_name} --db-user={db_user} --db-pass='{db_pass}' "
+            "--db-prefix=jml_ --db-encryption=0 && "
+            "rm -rf {doc_root}/installation"
+        ),
+    },
+    # ------------------------------------------------------------------
+    # Wiki / Documentation
+    # ------------------------------------------------------------------
+    "mediawiki": {
+        "display_name": "MediaWiki",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.1",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "wget -q https://releases.wikimedia.org/mediawiki/1.42/mediawiki-1.42.3.tar.gz "
+            "-O /tmp/mediawiki.tar.gz && "
+            "mkdir -p $(dirname {doc_root}) && "
+            "tar -xzf /tmp/mediawiki.tar.gz -C $(dirname {doc_root}) && "
+            "mv $(dirname {doc_root})/mediawiki-* {doc_root} && "
+            "rm /tmp/mediawiki.tar.gz"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && php maintenance/install.php "
+            "--dbtype=mysql --dbserver=127.0.0.1 "
+            "--dbname={db_name} --dbuser={db_user} --dbpass='{db_pass}' "
+            "--server=https://{domain} --scriptpath= "
+            "--lang=en --pass='{admin_pass}' "
+            "'{domain} Wiki' 'admin'"
+        ),
+    },
+    "bookstack": {
+        "display_name": "BookStack",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.2",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "composer create-project bookstackapp/bookstack {doc_root} --no-interaction --no-dev"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && cp .env.example .env && "
+            "sed -i 's|APP_URL=.*|APP_URL=https://{domain}|' .env && "
+            "sed -i 's|DB_DATABASE=.*|DB_DATABASE={db_name}|' .env && "
+            "sed -i 's|DB_USERNAME=.*|DB_USERNAME={db_user}|' .env && "
+            "sed -i 's|DB_PASSWORD=.*|DB_PASSWORD={db_pass}|' .env && "
+            "php artisan key:generate --force && "
+            "php artisan migrate --force"
+        ),
+    },
+    # ------------------------------------------------------------------
+    # Forum
+    # ------------------------------------------------------------------
+    "phpbb": {
+        "display_name": "phpBB",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.1",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "wget -q https://download.phpbb.com/pub/release/3.3/3.3.12/phpBB-3.3.12.tar.bz2 "
+            "-O /tmp/phpbb.tar.bz2 && "
+            "mkdir -p $(dirname {doc_root}) && "
+            "tar -xjf /tmp/phpbb.tar.bz2 -C $(dirname {doc_root}) && "
+            "mv $(dirname {doc_root})/phpBB3 {doc_root} && "
+            "rm /tmp/phpbb.tar.bz2"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && php install/phpbbcli.php install "
+            "{doc_root}/install/install-config.yml "
+            "--db-driver=mysqli --db-host=127.0.0.1 "
+            "--db-name={db_name} --db-user={db_user} --db-passwd='{db_pass}' "
+            "--db-port=3306 --table-prefix=phpbb_ "
+            "--admin-name=admin --admin-pass1='{admin_pass}' "
+            "--admin-email=admin@{domain} "
+            "--server-name={domain} --server-protocol=https:// --server-port=443 && "
+            "rm -rf {doc_root}/install"
+        ),
+    },
+    "discourse": {
+        "display_name": "Discourse",
+        "db_type": None,
+        "needs_php": False,
+        "runtime": "docker",
+        "install_steps": [
+            "download_app",
+            "configure_app",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "mkdir -p {doc_root} && cd {doc_root} && "
+            "git clone --depth 1 https://github.com/discourse/discourse_docker.git . && "
+            "cp samples/standalone.yml containers/app.yml"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && "
+            "sed -i 's|DISCOURSE_HOSTNAME:.*|DISCOURSE_HOSTNAME: \"{domain}\"|' containers/app.yml && "
+            "sed -i 's|DISCOURSE_DEVELOPER_EMAILS:.*|DISCOURSE_DEVELOPER_EMAILS: \"admin@{domain}\"|' containers/app.yml && "
+            "sed -i 's|DISCOURSE_SMTP_ADDRESS:.*|DISCOURSE_SMTP_ADDRESS: \"localhost\"|' containers/app.yml && "
+            "./launcher bootstrap app && "
+            "./launcher start app"
+        ),
+    },
+    # ------------------------------------------------------------------
+    # Billing / Invoicing
+    # ------------------------------------------------------------------
+    "invoiceninja": {
+        "display_name": "Invoice Ninja",
+        "db_type": "mysql",
+        "needs_php": False,
+        "runtime": "docker",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "mkdir -p {doc_root} && cd {doc_root} && "
+            "cat > docker-compose.yml << 'COMPOSE_EOF'\n"
+            "version: '3.8'\n"
+            "services:\n"
+            "  invoiceninja:\n"
+            "    image: invoiceninja/invoiceninja:latest\n"
+            "    restart: always\n"
+            "    ports:\n"
+            "      - '127.0.0.1:9080:80'\n"
+            "    environment:\n"
+            "      - APP_URL=https://{domain}\n"
+            "      - DB_HOST=host.docker.internal\n"
+            "      - DB_DATABASE={db_name}\n"
+            "      - DB_USERNAME={db_user}\n"
+            "      - DB_PASSWORD={db_pass}\n"
+            "      - IN_USER_EMAIL=admin@{domain}\n"
+            "      - IN_PASSWORD={admin_pass}\n"
+            "    volumes:\n"
+            "      - ninja-public:/var/www/app/public\n"
+            "      - ninja-storage:/var/www/app/storage\n"
+            "volumes:\n"
+            "  ninja-public:\n"
+            "  ninja-storage:\n"
+            "COMPOSE_EOF"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && docker compose up -d && "
+            "sleep 10 && "
+            "docker compose exec invoiceninja php artisan key:generate --force && "
+            "docker compose exec invoiceninja php artisan migrate --force"
+        ),
+        "service_port": 9080,
+    },
+    # ------------------------------------------------------------------
+    # Monitoring
+    # ------------------------------------------------------------------
+    "uptimekuma": {
+        "display_name": "Uptime Kuma",
+        "db_type": None,
+        "needs_php": False,
+        "runtime": "docker",
+        "install_steps": [
+            "download_app",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "docker run -d --name uptime-kuma-{domain} "
+            "--restart=always "
+            "-p 127.0.0.1:3001:3001 "
+            "-v uptime-kuma-{domain}:/app/data "
+            "louislam/uptime-kuma:latest"
+        ),
+        "service_port": 3001,
+    },
+    "grafana": {
+        "display_name": "Grafana",
+        "db_type": None,
+        "needs_php": False,
+        "runtime": "docker",
+        "install_steps": [
+            "download_app",
+            "configure_app",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "docker run -d --name grafana-{domain} "
+            "--restart=always "
+            "-p 127.0.0.1:3100:3000 "
+            "-e GF_SECURITY_ADMIN_PASSWORD='{admin_pass}' "
+            "-e GF_SERVER_ROOT_URL=https://{domain} "
+            "-v grafana-{domain}:/var/lib/grafana "
+            "grafana/grafana-oss:latest"
+        ),
+        "configure_cmd": "",
+        "service_port": 3100,
+    },
+    # ------------------------------------------------------------------
+    # DevOps / Infrastructure
+    # ------------------------------------------------------------------
+    "portainer": {
+        "display_name": "Portainer",
+        "db_type": None,
+        "needs_php": False,
+        "runtime": "docker",
+        "install_steps": [
+            "download_app",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "docker volume create portainer_data && "
+            "docker run -d --name portainer-{domain} "
+            "--restart=always "
+            "-p 127.0.0.1:9443:9443 "
+            "-v /var/run/docker.sock:/var/run/docker.sock "
+            "-v portainer_data:/data "
+            "portainer/portainer-ce:latest"
+        ),
+        "service_port": 9443,
+    },
+    "minio": {
+        "display_name": "MinIO",
+        "db_type": None,
+        "needs_php": False,
+        "runtime": "binary",
+        "install_steps": [
+            "download_app",
+            "configure_app",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "mkdir -p {doc_root} /data/minio && "
+            "wget -q https://dl.min.io/server/minio/release/linux-amd64/minio "
+            "-O {doc_root}/minio && "
+            "chmod +x {doc_root}/minio"
+        ),
+        "configure_cmd": (
+            "cat > /etc/systemd/system/minio-{user}.service << 'SVCEOF'\n"
+            "[Unit]\n"
+            "Description=MinIO Object Storage\n"
+            "After=network-online.target\n"
+            "[Service]\n"
+            "Type=simple\n"
+            "User={user}\n"
+            "Environment=MINIO_ROOT_USER=admin\n"
+            "Environment=MINIO_ROOT_PASSWORD={admin_pass}\n"
+            "Environment=MINIO_BROWSER_REDIRECT_URL=https://{domain}\n"
+            "ExecStart={doc_root}/minio server /data/minio --console-address :9001 --address :9000\n"
+            "Restart=always\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n"
+            "SVCEOF\n"
+            "systemctl daemon-reload && systemctl enable --now minio-{user}.service"
+        ),
+        "service_port": 9001,
+    },
+    # ------------------------------------------------------------------
+    # Database Tools
+    # ------------------------------------------------------------------
+    "adminer": {
+        "display_name": "Adminer",
+        "db_type": None,
+        "needs_php": True,
+        "php_version": "8.1",
+        "install_steps": [
+            "download_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "mkdir -p {doc_root} && "
+            "wget -q https://github.com/vrana/adminer/releases/download/v4.8.4/adminer-4.8.4.php "
+            "-O {doc_root}/index.php"
+        ),
+    },
+    # ------------------------------------------------------------------
+    # Email
+    # ------------------------------------------------------------------
+    "roundcube": {
+        "display_name": "Roundcube",
+        "db_type": "mysql",
+        "needs_php": True,
+        "php_version": "8.1",
+        "install_steps": [
+            "create_database",
+            "download_app",
+            "configure_app",
+            "set_permissions",
+            "setup_ssl",
+        ],
+        "download_cmd": (
+            "composer create-project roundcube/roundcubemail {doc_root} --no-interaction --no-dev"
+        ),
+        "configure_cmd": (
+            "cd {doc_root} && cp config/config.inc.php.sample config/config.inc.php && "
+            "sed -i \"s|\\$config\\['db_dsnw'\\].*|\\$config['db_dsnw'] = "
+            "'mysql://{db_user}:{db_pass}@127.0.0.1/{db_name}';|\" config/config.inc.php && "
+            "sed -i \"s|\\$config\\['imap_host'\\].*|\\$config['imap_host'] = "
+            "'localhost:143';|\" config/config.inc.php && "
+            "sed -i \"s|\\$config\\['smtp_host'\\].*|\\$config['smtp_host'] = "
+            "'localhost:587';|\" config/config.inc.php && "
+            "php bin/initdb.sh --dir=SQL/mysql || true && "
+            "rm -rf {doc_root}/installer"
+        ),
+    },
 }
 
 

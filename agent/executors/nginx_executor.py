@@ -2,20 +2,19 @@
 Nginx virtual-host executor.
 
 Manages vhost creation / deletion, SSL enablement, and service reloading.
-All subprocess calls use list arguments — shell=True is NEVER used.
+All subprocess calls use list arguments -- shell=True is NEVER used.
 All file writes are atomic (write to temp then rename).
+
+Templates are loaded from the shared ``data/templates/nginx/`` directory
+via ``nginx_service.render_vhost`` -- single source of truth.
 """
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
-
-from jinja2 import Environment, FileSystemLoader
 
 from agent.executors._helpers import (
     atomic_write,
@@ -23,15 +22,11 @@ from agent.executors._helpers import (
     safe_path,
 )
 
+# Import the shared rendering function -- single source of truth
+from api.services.nginx_service import render_vhost, list_templates  # noqa: F401
+
 SITES_AVAILABLE = Path("/etc/nginx/sites-available")
 SITES_ENABLED = Path("/etc/nginx/sites-enabled")
-TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "templates"
-
-_jinja = Environment(
-    loader=FileSystemLoader(str(TEMPLATE_DIR)),
-    autoescape=False,
-    keep_trailing_newline=True,
-)
 
 
 def create_vhost(
@@ -39,17 +34,26 @@ def create_vhost(
     document_root: str,
     php_version: str,
     ssl: bool = False,
+    ssl_certificate: str | None = None,
+    ssl_certificate_key: str | None = None,
+    template_name: str = "default",
+    custom_nginx_config: str | None = None,
+    backend_port: int = 8080,
 ) -> dict[str, Any]:
     """Write an nginx vhost config and enable it."""
     domain = safe_domain(domain)
     document_root = safe_path(document_root, "/home")
 
-    template_name = "nginx_vhost_ssl.conf.j2" if ssl else "nginx_vhost.conf.j2"
-    template = _jinja.get_template(template_name)
-    content = template.render(
+    content = render_vhost(
+        template_name=template_name,
         domain=domain,
         document_root=document_root,
         php_version=php_version,
+        ssl=ssl,
+        ssl_certificate=ssl_certificate,
+        ssl_certificate_key=ssl_certificate_key,
+        backend_port=backend_port,
+        custom_nginx_config=custom_nginx_config,
     )
 
     conf_path = SITES_AVAILABLE / domain
@@ -63,7 +67,13 @@ def create_vhost(
     return {"domain": domain, "config": str(conf_path), "enabled": True}
 
 
-def enable_ssl(domain: str, cert_path: str, key_path: str) -> dict[str, Any]:
+def enable_ssl(
+    domain: str,
+    cert_path: str,
+    key_path: str,
+    template_name: str = "default",
+    custom_nginx_config: str | None = None,
+) -> dict[str, Any]:
     """Re-render the vhost with SSL using the provided certificate paths."""
     domain = safe_domain(domain)
     cert_path = safe_path(cert_path, "/etc/ssl")
@@ -73,8 +83,6 @@ def enable_ssl(domain: str, cert_path: str, key_path: str) -> dict[str, Any]:
     if not conf_path.exists():
         raise FileNotFoundError(f"vhost config not found for {domain}")
 
-    template = _jinja.get_template("nginx_vhost_ssl.conf.j2")
-
     # Read existing config to extract document_root and php_version
     existing = conf_path.read_text()
     root_match = re.search(r"root\s+(.+);", existing)
@@ -83,12 +91,15 @@ def enable_ssl(domain: str, cert_path: str, key_path: str) -> dict[str, Any]:
     document_root = root_match.group(1).strip() if root_match else f"/home/{domain}/public_html"
     php_version = php_match.group(1) if php_match else "8.2"
 
-    content = template.render(
+    content = render_vhost(
+        template_name=template_name,
         domain=domain,
         document_root=document_root,
         php_version=php_version,
+        ssl=True,
         ssl_certificate=cert_path,
         ssl_certificate_key=key_path,
+        custom_nginx_config=custom_nginx_config,
     )
 
     atomic_write(conf_path, content)

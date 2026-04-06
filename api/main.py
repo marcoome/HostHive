@@ -138,9 +138,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://panel.example.com",
-        f"https://{settings.server_ip}:8443",  # Allow self-hosted IP
-        "http://localhost:5173",  # Allow dev frontend
+        f"https://{settings.PANEL_DOMAIN}" if hasattr(settings, "PANEL_DOMAIN") and settings.PANEL_DOMAIN else f"https://{settings.server_ip}:8443",
+        f"https://{settings.server_ip}:8443",
+        "http://localhost:5173",
         "https://localhost:5173",
     ],
     allow_credentials=True,
@@ -182,7 +182,7 @@ async def generic_error_handler(_request: Request, exc: Exception) -> JSONRespon
     logging.getLogger("hosthive.api").exception("Unhandled error: %s", exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": str(exc)},
+        content={"detail": "Internal server error"},
     )
 
 
@@ -197,11 +197,13 @@ from api.routers import (  # noqa: E402
     cache_router,
     cron_router,
     databases_router,
+    directory_privacy_router,
     dns_router,
     domains_router,
     email_router,
     files_router,
     ftp_router,
+    git_deploy_router,
     packages_router,
     php_router,
     server_router,
@@ -223,6 +225,7 @@ from api.routers import (  # noqa: E402
     resources_router,
     apps_router,
     email_auth_router,
+    email_deliverability_router,
     docker_router,
     wordpress_router,
     settings_router,
@@ -232,6 +235,13 @@ from api.routers import (  # noqa: E402
     system_router,
     ip_manager_router,
     logs_router,
+    webauthn_router,
+    antivirus_router,
+    translations_router,
+    migration_router,
+    redirects_router,
+    mailing_lists_router,
+    runtime_router,
 )
 
 _v1 = "/api/v1"
@@ -239,10 +249,12 @@ app.include_router(ai_router,        prefix=f"{_v1}/ai",        tags=["AI"])
 app.include_router(auth_router,      prefix=f"{_v1}/auth",      tags=["Auth"])
 app.include_router(users_router,     prefix=f"{_v1}/users",     tags=["Users"])
 app.include_router(domains_router,   prefix=f"{_v1}/domains",   tags=["Domains"])
+app.include_router(directory_privacy_router, prefix=_v1,        tags=["Directory Privacy"])
 app.include_router(databases_router, prefix=f"{_v1}/databases", tags=["Databases"])
 app.include_router(email_router,     prefix=f"{_v1}/email",     tags=["Email"])
 app.include_router(dns_router,       prefix=f"{_v1}/dns",       tags=["DNS"])
 app.include_router(ftp_router,       prefix=f"{_v1}/ftp",       tags=["FTP"])
+app.include_router(git_deploy_router, prefix=_v1,                tags=["Git Deploy"])
 app.include_router(cron_router,      prefix=f"{_v1}/cron",      tags=["Cron"])
 app.include_router(ssl_router,       prefix=f"{_v1}/ssl",       tags=["SSL"])
 app.include_router(backups_router,   prefix=f"{_v1}/backups",   tags=["Backups"])
@@ -265,6 +277,8 @@ app.include_router(waf_router,           prefix=f"{_v1}/waf",          tags=["WA
 app.include_router(resources_router,     prefix=f"{_v1}/resources",    tags=["Resources"])
 app.include_router(apps_router,          prefix=f"{_v1}/apps",         tags=["Apps"])
 app.include_router(email_auth_router,    prefix=f"{_v1}/email/auth",   tags=["Email Auth"])
+app.include_router(mailing_lists_router, prefix=f"{_v1}/email",        tags=["Mailing Lists"])
+app.include_router(email_deliverability_router, prefix=f"{_v1}/email/deliverability", tags=["Email Deliverability"])
 app.include_router(docker_router,        prefix=f"{_v1}/docker",       tags=["Docker"])
 app.include_router(wordpress_router,     prefix=f"{_v1}/wordpress",    tags=["WordPress"])
 app.include_router(settings_router,      prefix=f"{_v1}/settings",     tags=["Settings"])
@@ -276,6 +290,12 @@ app.include_router(security_router,      prefix=f"{_v1}/security",     tags=["Se
 app.include_router(system_router,        prefix=f"{_v1}/system",       tags=["System"])
 app.include_router(ip_manager_router,    prefix=f"{_v1}/ip",           tags=["IP Management"])
 app.include_router(logs_router,          prefix=f"{_v1}/logs",         tags=["Logs"])
+app.include_router(webauthn_router,      prefix=f"{_v1}/auth/webauthn", tags=["WebAuthn"])
+app.include_router(antivirus_router,     prefix=f"{_v1}/antivirus",    tags=["Antivirus"])
+app.include_router(translations_router,  prefix=f"{_v1}/translations", tags=["Translations"])
+app.include_router(migration_router,     prefix=f"{_v1}/admin/migration", tags=["Migration"])
+app.include_router(redirects_router,     prefix=_v1,                      tags=["Redirects"])
+app.include_router(runtime_router,       prefix=f"{_v1}/runtime",       tags=["Runtime Apps"])
 app.include_router(metrics_router,       prefix="/metrics",             tags=["Metrics"])
 
 

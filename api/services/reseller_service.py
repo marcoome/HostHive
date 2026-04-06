@@ -54,6 +54,8 @@ class ResellerService:
             return limits.used_users < limits.max_users
         if resource_type == "disk":
             return limits.used_disk_mb < limits.max_total_disk_mb
+        if resource_type == "bandwidth":
+            return limits.used_bandwidth_gb < limits.max_total_bandwidth_gb
         return False
 
     async def increment_user_count(self, reseller_id: uuid.UUID) -> None:
@@ -125,6 +127,7 @@ class ResellerService:
             "used_users": limits.used_users if limits else total_users,
             "max_users": limits.max_users if limits else 0,
             "max_bandwidth_gb": limits.max_total_bandwidth_gb if limits else 0,
+            "used_bandwidth_gb": limits.used_bandwidth_gb if limits else 0.0,
         }
 
     # ------------------------------------------------------------------

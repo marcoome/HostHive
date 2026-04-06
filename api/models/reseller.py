@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from api.models.base import TimestampedBase
@@ -42,3 +42,4 @@ class ResellerLimit(TimestampedBase):
     max_total_bandwidth_gb: Mapped[int] = mapped_column(Integer, default=1000)
     used_users: Mapped[int] = mapped_column(Integer, default=0)
     used_disk_mb: Mapped[int] = mapped_column(Integer, default=0)
+    used_bandwidth_gb: Mapped[float] = mapped_column(Float, default=0.0)

@@ -1,5 +1,17 @@
 <template>
-  <aside class="fixed left-0 top-0 bottom-0 w-60 glass-strong flex flex-col z-30">
+  <!-- Mobile backdrop -->
+  <Transition name="sidebar-backdrop">
+    <div
+      v-if="mobileOpen"
+      class="fixed inset-0 bg-black/50 backdrop-blur-sm z-30 md:hidden"
+      @click="mobileOpen = false"
+    />
+  </Transition>
+
+  <aside
+    class="fixed left-0 top-0 bottom-0 w-60 glass-strong flex flex-col z-40 transition-transform duration-300 ease-in-out"
+    :class="mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'"
+  >
     <!-- Logo -->
     <div class="h-[60px] flex items-center px-5" :style="{ borderBottom: '1px solid rgba(var(--border-rgb), 0.3)' }">
       <div class="flex items-center gap-2.5">
@@ -8,6 +20,14 @@
         </div>
         <span class="text-lg font-semibold" :style="{ color: 'var(--text-primary)' }">HostHive</span>
       </div>
+      <!-- Mobile close button -->
+      <button
+        class="ml-auto p-2 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[rgba(var(--surface-rgb),0.5)] md:hidden min-w-[44px] min-h-[44px] flex items-center justify-center"
+        @click="mobileOpen = false"
+        aria-label="Close sidebar"
+      >
+        &#10005;
+      </button>
     </div>
 
     <!-- Navigation -->
@@ -19,6 +39,7 @@
           :to="item.to"
           class="nav-link"
           active-class="nav-link-active"
+          @click="closeMobile"
         >
           <!-- v-html safe: icon is a hardcoded HTML entity from trusted source, not user input -->
           <span class="nav-icon" v-html="item.icon"></span>
@@ -38,6 +59,7 @@
             :to="item.to"
             class="nav-link"
             active-class="nav-link-active"
+            @click="closeMobile"
           >
             <!-- v-html safe: icon is a hardcoded HTML entity from trusted source, not user input -->
             <span class="nav-icon" v-html="item.icon"></span>
@@ -58,6 +80,7 @@
             :to="item.to"
             class="nav-link"
             active-class="nav-link-active"
+            @click="closeMobile"
           >
             <!-- v-html safe: icon is a hardcoded HTML entity from trusted source, not user input -->
             <span class="nav-icon" v-html="item.icon"></span>
@@ -77,6 +100,7 @@
             target="_blank"
             rel="noopener"
             class="nav-link"
+            @click="closeMobile"
           >
             <span class="nav-icon">&#9673;</span>
             <span>{{ $t('nav.status_page') }}</span>
@@ -97,9 +121,20 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
+import { useSidebarStore } from '@/stores/sidebar'
 
 const { t } = useI18n()
 const auth = useAuthStore()
+const sidebar = useSidebarStore()
+
+const mobileOpen = computed({
+  get: () => sidebar.mobileOpen,
+  set: (val) => { sidebar.mobileOpen = val }
+})
+
+function closeMobile() {
+  sidebar.mobileOpen = false
+}
 
 const mainNav = computed(() => [
   { to: '/dashboard', label: t('nav.dashboard'), icon: '&#9632;' },
@@ -114,14 +149,16 @@ const mainNav = computed(() => [
   { to: '/files', label: t('nav.files'), icon: '&#9782;' },
   { to: '/api-keys', label: t('nav.api_keys'), icon: '&#9919;' },
   { to: '/ai', label: t('nav.ai'), icon: '&#129504;' },
+  { to: '/apps', label: t('nav.apps', 'App Store'), icon: '&#9881;' },
+  { to: '/runtime', label: t('nav.runtime', 'Runtime Apps'), icon: '&#9654;' },
   { to: '/docker', label: t('nav.docker'), icon: '&#9898;' },
   { to: '/wordpress', label: t('nav.wordpress'), icon: '&#127760;' }
 ])
 
 const resellerNav = computed(() => [
-  { to: '/reseller', label: 'Reseller Dashboard', icon: '&#9632;' },
-  { to: '/reseller/users', label: 'My Users', icon: '&#9823;' },
-  { to: '/reseller/branding', label: 'Branding', icon: '&#9998;' }
+  { to: '/reseller', label: t('nav.reseller_dashboard', 'Reseller Dashboard'), icon: '&#9632;' },
+  { to: '/reseller/users', label: t('nav.my_users', 'My Users'), icon: '&#9823;' },
+  { to: '/reseller/branding', label: t('nav.branding', 'Branding'), icon: '&#9998;' }
 ])
 
 const adminNav = computed(() => [
@@ -129,11 +166,19 @@ const adminNav = computed(() => [
   { to: '/users', label: t('nav.users'), icon: '&#9823;' },
   { to: '/server', label: t('nav.server'), icon: '&#9874;' },
   { to: '/monitoring', label: t('nav.monitoring'), icon: '&#9889;' },
+  { to: '/security', label: t('nav.security', 'Security'), icon: '&#128737;' },
+  { to: '/analytics', label: t('nav.analytics', 'Analytics'), icon: '&#9906;' },
   { to: '/integrations', label: t('nav.integrations'), icon: '&#10731;' },
   { to: '/audit-log', label: t('nav.audit'), icon: '&#9993;' },
+  { to: '/logs', label: t('nav.logs', 'Logs'), icon: '&#128220;' },
   { to: '/settings', label: t('nav.settings'), icon: '&#9881;' },
+  { to: '/translations', label: t('nav.translations'), icon: '&#127760;' },
+  { to: '/wireguard', label: t('nav.wireguard', 'WireGuard VPN'), icon: '&#128274;' },
+  { to: '/antivirus', label: t('nav.antivirus', 'Antivirus'), icon: '&#9737;' },
   { to: '/settings/mcp', label: 'MCP Server', icon: '&#10731;' },
-  { to: '/settings/ai', label: 'AI Settings', icon: '&#129504;' }
+  { to: '/settings/ai', label: 'AI Settings', icon: '&#129504;' },
+  { to: '/waf', label: t('nav.waf', 'WAF'), icon: '&#128737;' },
+  { to: '/ip-manager', label: t('nav.ip_manager', 'IP Manager'), icon: '&#127760;' }
 ])
 </script>
 
@@ -142,12 +187,13 @@ const adminNav = computed(() => [
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.625rem 0.75rem;
   border-radius: 8px;
   font-size: 0.875rem;
   color: var(--text-muted);
   transition: all 0.2s ease;
   position: relative;
+  min-height: 44px;
 }
 
 .nav-link:hover {
@@ -177,5 +223,15 @@ const adminNav = computed(() => [
   width: 1.25rem;
   text-align: center;
   font-size: 1rem;
+}
+
+/* Backdrop transition */
+.sidebar-backdrop-enter-active,
+.sidebar-backdrop-leave-active {
+  transition: opacity 0.3s ease;
+}
+.sidebar-backdrop-enter-from,
+.sidebar-backdrop-leave-to {
+  opacity: 0;
 }
 </style>

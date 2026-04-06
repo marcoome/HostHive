@@ -22,6 +22,8 @@ import textwrap
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+import httpx
+
 from api.models.dns_records import DnsRecord
 
 _log = logging.getLogger("hosthive.bind")
@@ -54,10 +56,33 @@ def _zone_file_path(zone_name: str) -> Path:
 # SOA serial helper
 # ---------------------------------------------------------------------------
 
-def _serial() -> str:
-    """Generate a SOA serial in YYYYMMDDnn format."""
+def _serial(current_serial: str | None = None) -> str:
+    """Generate a SOA serial in YYYYMMDDnn format.
+
+    If *current_serial* is provided and its date prefix matches today,
+    the NN suffix is incremented (01 -> 02 -> 03 ...).  Otherwise a fresh
+    serial starting at NN=01 is returned.
+    """
     today = datetime.date.today().strftime("%Y%m%d")
+    if current_serial and len(current_serial) == 10 and current_serial[:8] == today:
+        nn = int(current_serial[8:]) + 1
+        return f"{today}{nn:02d}"
     return f"{today}01"
+
+
+def _read_current_serial(zone_name: str) -> str | None:
+    """Read the current SOA serial from an existing zone file, or return None."""
+    path = _zone_file_path(zone_name)
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+        match = re.search(r"(\d{10})\s*;\s*[Ss]erial", content)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +113,8 @@ def generate_zone_file(
     if not admin_fqdn.endswith("."):
         admin_fqdn += "."
 
-    serial = _serial()
+    current = _read_current_serial(zone_name)
+    serial = _serial(current)
 
     has_soa = any(r.record_type == "SOA" for r in records)
     has_ns = any(r.record_type == "NS" for r in records)
@@ -136,6 +162,13 @@ def generate_zone_file(
             # Ensure TXT values are quoted
             if not value.startswith('"'):
                 value = f'"{value}"'
+        if rtype == "CAA":
+            # CAA format: flags tag "value"  -- ensure it's well-formed
+            # If already formatted (e.g. '0 issue "letsencrypt.org"'), leave as-is
+            # Otherwise try to pass through as-is (user may have pre-formatted)
+            if not re.match(r'^\d+\s+\S+\s+".*"$', value):
+                # Wrap bare value: assume flags=0, tag=issue
+                value = f'0 issue "{value}"'
 
         if r.priority is not None and rtype in ("MX", "SRV"):
             lines.append(f"{name_part}\t{ttl_part}\tIN\t{rtype}\t{r.priority}\t{value}")
@@ -170,11 +203,35 @@ def _delete_zone_file_sync(zone_name: str) -> Optional[Path]:
     return None
 
 
-def _ensure_named_conf_entry_sync(zone_name: str) -> None:
+def _build_transfer_acl(cluster_ips: Sequence[str]) -> str:
+    """Build the ``allow-transfer`` and ``also-notify`` directives.
+
+    If *cluster_ips* is empty, falls back to ``allow-transfer { none; };``.
+    """
+    if not cluster_ips:
+        return "    allow-transfer { none; };"
+
+    ip_list = "; ".join(cluster_ips)
+    lines = [
+        f"    allow-transfer {{ {ip_list}; }};",
+        f"    also-notify {{ {ip_list}; }};",
+    ]
+    return "\n".join(lines)
+
+
+def _ensure_named_conf_entry_sync(
+    zone_name: str,
+    cluster_ips: Sequence[str] | None = None,
+) -> None:
     """Add a ``zone`` stanza to ``named.conf.local`` if not already present.
 
     This is a best-effort helper for Debian BIND9 setups where zone declarations
     live in ``/etc/bind/named.conf.local``.
+
+    When *cluster_ips* is provided the stanza includes ``allow-transfer`` and
+    ``also-notify`` directives for AXFR/IXFR zone transfers to those nodes.
+    If the zone already exists in the config, it is **replaced** so that the
+    transfer ACL stays up-to-date.
     """
     if not _NAMED_CONF_LOCAL.exists():
         _log.debug("named.conf.local not found at %s -- skipping", _NAMED_CONF_LOCAL)
@@ -182,12 +239,7 @@ def _ensure_named_conf_entry_sync(zone_name: str) -> None:
 
     fqdn = zone_name.rstrip(".")
     zone_file = str(_zone_file_path(zone_name))
-    marker = f'zone "{fqdn}"'
-
-    existing = _NAMED_CONF_LOCAL.read_text(encoding="utf-8")
-    if marker in existing:
-        _log.debug("Zone %s already declared in named.conf.local", fqdn)
-        return
+    transfer_block = _build_transfer_acl(cluster_ips or [])
 
     stanza = textwrap.dedent(f"""\
 
@@ -195,9 +247,23 @@ def _ensure_named_conf_entry_sync(zone_name: str) -> None:
         zone "{fqdn}" {{
             type master;
             file "{zone_file}";
-            allow-transfer {{ none; }};
+        {transfer_block}
         }};
     """)
+
+    existing = _NAMED_CONF_LOCAL.read_text(encoding="utf-8")
+
+    # If already present, replace the existing stanza so cluster IPs are updated
+    old_pattern = re.compile(
+        r"\n?// managed by NovaPanel\nzone \"%s\" \{[^}]*\};\n?" % re.escape(fqdn),
+        re.DOTALL,
+    )
+    if old_pattern.search(existing):
+        new_content = old_pattern.sub(stanza, existing)
+        _NAMED_CONF_LOCAL.write_text(new_content, encoding="utf-8")
+        _log.info("Updated zone stanza for %s in named.conf.local (cluster IPs: %s)", fqdn, cluster_ips)
+        return
+
     with _NAMED_CONF_LOCAL.open("a", encoding="utf-8") as f:
         f.write(stanza)
     _log.info("Added zone stanza for %s to named.conf.local", fqdn)
@@ -264,17 +330,52 @@ async def _rndc_reload(zone_name: Optional[str] = None) -> tuple[bool, str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-async def write_zone(zone_name: str, records: Sequence[DnsRecord]) -> tuple[bool, str]:
+async def get_cluster_node_ips() -> list[str]:
+    """Fetch active cluster slave node IPs from the database.
+
+    Returns a list of IP addresses for all active slave nodes, used to
+    populate ``allow-transfer`` and ``also-notify`` in zone stanzas.
+    """
+    try:
+        from api.core.database import async_session_factory
+        from api.models.dns_cluster import DnsClusterNode
+        from sqlalchemy import select
+
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(DnsClusterNode.ip_address).where(
+                    DnsClusterNode.is_active.is_(True),
+                    DnsClusterNode.role == "slave",
+                )
+            )
+            return [row[0] for row in result.all()]
+    except Exception as exc:
+        _log.warning("Failed to fetch cluster node IPs: %s", exc)
+        return []
+
+
+async def write_zone(
+    zone_name: str,
+    records: Sequence[DnsRecord],
+    cluster_ips: Sequence[str] | None = None,
+) -> tuple[bool, str]:
     """Generate a zone file, write it to disk, update named.conf.local, and reload BIND.
+
+    When *cluster_ips* is ``None`` (default), the active slave IPs are fetched
+    from the database automatically.
 
     Returns ``(bind_ok, message)``.  Even if BIND reload fails the zone file
     is still on disk so a manual ``rndc reload`` will pick it up later.
     """
     content = generate_zone_file(zone_name, records)
 
+    # Resolve cluster IPs if not explicitly provided
+    if cluster_ips is None:
+        cluster_ips = await get_cluster_node_ips()
+
     # File I/O in thread pool
     await asyncio.to_thread(_write_zone_file_sync, zone_name, content)
-    await asyncio.to_thread(_ensure_named_conf_entry_sync, zone_name)
+    await asyncio.to_thread(_ensure_named_conf_entry_sync, zone_name, cluster_ips)
 
     ok, output = await _rndc_reload(zone_name)
     if ok:
@@ -294,3 +395,382 @@ async def remove_zone(zone_name: str) -> tuple[bool, str]:
     if ok:
         return True, f"Zone {zone_name} removed and BIND reloaded."
     return False, f"Zone file removed but BIND reload failed: {output}"
+
+
+# ---------------------------------------------------------------------------
+# Cluster zone push -- propagate zone data to remote nodes via their API
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# DNSSEC helpers
+# ---------------------------------------------------------------------------
+
+_DNSSEC_KEY_DIR = Path("/etc/bind/keys")
+
+# Map algorithm names to dnssec-keygen -a values
+_ALGO_MAP = {
+    "ECDSAP256SHA256": "ECDSAP256SHA256",
+    "ECDSAP384SHA384": "ECDSAP384SHA384",
+    "RSASHA256": "RSASHA256",
+    "RSASHA512": "RSASHA512",
+}
+
+# Key bit sizes for RSA algorithms (ECDSA sizes are implicit)
+_RSA_BITS = {
+    "RSASHA256": 2048,
+    "RSASHA512": 2048,
+}
+
+
+async def _run_cmd(cmd: list[str], timeout: int = 30, cwd: str | None = None) -> tuple[bool, str]:
+    """Run a subprocess and return (success, combined_output)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = (stdout or b"").decode() + (stderr or b"").decode()
+        return proc.returncode == 0, output.strip()
+    except FileNotFoundError:
+        return False, f"Command not found: {cmd[0]}"
+    except asyncio.TimeoutError:
+        return False, f"Command timed out after {timeout}s"
+    except Exception as exc:
+        return False, f"Command error: {exc}"
+
+
+def _find_keys(zone_name: str) -> list[Path]:
+    """Return all DNSSEC key files (.key and .private) for a zone."""
+    key_dir = _DNSSEC_KEY_DIR
+    if not key_dir.exists():
+        return []
+    fqdn = zone_name.rstrip(".") + "."
+    # Key files are named K<zone>.+<alg>+<tag>.key / .private
+    return [p for p in key_dir.iterdir() if p.name.startswith(f"K{fqdn}+") or p.name.startswith(f"K{zone_name}+")]
+
+
+async def enable_dnssec(
+    zone_name: str,
+    algorithm: str = "ECDSAP256SHA256",
+) -> tuple[bool, str, str | None]:
+    """Enable DNSSEC for a zone: generate KSK+ZSK, sign the zone.
+
+    Returns ``(success, message, ds_record_or_none)``.
+    """
+    fqdn = zone_name.rstrip(".")
+    algo = _ALGO_MAP.get(algorithm, "ECDSAP256SHA256")
+    key_dir = _DNSSEC_KEY_DIR
+    key_dir.mkdir(parents=True, exist_ok=True)
+
+    zone_file = _zone_file_path(zone_name)
+    if not zone_file.exists():
+        return False, f"Zone file {zone_file} does not exist. Write zone first.", None
+
+    # --- Generate KSK (Key Signing Key) ---
+    ksk_cmd = ["dnssec-keygen", "-K", str(key_dir), "-a", algo, "-f", "KSK", "-n", "ZONE", fqdn]
+    if algo in _RSA_BITS:
+        ksk_cmd.extend(["-b", str(_RSA_BITS[algo])])
+
+    ok, ksk_output = await _run_cmd(ksk_cmd, timeout=60)
+    if not ok:
+        return False, f"Failed to generate KSK: {ksk_output}", None
+    ksk_name = ksk_output.strip().split("\n")[-1].strip()
+    _log.info("Generated KSK for %s: %s", fqdn, ksk_name)
+
+    # --- Generate ZSK (Zone Signing Key) ---
+    zsk_cmd = ["dnssec-keygen", "-K", str(key_dir), "-a", algo, "-n", "ZONE", fqdn]
+    if algo in _RSA_BITS:
+        zsk_cmd.extend(["-b", str(1024 if algo.startswith("RSA") else _RSA_BITS[algo])])
+
+    ok, zsk_output = await _run_cmd(zsk_cmd, timeout=60)
+    if not ok:
+        return False, f"Failed to generate ZSK: {zsk_output}", None
+    zsk_name = zsk_output.strip().split("\n")[-1].strip()
+    _log.info("Generated ZSK for %s: %s", fqdn, zsk_name)
+
+    # --- Append key includes to zone file ---
+    zone_content = zone_file.read_text(encoding="utf-8")
+    ksk_include = f"$INCLUDE \"{key_dir}/{ksk_name}.key\""
+    zsk_include = f"$INCLUDE \"{key_dir}/{zsk_name}.key\""
+
+    if ksk_include not in zone_content:
+        zone_content = zone_content.rstrip("\n") + "\n" + ksk_include + "\n"
+    if zsk_include not in zone_content:
+        zone_content = zone_content.rstrip("\n") + "\n" + zsk_include + "\n"
+
+    zone_file.write_text(zone_content, encoding="utf-8")
+
+    # --- Sign the zone ---
+    ok, sign_output = await _sign_zone(zone_name)
+    if not ok:
+        return False, f"Zone signing failed: {sign_output}", None
+
+    # --- Update named.conf.local to use signed zone file ---
+    await asyncio.to_thread(_update_named_conf_for_signed_zone, zone_name)
+
+    # --- Reload BIND ---
+    ok, reload_output = await _rndc_reload(fqdn)
+
+    # --- Extract DS record ---
+    ds_record = await _extract_ds_record(zone_name)
+
+    msg = f"DNSSEC enabled for {fqdn} with algorithm {algo}."
+    if not ok:
+        msg += f" Warning: BIND reload issue: {reload_output}"
+
+    return True, msg, ds_record
+
+
+async def _sign_zone(zone_name: str) -> tuple[bool, str]:
+    """Sign a zone file with dnssec-signzone."""
+    fqdn = zone_name.rstrip(".")
+    zone_file = _zone_file_path(zone_name)
+    key_dir = _DNSSEC_KEY_DIR
+
+    # Find the KSK key file for -k argument
+    ksk_file = None
+    for p in key_dir.iterdir():
+        if p.name.startswith(f"K{fqdn}.+") and p.suffix == ".key":
+            content = p.read_text()
+            if "key-signing" in content or "257" in content.split("\n")[0]:
+                ksk_file = str(p.with_suffix(""))
+                break
+
+    sign_cmd = [
+        "dnssec-signzone",
+        "-A",                         # update all RRSIG records
+        "-3", "-",                    # NSEC3 with random salt
+        "-N", "INCREMENT",            # auto-increment serial
+        "-o", fqdn,                   # zone origin
+        "-t",                         # print stats
+        "-K", str(key_dir),           # key directory
+    ]
+    if ksk_file:
+        sign_cmd.extend(["-k", ksk_file])
+    sign_cmd.append(str(zone_file))
+
+    return await _run_cmd(sign_cmd, timeout=120, cwd=str(zone_file.parent))
+
+
+def _update_named_conf_for_signed_zone(zone_name: str) -> None:
+    """Update named.conf.local to point to the .signed zone file."""
+    if not _NAMED_CONF_LOCAL.exists():
+        return
+
+    fqdn = zone_name.rstrip(".")
+    zone_file = str(_zone_file_path(zone_name))
+    signed_file = zone_file + ".signed"
+
+    content = _NAMED_CONF_LOCAL.read_text(encoding="utf-8")
+
+    # Replace the file directive to point to the signed zone
+    new_content = content.replace(
+        f'file "{zone_file}";',
+        f'file "{signed_file}";',
+    )
+
+    if new_content != content:
+        _NAMED_CONF_LOCAL.write_text(new_content, encoding="utf-8")
+        _log.info("Updated named.conf.local to use signed zone file for %s", fqdn)
+
+
+def _revert_named_conf_from_signed_zone(zone_name: str) -> None:
+    """Revert named.conf.local to point back to the unsigned zone file."""
+    if not _NAMED_CONF_LOCAL.exists():
+        return
+
+    fqdn = zone_name.rstrip(".")
+    zone_file = str(_zone_file_path(zone_name))
+    signed_file = zone_file + ".signed"
+
+    content = _NAMED_CONF_LOCAL.read_text(encoding="utf-8")
+
+    new_content = content.replace(
+        f'file "{signed_file}";',
+        f'file "{zone_file}";',
+    )
+
+    if new_content != content:
+        _NAMED_CONF_LOCAL.write_text(new_content, encoding="utf-8")
+        _log.info("Reverted named.conf.local to unsigned zone file for %s", fqdn)
+
+
+async def _extract_ds_record(zone_name: str) -> str | None:
+    """Extract the DS record from the signed zone using dnssec-dsfromkey."""
+    fqdn = zone_name.rstrip(".")
+    key_dir = _DNSSEC_KEY_DIR
+
+    # Find the KSK .key file
+    for p in key_dir.iterdir():
+        if p.name.startswith(f"K{fqdn}.+") and p.suffix == ".key":
+            content = p.read_text()
+            # KSK has flag 257
+            if "257" in content.split("\n")[0]:
+                ok, output = await _run_cmd(
+                    ["dnssec-dsfromkey", "-2", str(p)],  # -2 = SHA-256
+                    timeout=15,
+                )
+                if ok and output:
+                    return output.strip()
+    return None
+
+
+async def disable_dnssec(zone_name: str) -> tuple[bool, str]:
+    """Disable DNSSEC for a zone: remove keys, revert to unsigned zone.
+
+    Returns ``(success, message)``.
+    """
+    fqdn = zone_name.rstrip(".")
+    zone_file = _zone_file_path(zone_name)
+    signed_file = Path(str(zone_file) + ".signed")
+
+    # --- Remove the signed zone file ---
+    if signed_file.exists():
+        signed_file.unlink()
+        _log.info("Removed signed zone file %s", signed_file)
+
+    # --- Remove $INCLUDE lines for keys from zone file ---
+    if zone_file.exists():
+        content = zone_file.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        cleaned = [l for l in lines if not l.strip().startswith("$INCLUDE") or "/keys/" not in l]
+        zone_file.write_text("\n".join(cleaned) + "\n", encoding="utf-8")
+
+    # --- Remove key files ---
+    for key_path in _find_keys(zone_name):
+        key_path.unlink()
+        _log.info("Removed DNSSEC key %s", key_path)
+
+    # --- Revert named.conf.local ---
+    await asyncio.to_thread(_revert_named_conf_from_signed_zone, zone_name)
+
+    # --- Reload BIND ---
+    ok, output = await _rndc_reload(fqdn)
+
+    msg = f"DNSSEC disabled for {fqdn}."
+    if not ok:
+        msg += f" Warning: BIND reload issue: {output}"
+
+    return True, msg
+
+
+async def get_ds_record(zone_name: str) -> str | None:
+    """Extract and return the DS record for the zone's KSK."""
+    return await _extract_ds_record(zone_name)
+
+
+async def resign_zone(zone_name: str) -> tuple[bool, str]:
+    """Re-sign a DNSSEC-enabled zone (e.g. after record changes).
+
+    Returns ``(success, message)``.
+    """
+    fqdn = zone_name.rstrip(".")
+    zone_file = _zone_file_path(zone_name)
+
+    if not zone_file.exists():
+        return False, f"Zone file not found for {fqdn}"
+
+    # Check if there are any keys
+    keys = _find_keys(zone_name)
+    if not keys:
+        return False, f"No DNSSEC keys found for {fqdn}"
+
+    ok, output = await _sign_zone(zone_name)
+    if not ok:
+        return False, f"Re-signing failed: {output}"
+
+    ok, reload_output = await _rndc_reload(fqdn)
+
+    msg = f"Zone {fqdn} re-signed successfully."
+    if not ok:
+        msg += f" Warning: BIND reload issue: {reload_output}"
+
+    return True, msg
+
+
+async def push_zone_to_node(
+    api_url: str,
+    api_key: str,
+    zone_name: str,
+    zone_content: str,
+) -> tuple[bool, str]:
+    """Push a zone file to a remote cluster node via its REST API.
+
+    The remote node is expected to expose a ``POST /api/v1/dns/cluster/receive``
+    endpoint that accepts ``{"zone_name": ..., "zone_content": ...}`` and writes
+    the zone file locally + reloads BIND.
+
+    Returns ``(success, message)``.
+    """
+    url = api_url.rstrip("/") + "/dns/cluster/receive"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"zone_name": zone_name, "zone_content": zone_content}
+
+    try:
+        async with httpx.AsyncClient(timeout=30, verify=False) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code < 300:
+                _log.info("Pushed zone %s to %s", zone_name, api_url)
+                return True, f"Pushed to {api_url}"
+            msg = f"HTTP {resp.status_code} from {api_url}: {resp.text[:200]}"
+            _log.warning("Push zone %s to %s failed: %s", zone_name, api_url, msg)
+            return False, msg
+    except Exception as exc:
+        msg = f"Push zone {zone_name} to {api_url} error: {exc}"
+        _log.warning(msg)
+        return False, msg
+
+
+async def push_zone_to_all_nodes(zone_name: str, records: Sequence[DnsRecord]) -> list[dict]:
+    """Generate the zone file and push it to every active cluster slave node.
+
+    Returns a list of ``{"hostname": ..., "success": bool, "message": str}`` dicts.
+    """
+    from api.core.config import settings
+    from api.core.database import async_session_factory
+    from api.core.encryption import decrypt_value
+    from api.models.dns_cluster import DnsClusterNode
+    from sqlalchemy import select
+
+    content = generate_zone_file(zone_name, records)
+    results: list[dict] = []
+
+    try:
+        async with async_session_factory() as session:
+            rows = (await session.execute(
+                select(DnsClusterNode).where(
+                    DnsClusterNode.is_active.is_(True),
+                    DnsClusterNode.role == "slave",
+                )
+            )).scalars().all()
+
+            for node in rows:
+                try:
+                    plain_key = decrypt_value(node.api_key, settings.SECRET_KEY)
+                except Exception:
+                    plain_key = node.api_key  # Fallback if not encrypted
+
+                ok, msg = await push_zone_to_node(
+                    node.api_url, plain_key, zone_name, content,
+                )
+                results.append({
+                    "hostname": node.hostname,
+                    "ip_address": node.ip_address,
+                    "success": ok,
+                    "message": msg,
+                })
+
+                # Update last_sync_at on success
+                if ok:
+                    import datetime as _dt
+                    node.last_sync_at = _dt.datetime.now(_dt.timezone.utc)
+
+            await session.commit()
+    except Exception as exc:
+        _log.warning("push_zone_to_all_nodes error: %s", exc)
+        results.append({"hostname": "unknown", "success": False, "message": str(exc)})
+
+    return results

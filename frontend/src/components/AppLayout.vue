@@ -1,11 +1,11 @@
 <template>
-  <div class="min-h-screen animated-bg relative">
+  <div class="min-h-screen animated-bg relative overflow-x-hidden">
     <ParallaxBackground />
     <ImpersonationBanner />
     <AppSidebar />
-    <div class="ml-60 relative z-10">
+    <div class="md:ml-60 relative z-10">
       <AppTopbar />
-      <main class="p-6">
+      <main class="p-3 sm:p-6">
         <router-view />
       </main>
     </div>

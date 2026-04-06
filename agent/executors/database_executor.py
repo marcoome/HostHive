@@ -196,3 +196,148 @@ def delete_postgres_db(db_name: str, db_user: str) -> dict[str, Any]:
         raise RuntimeError(f"PostgreSQL error: {r.stderr.strip()}")
 
     return {"db_name": db_name, "db_user": db_user, "deleted": True}
+
+
+# ------------------------------------------------------------------
+# Backup & Restore
+# ------------------------------------------------------------------
+
+import glob
+import gzip
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+_BACKUP_BASE = "/opt/hosthive/backups"
+
+
+def _backup_dir_for_user(username: str) -> Path:
+    """Return (and create) the backup directory for a user."""
+    p = Path(_BACKUP_BASE) / username / "databases"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def backup_database(
+    db_name: str,
+    db_type: str,
+    username: str,
+) -> dict[str, Any]:
+    """Dump a database to a gzipped SQL file.
+
+    Returns {"path": "<absolute path>", "filename": "...", "size": <bytes>}.
+    """
+    db_name = _validate_db_name(db_name)
+    dest = _backup_dir_for_user(username)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"{db_name}_{ts}.sql.gz"
+    output_path = dest / filename
+
+    if db_type == "mysql":
+        # mysqldump piped through gzip
+        dump = subprocess.run(
+            ["mysqldump", "--single-transaction", "--routines", "--triggers", db_name],
+            capture_output=True,
+            timeout=600,
+        )
+        if dump.returncode != 0:
+            raise RuntimeError(f"mysqldump failed: {dump.stderr.decode(errors='replace').strip()}")
+        with gzip.open(output_path, "wb") as f:
+            f.write(dump.stdout)
+    elif db_type == "postgresql":
+        dump = subprocess.run(
+            ["sudo", "-u", "postgres", "pg_dump", db_name],
+            capture_output=True,
+            timeout=600,
+        )
+        if dump.returncode != 0:
+            raise RuntimeError(f"pg_dump failed: {dump.stderr.decode(errors='replace').strip()}")
+        with gzip.open(output_path, "wb") as f:
+            f.write(dump.stdout)
+    else:
+        raise ValueError(f"unsupported db_type: {db_type}")
+
+    return {
+        "path": str(output_path),
+        "filename": filename,
+        "size": output_path.stat().st_size,
+    }
+
+
+def restore_database(
+    db_name: str,
+    db_type: str,
+    input_path: str,
+) -> dict[str, Any]:
+    """Restore a database from a (possibly gzipped) SQL dump.
+
+    ``input_path`` must be an existing file.
+    """
+    db_name = _validate_db_name(db_name)
+    p = Path(input_path)
+    if not p.is_file():
+        raise FileNotFoundError(f"backup file not found: {input_path}")
+
+    # Read, decompressing if needed
+    if p.suffix == ".gz":
+        with gzip.open(p, "rb") as f:
+            sql_bytes = f.read()
+    else:
+        sql_bytes = p.read_bytes()
+
+    if db_type == "mysql":
+        r = subprocess.run(
+            ["mysql", db_name],
+            input=sql_bytes,
+            capture_output=True,
+            timeout=600,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"mysql restore failed: {r.stderr.decode(errors='replace').strip()}")
+    elif db_type == "postgresql":
+        r = subprocess.run(
+            ["sudo", "-u", "postgres", "psql", db_name],
+            input=sql_bytes,
+            capture_output=True,
+            timeout=600,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"psql restore failed: {r.stderr.decode(errors='replace').strip()}")
+    else:
+        raise ValueError(f"unsupported db_type: {db_type}")
+
+    return {"db_name": db_name, "restored_from": str(p)}
+
+
+def list_database_backups(username: str, db_name: str | None = None) -> list[dict[str, Any]]:
+    """List backup files for a user, optionally filtered by db_name prefix.
+
+    Returns a list of dicts with keys: filename, path, size, created_at.
+    """
+    dest = _backup_dir_for_user(username)
+    pattern = f"{db_name}_*.sql.gz" if db_name else "*.sql.gz"
+    files = sorted(dest.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
+
+    results: list[dict[str, Any]] = []
+    for f in files:
+        stat = f.stat()
+        results.append({
+            "filename": f.name,
+            "path": str(f),
+            "size": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        })
+    return results
+
+
+def delete_database_backup(username: str, backup_name: str) -> dict[str, Any]:
+    """Delete a specific backup file. Returns {"deleted": True}."""
+    # Sanitise: only allow filenames, no path traversal
+    if "/" in backup_name or "\\" in backup_name or ".." in backup_name:
+        raise ValueError("invalid backup name")
+    dest = _backup_dir_for_user(username)
+    target = dest / backup_name
+    if not target.is_file():
+        raise FileNotFoundError(f"backup not found: {backup_name}")
+    target.unlink()
+    return {"deleted": True, "filename": backup_name}

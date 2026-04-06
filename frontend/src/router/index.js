@@ -121,6 +121,12 @@ const routes = [
         meta: { admin: true }
       },
       {
+        path: 'logs',
+        name: 'logs',
+        component: () => import('@/views/LogsView.vue'),
+        meta: { admin: true }
+      },
+      {
         path: 'api-keys',
         name: 'api-keys',
         component: () => import('@/views/ApiKeysView.vue')
@@ -136,6 +142,16 @@ const routes = [
         component: () => import('@/views/DockerView.vue')
       },
       {
+        path: 'apps',
+        name: 'apps',
+        component: () => import('@/views/AppsView.vue')
+      },
+      {
+        path: 'runtime',
+        name: 'runtime',
+        component: () => import('@/views/RuntimeAppsView.vue')
+      },
+      {
         path: 'wordpress',
         name: 'wordpress',
         component: () => import('@/views/WordPressView.vue')
@@ -144,6 +160,18 @@ const routes = [
         path: 'monitoring',
         name: 'monitoring',
         component: () => import('@/views/MonitoringView.vue'),
+        meta: { admin: true }
+      },
+      {
+        path: 'security',
+        name: 'security',
+        component: () => import('@/views/SecurityView.vue'),
+        meta: { admin: true }
+      },
+      {
+        path: 'analytics',
+        name: 'analytics',
+        component: () => import('@/views/AnalyticsView.vue'),
         meta: { admin: true }
       },
       {
@@ -156,6 +184,36 @@ const routes = [
         path: 'settings/ai',
         name: 'settings-ai',
         component: () => import('@/views/AiSettingsView.vue'),
+        meta: { admin: true }
+      },
+      {
+        path: 'translations',
+        name: 'translations',
+        component: () => import('@/views/TranslationsView.vue'),
+        meta: { admin: true }
+      },
+      {
+        path: 'wireguard',
+        name: 'wireguard',
+        component: () => import('@/views/WireGuardView.vue'),
+        meta: { admin: true }
+      },
+      {
+        path: 'antivirus',
+        name: 'antivirus',
+        component: () => import('@/views/AntivirusView.vue'),
+        meta: { admin: true }
+      },
+      {
+        path: 'waf',
+        name: 'waf',
+        component: () => import('@/views/WafView.vue'),
+        meta: { admin: true }
+      },
+      {
+        path: 'ip-manager',
+        name: 'ip-manager',
+        component: () => import('@/views/IpManagerView.vue'),
         meta: { admin: true }
       },
       {

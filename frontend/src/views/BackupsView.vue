@@ -83,9 +83,9 @@
         </template>
 
         <template #actions="{ row }">
-          <div class="flex items-center justify-end gap-2">
+          <div class="flex items-center justify-end gap-1 flex-wrap">
             <button
-              class="btn-ghost text-xs px-2 py-1"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px]"
               title="Download"
               :disabled="row.status !== 'completed'"
               @click="handleDownload(row)"
@@ -93,7 +93,7 @@
               Download
             </button>
             <button
-              class="btn-ghost text-xs px-2 py-1"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px]"
               title="Restore"
               :disabled="row.status !== 'completed'"
               @click="openRestore(row)"
@@ -101,7 +101,7 @@
               Restore
             </button>
             <button
-              class="btn-ghost text-xs px-2 py-1 text-error hover:text-error"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-error hover:text-error"
               title="Delete"
               @click="confirmDeleteBackup(row)"
             >
@@ -121,13 +121,73 @@
             <div>
               <p class="text-sm font-medium text-error">Warning: Destructive Action</p>
               <p class="text-xs text-[var(--text-muted)] mt-1">
-                This will overwrite all current data with the backup from
+                Restoring will overwrite existing data for the selected components from the backup dated
                 <strong class="text-[var(--text-primary)]">{{ restoreTarget?.created_at ? formatDate(restoreTarget.created_at) : '' }}</strong>.
                 This action cannot be undone.
               </p>
             </div>
           </div>
         </div>
+
+        <!-- Selective Restore Options -->
+        <div>
+          <label class="block text-sm font-semibold text-[var(--text-primary)] mb-2">Select components to restore</label>
+          <div class="space-y-2">
+            <label class="flex items-center gap-3 p-2 rounded-lg hover:bg-[var(--surface)] transition-colors cursor-pointer">
+              <input
+                v-model="restoreOptions.restore_files"
+                type="checkbox"
+                class="w-4 h-4 rounded border-[var(--border)] text-primary focus:ring-primary/50"
+              />
+              <div>
+                <span class="text-sm font-medium text-[var(--text-primary)]">Files</span>
+                <p class="text-xs text-[var(--text-muted)]">Home directory and website files</p>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 p-2 rounded-lg hover:bg-[var(--surface)] transition-colors cursor-pointer">
+              <input
+                v-model="restoreOptions.restore_databases"
+                type="checkbox"
+                class="w-4 h-4 rounded border-[var(--border)] text-primary focus:ring-primary/50"
+              />
+              <div>
+                <span class="text-sm font-medium text-[var(--text-primary)]">Databases</span>
+                <p class="text-xs text-[var(--text-muted)]">MySQL and PostgreSQL databases</p>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 p-2 rounded-lg hover:bg-[var(--surface)] transition-colors cursor-pointer">
+              <input
+                v-model="restoreOptions.restore_emails"
+                type="checkbox"
+                class="w-4 h-4 rounded border-[var(--border)] text-primary focus:ring-primary/50"
+              />
+              <div>
+                <span class="text-sm font-medium text-[var(--text-primary)]">Emails</span>
+                <p class="text-xs text-[var(--text-muted)]">Maildir and email data</p>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 p-2 rounded-lg hover:bg-[var(--surface)] transition-colors cursor-pointer">
+              <input
+                v-model="restoreOptions.restore_cron"
+                type="checkbox"
+                class="w-4 h-4 rounded border-[var(--border)] text-primary focus:ring-primary/50"
+              />
+              <div>
+                <span class="text-sm font-medium text-[var(--text-primary)]">Cron Jobs</span>
+                <p class="text-xs text-[var(--text-muted)]">Scheduled tasks and crontab entries</p>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Warning when nothing selected -->
+        <div
+          v-if="!restoreOptions.restore_files && !restoreOptions.restore_databases && !restoreOptions.restore_emails && !restoreOptions.restore_cron"
+          class="p-3 rounded-lg bg-warning/10 border border-warning/20"
+        >
+          <p class="text-xs text-warning">Select at least one component to restore.</p>
+        </div>
+
         <div>
           <label class="block text-sm font-medium text-[var(--text-primary)] mb-1">
             Type <span class="font-mono font-bold text-error">RESTORE</span> to confirm
@@ -144,7 +204,7 @@
         <button class="btn-secondary" @click="showRestoreModal = false">Cancel</button>
         <button
           class="btn-danger"
-          :disabled="restoreConfirmText !== 'RESTORE' || restoring"
+          :disabled="restoreConfirmText !== 'RESTORE' || restoring || noRestoreComponentSelected"
           @click="handleRestore"
         >
           <span v-if="restoring" class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>
@@ -166,7 +226,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import client from '@/api/client'
 import { useNotificationsStore } from '@/stores/notifications'
 import DataTable from '@/components/DataTable.vue'
@@ -184,6 +244,18 @@ const restoring = ref(false)
 const showRestoreModal = ref(false)
 const restoreTarget = ref(null)
 const restoreConfirmText = ref('')
+
+const restoreOptions = ref({
+  restore_files: true,
+  restore_databases: true,
+  restore_emails: false,
+  restore_cron: false,
+})
+
+const noRestoreComponentSelected = computed(() => {
+  const o = restoreOptions.value
+  return !o.restore_files && !o.restore_databases && !o.restore_emails && !o.restore_cron
+})
 
 const showDeleteDialog = ref(false)
 const deleteTarget = ref(null)
@@ -280,14 +352,21 @@ function handleDownload(backup) {
 function openRestore(backup) {
   restoreTarget.value = backup
   restoreConfirmText.value = ''
+  restoreOptions.value = {
+    restore_files: true,
+    restore_databases: true,
+    restore_emails: false,
+    restore_cron: false,
+  }
   showRestoreModal.value = true
 }
 
 async function handleRestore() {
   if (restoreConfirmText.value !== 'RESTORE' || !restoreTarget.value?.id) return
+  if (noRestoreComponentSelected.value) return
   restoring.value = true
   try {
-    await client.post(`/backups/${restoreTarget.value.id}/restore`)
+    await client.post(`/backups/${restoreTarget.value.id}/restore`, restoreOptions.value)
     notifications.success('Backup restore started. This may take a few minutes.')
     showRestoreModal.value = false
   } catch (err) {

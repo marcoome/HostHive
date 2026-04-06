@@ -113,6 +113,7 @@ const allItems = computed(() => {
     { id: 'nav-backups', title: t('nav.backups'), icon: '&#9744;', path: '/backups', section: 'navigation' },
     { id: 'nav-files', title: t('nav.files'), icon: '&#9782;', path: '/files', shortcut: 'G F', section: 'navigation' },
     { id: 'nav-server', title: t('nav.server'), icon: '&#9874;', path: '/server', shortcut: 'G S', section: 'navigation' },
+    { id: 'nav-apps', title: t('nav.apps', 'App Store'), icon: '&#9881;', path: '/apps', section: 'navigation' },
     { id: 'nav-docker', title: t('nav.docker'), icon: '&#9830;', path: '/docker', section: 'navigation' },
     { id: 'nav-wordpress', title: t('nav.wordpress'), icon: '&#9998;', path: '/wordpress', section: 'navigation' },
     { id: 'nav-ai', title: t('nav.ai'), icon: '&#10024;', path: '/ai', shortcut: 'G A', section: 'navigation' },

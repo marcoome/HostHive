@@ -279,6 +279,129 @@ def aggregate_domain_bandwidth(self) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Reseller bandwidth rollup -- every hour (runs after domain aggregation)
+# ---------------------------------------------------------------------------
+
+@app.task(
+    name="api.tasks.monitoring_tasks.aggregate_reseller_bandwidth",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+)
+def aggregate_reseller_bandwidth(self) -> dict:
+    """Roll up per-domain bandwidth into per-reseller used_bandwidth_gb.
+
+    For each reseller:
+      1. Find all sub-users (User.created_by == reseller_id)
+      2. Find all domains belonging to those users
+      3. Sum DomainBandwidth.bytes_out for the current calendar month
+      4. Update ResellerLimit.used_bandwidth_gb
+      5. If exceeded, optionally suspend users and log a warning
+    """
+    import asyncio
+    from datetime import date
+
+    from api.models.domains import Domain
+    from api.models.monitoring import DomainBandwidth
+    from api.models.reseller import ResellerLimit
+    from api.models.users import User, UserRole
+
+    logger.info("Aggregating reseller bandwidth")
+
+    loop = asyncio.new_event_loop()
+    try:
+        from sqlalchemy import func as sa_func, select
+        from api.core.database import async_session_factory
+
+        async def _run():
+            async with async_session_factory() as session:
+                # Get all reseller limits
+                result = await session.execute(select(ResellerLimit))
+                all_limits = result.scalars().all()
+                updated = 0
+                exceeded = 0
+
+                today = date.today()
+                month_start = today.replace(day=1)
+
+                for rl in all_limits:
+                    # Get sub-user IDs for this reseller
+                    sub_q = select(User.id).where(
+                        User.created_by == rl.reseller_id,
+                        User.role == UserRole.USER,
+                    )
+                    sub_result = await session.execute(sub_q)
+                    sub_user_ids = [row[0] for row in sub_result.all()]
+
+                    if not sub_user_ids:
+                        rl.used_bandwidth_gb = 0.0
+                        session.add(rl)
+                        updated += 1
+                        continue
+
+                    # Get all domain IDs for those users
+                    domain_q = select(Domain.id).where(
+                        Domain.user_id.in_(sub_user_ids)
+                    )
+                    domain_result = await session.execute(domain_q)
+                    domain_ids = [row[0] for row in domain_result.all()]
+
+                    if not domain_ids:
+                        rl.used_bandwidth_gb = 0.0
+                        session.add(rl)
+                        updated += 1
+                        continue
+
+                    # Sum bytes_out for this month
+                    bw_q = select(
+                        sa_func.coalesce(sa_func.sum(DomainBandwidth.bytes_out), 0)
+                    ).where(
+                        DomainBandwidth.domain_id.in_(domain_ids),
+                        DomainBandwidth.date >= month_start,
+                    )
+                    total_bytes = (await session.execute(bw_q)).scalar() or 0
+                    used_gb = round(total_bytes / (1024 ** 3), 2)
+
+                    rl.used_bandwidth_gb = used_gb
+                    session.add(rl)
+                    updated += 1
+
+                    # Check if exceeded
+                    if used_gb >= rl.max_total_bandwidth_gb > 0:
+                        exceeded += 1
+                        logger.warning(
+                            "Reseller %s bandwidth exceeded: %.2f GB / %d GB",
+                            rl.reseller_id, used_gb, rl.max_total_bandwidth_gb,
+                        )
+                        # Optionally suspend all sub-users
+                        for uid in sub_user_ids:
+                            user_result = await session.execute(
+                                select(User).where(User.id == uid)
+                            )
+                            user = user_result.scalar_one_or_none()
+                            if user and not user.is_suspended:
+                                user.is_suspended = True
+                                session.add(user)
+                                logger.warning(
+                                    "Auto-suspended user %s due to reseller bandwidth limit",
+                                    user.username,
+                                )
+
+                await session.commit()
+                return {"updated": updated, "exceeded": exceeded}
+
+        result = loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
+    logger.info(
+        "Reseller bandwidth rollup: %d updated, %d exceeded",
+        result["updated"], result["exceeded"],
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Cleanup -- daily (keep 7 days of health checks)
 # ---------------------------------------------------------------------------
 

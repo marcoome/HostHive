@@ -17,6 +17,7 @@ from api.models.databases import Database
 from api.models.domains import Domain
 from api.models.email_accounts import EmailAccount
 from api.models.ftp_accounts import FtpAccount
+from api.models.packages import Package
 from api.models.users import User, UserRole
 from api.schemas.databases import DatabaseResponse
 from api.schemas.domains import DomainResponse
@@ -134,6 +135,14 @@ async def create_user(
             os.makedirs(dirpath, mode=0o755, exist_ok=True)
         except OSError:
             pass
+
+    # Apply shell settings from the assigned package
+    if body.package_id:
+        pkg_result = await db.execute(select(Package).where(Package.id == body.package_id))
+        pkg = pkg_result.scalar_one_or_none()
+        if pkg:
+            from api.routers.packages import _apply_shell_for_user
+            await _apply_shell_for_user(body.username, pkg.shell_access, pkg.shell_type)
 
     _log(db, request, admin.id, "users.create", f"Created user {body.username}")
     return UserResponse.model_validate(user)

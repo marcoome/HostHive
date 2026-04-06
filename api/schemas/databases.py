@@ -49,6 +49,8 @@ class DatabaseResponse(BaseModel):
     db_name: str
     db_user: str
     db_type: DbType
+    remote_access: bool = False
+    allowed_hosts: Optional[str] = '["localhost"]'
     created_at: datetime
 
     # Frontend-friendly aliases included in JSON output
@@ -56,6 +58,7 @@ class DatabaseResponse(BaseModel):
     username: Optional[str] = None
     type: Optional[str] = None
     size: int = 0
+    extra_users: list["DatabaseUserResponse"] = []
 
     model_config = {"from_attributes": True}
 
@@ -66,3 +69,60 @@ class DatabaseResponse(BaseModel):
         self.username = self.db_user
         self.type = self.db_type.value if self.db_type else None
         return self
+
+
+# ---------------------------------------------------------------------------
+# Remote access
+# ---------------------------------------------------------------------------
+
+class RemoteAccessUpdate(BaseModel):
+    enabled: bool = False
+    allowed_hosts: list[str] = Field(default_factory=lambda: ["localhost"])
+
+
+# ---------------------------------------------------------------------------
+# Additional database users
+# ---------------------------------------------------------------------------
+
+class DatabaseUserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_]+$")
+    password: str = Field(min_length=8, max_length=128)
+    permissions: str = Field(
+        default="ALL",
+        description="Comma-separated: SELECT,INSERT,UPDATE,DELETE or ALL",
+    )
+
+
+class DatabaseUserResponse(BaseModel):
+    id: uuid.UUID
+    database_id: uuid.UUID
+    username: str
+    permissions: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DatabaseUserPermissionsUpdate(BaseModel):
+    permissions: str = Field(
+        ...,
+        description="Comma-separated: SELECT,INSERT,UPDATE,DELETE or ALL",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backup schemas (unchanged)
+# ---------------------------------------------------------------------------
+
+class BackupInfo(BaseModel):
+    filename: str
+    size: int = 0
+    created_at: Optional[str] = None
+
+
+class BackupListResponse(BaseModel):
+    backups: list[BackupInfo] = []
+
+
+class RestoreRequest(BaseModel):
+    backup_name: str = Field(..., min_length=1, max_length=256)

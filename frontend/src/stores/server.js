@@ -9,6 +9,11 @@ export const useServerStore = defineStore('server', () => {
   const fail2banJails = ref([])
   const loading = ref(false)
 
+  // Historical time-series data
+  const history = ref([])
+  const historyPeriod = ref('1h')
+  const historyLoading = ref(false)
+
   async function fetchStats() {
     loading.value = true
     try {
@@ -16,6 +21,19 @@ export const useServerStore = defineStore('server', () => {
       stats.value = data
     } finally {
       loading.value = false
+    }
+  }
+
+  async function fetchHistory(period = '1h') {
+    historyLoading.value = true
+    try {
+      const { data } = await client.get('/server/stats/history', { params: { period } })
+      history.value = Array.isArray(data.items) ? data.items : []
+      historyPeriod.value = period
+    } catch {
+      history.value = []
+    } finally {
+      historyLoading.value = false
     }
   }
 
@@ -66,8 +84,9 @@ export const useServerStore = defineStore('server', () => {
 
   return {
     stats, services, firewallRules, fail2banJails, loading,
+    history, historyPeriod, historyLoading,
     fetchStats, fetchServices, restartService, toggleService,
     fetchFirewallRules, addFirewallRule, removeFirewallRule,
-    fetchFail2ban, toggleFail2banJail
+    fetchFail2ban, toggleFail2banJail, fetchHistory
   }
 })

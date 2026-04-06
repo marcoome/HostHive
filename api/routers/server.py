@@ -531,15 +531,27 @@ async def server_stats(
 
 
 # --------------------------------------------------------------------------
-# GET /stats/history -- last 24h from ServerStat table (no agent needed)
+# GET /stats/history -- historical stats from ServerStat table (no agent needed)
+# Accepts either `period` (1h|6h|24h|7d|30d) or raw `hours` (1-720).
 # --------------------------------------------------------------------------
+_PERIOD_MAP: dict[str, int] = {
+    "1h": 1,
+    "6h": 6,
+    "24h": 24,
+    "7d": 168,
+    "30d": 720,
+}
+
+
 @router.get("/stats/history", status_code=status.HTTP_200_OK)
 async def stats_history(
-    hours: int = Query(24, ge=1, le=168),
+    period: Optional[str] = Query(None, pattern="^(1h|6h|24h|7d|30d)$"),
+    hours: int = Query(24, ge=1, le=720),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    resolved_hours = _PERIOD_MAP.get(period, hours) if period else hours
+    since = datetime.now(timezone.utc) - timedelta(hours=resolved_hours)
     results = (await db.execute(
         select(ServerStat)
         .where(ServerStat.created_at >= since)
@@ -547,21 +559,22 @@ async def stats_history(
     )).scalars().all()
 
     return {
+        "period": period or f"{resolved_hours}h",
         "items": [
             {
                 "id": str(s.id),
-                "cpu_percent": s.cpu_percent,
-                "memory_percent": s.memory_percent,
-                "memory_used_mb": s.memory_used_mb,
-                "disk_percent": s.disk_percent,
-                "disk_used_gb": s.disk_used_gb,
-                "load_avg_1": s.load_avg_1,
-                "load_avg_5": s.load_avg_5,
-                "load_avg_15": s.load_avg_15,
-                "network_rx_bytes": s.network_rx_bytes,
-                "network_tx_bytes": s.network_tx_bytes,
-                "active_connections": s.active_connections,
-                "created_at": s.created_at.isoformat(),
+                "ts": s.created_at.isoformat(),
+                "cpu": s.cpu_percent,
+                "mem": s.memory_percent,
+                "mem_used": s.memory_used_mb,
+                "disk": s.disk_percent,
+                "disk_used": s.disk_used_gb,
+                "load1": s.load_avg_1,
+                "load5": s.load_avg_5,
+                "load15": s.load_avg_15,
+                "net_rx": s.network_rx_bytes,
+                "net_tx": s.network_tx_bytes,
+                "conns": s.active_connections,
             }
             for s in results
         ],

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, String, func
+from sqlalchemy import Boolean, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from api.core.database import Base
@@ -21,7 +21,10 @@ class EmailAlias(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True,
     )
     source: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    destination: Mapped[str] = mapped_column(String(255))
+    # Comma-separated list of destination addresses for multi-target forwarding
+    destination: Mapped[str] = mapped_column(Text, default="")
+    # When True, deliver a copy to the local mailbox in addition to forwarding
+    keep_local_copy: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         server_default=func.now(),

@@ -26,22 +26,48 @@ from api.models.activity_log import ActivityLog
 from api.models.domains import Domain
 from api.models.email_accounts import EmailAccount
 from api.models.email_aliases import EmailAlias
+from api.models.packages import Package
 from api.models.users import User
 from api.schemas.email import (
     AliasCreate,
     AliasResponse,
+    AutoresponderResponse,
+    AutoresponderUpdate,
+    CatchAllResponse,
+    CatchAllSet,
     EmailAccountCreate,
     EmailAccountResponse,
+    PasswordChange,
+    QuotaResponse,
+    RateLimitResponse,
+    RateLimitUpdate,
+    SieveFilterGet,
+    SieveFilterPut,
+    SieveTestRequest,
+    SieveTestResponse,
+    SpamFilterResponse,
+    SpamFilterUpdate,
 )
 from api.services.mail_ops import (
+    configure_autoresponder_direct,
+    configure_catch_all_direct,
+    configure_ratelimit_direct,
+    configure_spam_filter_direct,
     create_alias_direct,
     create_mailbox_direct,
     delete_alias_direct,
     delete_mailbox_direct,
     flush_mail_queue,
     get_mail_queue,
+    get_quota_usage_direct,
     list_aliases_direct,
+    read_sieve_filters_direct,
+    remove_catch_all_direct,
     remove_from_queue,
+    set_password_direct,
+    train_spam_direct,
+    validate_sieve_direct,
+    write_sieve_filters_direct,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +183,21 @@ async def _try_agent_get_queue(agent) -> dict | None:
         return None
 
 
+async def _try_agent_set_password(agent, address: str, new_password: str) -> bool:
+    """Attempt password change via agent.  Returns True on success."""
+    if agent is None:
+        return False
+    try:
+        await agent._request("PUT", "/mail/set-password", json={
+            "address": address,
+            "new_password": new_password,
+        })
+        return True
+    except Exception as exc:
+        logger.warning("Agent set_password failed, will use direct fallback: %s", exc)
+        return False
+
+
 async def _try_agent_flush_queue(agent) -> dict | None:
     """Attempt to flush mail queue via agent.  Returns dict or None."""
     if agent is None:
@@ -217,6 +258,29 @@ async def create_mailbox(
     exists = await db.execute(select(EmailAccount).where(EmailAccount.address == body.address))
     if exists.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email address already exists.")
+
+    # -- Package limit check: max_mail_domains --
+    if not _is_admin(current_user) and current_user.package_id:
+        pkg_result = await db.execute(select(Package).where(Package.id == current_user.package_id))
+        pkg = pkg_result.scalar_one_or_none()
+        if pkg and pkg.max_mail_domains > 0:
+            # Count distinct domains that already have mailboxes for this user
+            distinct_domains = (await db.execute(
+                select(func.count(func.distinct(EmailAccount.domain_id)))
+                .where(EmailAccount.user_id == current_user.id)
+            )).scalar() or 0
+            # Check if this domain is already in use by the user
+            domain_in_use = (await db.execute(
+                select(EmailAccount).where(
+                    EmailAccount.user_id == current_user.id,
+                    EmailAccount.domain_id == body.domain_id,
+                ).limit(1)
+            )).scalar_one_or_none()
+            if domain_in_use is None and distinct_domains >= pkg.max_mail_domains:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Mail domain limit reached ({pkg.max_mail_domains}). Upgrade your package for more.",
+                )
 
     # 1. Save to DB first (store both bcrypt hash for system auth and Fernet-encrypted for SSO)
     acct = EmailAccount(
@@ -322,6 +386,15 @@ async def create_alias(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Resolve destinations (supports both legacy single + new multi-target)
+    dest_list = body.resolved_destinations()
+    if not dest_list:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one destination address is required.",
+        )
+    dest_str = ", ".join(dest_list)
+
     # 1. Check uniqueness in DB
     exists = await db.execute(select(EmailAlias).where(EmailAlias.source == body.source))
     if exists.scalar_one_or_none() is not None:
@@ -331,22 +404,27 @@ async def create_alias(
     alias = EmailAlias(
         user_id=current_user.id,
         source=body.source,
-        destination=body.destination,
+        destination=dest_str,
+        keep_local_copy=body.keep_local_copy,
     )
     db.add(alias)
     await db.flush()
 
     # 3. Try agent, fall back to direct
     agent = _get_agent(request)
-    agent_ok = await _try_agent_create_alias(agent, body.source, body.destination)
+    agent_ok = await _try_agent_create_alias(agent, body.source, dest_str)
 
     if not agent_ok:
-        result = await create_alias_direct(body.source, body.destination)
+        result = await create_alias_direct(
+            body.source, dest_str,
+            destinations=dest_list,
+            keep_local_copy=body.keep_local_copy,
+        )
         if not result.get("ok"):
             logger.error("Direct alias creation failed for %s: %s", body.source, result.get("error"))
 
-    _log(db, request, current_user.id, "email.create_alias", f"Created alias {body.source} -> {body.destination}")
-    return AliasResponse.model_validate(alias)
+    _log(db, request, current_user.id, "email.create_alias", f"Created alias {body.source} -> {dest_str}")
+    return AliasResponse.from_alias(alias)
 
 
 @router.get("/aliases", status_code=status.HTTP_200_OK)
@@ -369,7 +447,7 @@ async def list_aliases(
 
     if results:
         return {
-            "items": [AliasResponse.model_validate(a) for a in results],
+            "items": [AliasResponse.from_alias(a) for a in results],
             "total": total,
         }
 
@@ -506,6 +584,197 @@ async def flush_mail_queue_endpoint(
 
 
 # ==========================================================================
+# Catch-All email -- /domains/{domain}/catch-all
+# MUST be before /{email_id} to avoid path conflicts.
+# ==========================================================================
+
+@router.get("/domains/{domain}/catch-all", response_model=CatchAllResponse, status_code=status.HTTP_200_OK)
+async def get_catch_all(
+    domain: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the catch-all configuration for a domain."""
+    result = await db.execute(select(Domain).where(Domain.domain_name == domain))
+    dom = result.scalar_one_or_none()
+    if dom is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Domain not found.")
+    if not _is_admin(current_user) and dom.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+    return CatchAllResponse(
+        domain=dom.domain_name,
+        catch_all_address=dom.catch_all_address,
+        enabled=dom.catch_all_address is not None,
+    )
+
+
+@router.put("/domains/{domain}/catch-all", response_model=CatchAllResponse, status_code=status.HTTP_200_OK)
+async def set_catch_all(
+    domain: str,
+    body: CatchAllSet,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Set the catch-all email address for a domain."""
+    result = await db.execute(select(Domain).where(Domain.domain_name == domain))
+    dom = result.scalar_one_or_none()
+    if dom is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Domain not found.")
+    if not _is_admin(current_user) and dom.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+    dom.catch_all_address = body.address
+    db.add(dom)
+    await db.flush()
+
+    # Configure catch-all in Exim4 virtual aliases
+    sys_result = await configure_catch_all_direct(domain, body.address)
+    if not sys_result.get("ok"):
+        logger.error("Failed to configure catch-all for %s: %s", domain, sys_result.get("error"))
+
+    _log(db, request, current_user.id, "email.catch_all_set", f"Set catch-all for {domain} -> {body.address}")
+    return CatchAllResponse(
+        domain=dom.domain_name,
+        catch_all_address=dom.catch_all_address,
+        enabled=True,
+    )
+
+
+@router.delete("/domains/{domain}/catch-all", status_code=status.HTTP_200_OK)
+async def delete_catch_all(
+    domain: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Disable the catch-all email for a domain."""
+    result = await db.execute(select(Domain).where(Domain.domain_name == domain))
+    dom = result.scalar_one_or_none()
+    if dom is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Domain not found.")
+    if not _is_admin(current_user) and dom.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+    dom.catch_all_address = None
+    db.add(dom)
+    await db.flush()
+
+    # Remove catch-all from Exim4 virtual aliases
+    sys_result = await remove_catch_all_direct(domain)
+    if not sys_result.get("ok"):
+        logger.error("Failed to remove catch-all for %s: %s", domain, sys_result.get("error"))
+
+    _log(db, request, current_user.id, "email.catch_all_remove", f"Removed catch-all for {domain}")
+    return CatchAllResponse(domain=dom.domain_name, catch_all_address=None, enabled=False)
+
+
+# ==========================================================================
+# PUT /{id}/password -- change mailbox password
+# MUST be before /{email_id} catch-all to avoid path conflicts.
+# ==========================================================================
+
+@router.put("/{email_id}/password", status_code=status.HTTP_200_OK)
+async def change_password(
+    email_id: uuid.UUID,
+    body: PasswordChange,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Change the password for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    # 1. Update DB: bcrypt hash + re-encrypt for SSO
+    acct.password_hash = hash_password(body.new_password)
+    acct.password_encrypted = encrypt_value(body.new_password, settings.SECRET_KEY)
+    db.add(acct)
+    await db.flush()
+
+    # 2. Update system: agent -> direct fallback
+    agent = _get_agent(request)
+    agent_ok = await _try_agent_set_password(agent, acct.address, body.new_password)
+
+    if not agent_ok:
+        result = await set_password_direct(acct.address, body.new_password)
+        if not result.get("ok"):
+            logger.error("Direct set_password failed for %s: %s", acct.address, result.get("error"))
+
+    _log(db, request, current_user.id, "email.change_password", f"Changed password for {acct.address}")
+    return {"detail": "Password changed successfully."}
+
+
+# ==========================================================================
+# GET /{id}/quota -- get current quota usage
+# MUST be before /{email_id} catch-all to avoid path conflicts.
+# ==========================================================================
+
+@router.get("/{email_id}/quota", response_model=QuotaResponse, status_code=status.HTTP_200_OK)
+async def get_quota(
+    email_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get current quota usage for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    # Try to get live usage from the system
+    usage_result = await get_quota_usage_direct(acct.address)
+    used_mb = usage_result.get("used_mb", acct.quota_used_mb)
+
+    # Update cached value in DB
+    acct.quota_used_mb = used_mb
+    db.add(acct)
+    await db.flush()
+
+    usage_percent = round((used_mb / acct.quota_mb) * 100, 1) if acct.quota_mb > 0 else 0.0
+
+    return QuotaResponse(
+        address=acct.address,
+        quota_mb=acct.quota_mb,
+        quota_used_mb=used_mb,
+        usage_percent=usage_percent,
+    )
+
+
+# ==========================================================================
+# PUT /{id}/rate-limit -- configure email rate limiting
+# MUST be before /{email_id} catch-all to avoid path conflicts.
+# ==========================================================================
+
+@router.put("/{email_id}/rate-limit", response_model=RateLimitResponse, status_code=status.HTTP_200_OK)
+async def update_rate_limit(
+    email_id: uuid.UUID,
+    body: RateLimitUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Configure the outbound email rate limit for a mailbox."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    # 1. Save to DB
+    acct.max_emails_per_hour = body.max_emails_per_hour
+    db.add(acct)
+    await db.flush()
+
+    # 2. Configure in Exim4 (direct -- no agent endpoint for this yet)
+    result = await configure_ratelimit_direct(acct.address, body.max_emails_per_hour)
+    if not result.get("ok"):
+        logger.error("configure_ratelimit_direct failed for %s: %s", acct.address, result.get("error"))
+
+    _log(db, request, current_user.id, "email.rate_limit",
+         f"Set rate limit to {body.max_emails_per_hour}/hr for {acct.address}")
+
+    return RateLimitResponse(
+        address=acct.address,
+        max_emails_per_hour=acct.max_emails_per_hour,
+    )
+
+
+# ==========================================================================
 # POST /{id}/sso -- generate SSO token for Roundcube auto-login
 # MUST be before /{email_id} catch-all to avoid path conflicts.
 # ==========================================================================
@@ -558,6 +827,409 @@ async def email_sso(
 
     _log(db, request, current_user.id, "email.sso", f"SSO login to Roundcube for {acct.address}")
     return {"sso_url": f"/roundcube/sso.php?token={token}"}
+
+
+# ==========================================================================
+# Sieve filter endpoints
+# MUST be before /{email_id} catch-all to avoid path conflicts.
+# ==========================================================================
+
+
+def _rules_to_sieve(rules: list) -> str:
+    """Compile a list of visual filter rules into a Sieve script."""
+    requires = set()
+    rule_blocks = []
+
+    for rule in rules:
+        field = rule.field.lower()
+        match_type = rule.match_type
+        value = rule.value
+        action = rule.action.lower()
+        action_value = rule.action_value or ""
+
+        # Determine require extensions
+        if action == "fileinto":
+            requires.add('"fileinto"')
+        if action == "addflag":
+            requires.add('"imap4flags"')
+        if action == "redirect":
+            pass  # redirect is built-in
+        if match_type == "regex":
+            requires.add('"regex"')
+
+        # Build the test
+        header_name = {
+            "from": '"From"',
+            "to": '"To"',
+            "subject": '"Subject"',
+            "cc": '"Cc"',
+        }.get(field, f'"{field}"')
+
+        match_tag = {
+            "contains": ":contains",
+            "matches": ":matches",
+            "is": ":is",
+            "regex": ":regex",
+        }.get(match_type, ":contains")
+
+        escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
+        test = f'header {match_tag} {header_name} "{escaped_value}"'
+
+        # Build the action
+        escaped_action_value = action_value.replace("\\", "\\\\").replace('"', '\\"')
+        if action == "fileinto":
+            action_line = f'fileinto "{escaped_action_value}";'
+        elif action == "redirect":
+            action_line = f'redirect "{escaped_action_value}";'
+        elif action == "discard":
+            action_line = "discard;"
+        elif action == "addflag":
+            action_line = f'addflag "{escaped_action_value}";'
+        else:
+            action_line = "keep;"
+
+        rule_blocks.append(f"if {test} {{\n    {action_line}\n}}")
+
+    lines = []
+    if requires:
+        lines.append(f"require [{', '.join(sorted(requires))}];")
+        lines.append("")
+    lines.extend(rule_blocks)
+    return "\n".join(lines) + "\n"
+
+
+@router.get("/accounts/{email_id}/filters", response_model=SieveFilterGet, status_code=status.HTTP_200_OK)
+async def get_sieve_filters(
+    email_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the current Sieve filter rules for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    result = await read_sieve_filters_direct(acct.address)
+    return SieveFilterGet(
+        script=result.get("script", ""),
+        active=result.get("active", False),
+    )
+
+
+@router.put("/accounts/{email_id}/filters", response_model=SieveFilterGet, status_code=status.HTTP_200_OK)
+async def save_sieve_filters(
+    email_id: uuid.UUID,
+    body: SieveFilterPut,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save a Sieve filter script (from raw text or compiled from visual rules)."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    # Determine the script to write
+    if body.rules is not None:
+        script = _rules_to_sieve(body.rules)
+    elif body.script is not None:
+        script = body.script
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide either 'script' or 'rules'.",
+        )
+
+    result = await write_sieve_filters_direct(acct.address, script)
+    if not result.get("ok"):
+        logger.error("write_sieve_filters_direct failed for %s: %s", acct.address, result.get("error"))
+
+    _log(db, request, current_user.id, "email.filters_save", f"Saved Sieve filters for {acct.address}")
+
+    return SieveFilterGet(
+        script=script,
+        active=bool(script.strip()),
+    )
+
+
+@router.post("/accounts/{email_id}/filters/test", response_model=SieveTestResponse, status_code=status.HTTP_200_OK)
+async def test_sieve_filters(
+    email_id: uuid.UUID,
+    body: SieveTestRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Validate a Sieve script syntax using sievec."""
+    # Verify the user owns this account
+    await _get_email_or_404(email_id, db, current_user)
+
+    result = await validate_sieve_direct(body.script)
+    return SieveTestResponse(
+        valid=result.get("valid", False),
+        errors=result.get("errors"),
+    )
+
+
+# ==========================================================================
+# Spam filter endpoints
+# MUST be before /{email_id} catch-all to avoid path conflicts.
+# ==========================================================================
+
+
+@router.get("/accounts/{email_id}/spam", response_model=SpamFilterResponse, status_code=status.HTTP_200_OK)
+async def get_spam_settings(
+    email_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the per-user spam filter settings for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+    return SpamFilterResponse(
+        enabled=acct.spam_filter_enabled,
+        threshold=acct.spam_threshold,
+        action=acct.spam_action,
+        whitelist=acct.spam_whitelist,
+        blacklist=acct.spam_blacklist,
+    )
+
+
+@router.put("/accounts/{email_id}/spam", response_model=SpamFilterResponse, status_code=status.HTTP_200_OK)
+async def update_spam_settings(
+    email_id: uuid.UUID,
+    body: SpamFilterUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update per-user spam filter settings for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    # Validate action
+    if body.action not in ("move", "delete", "tag_only"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid spam action. Must be 'move', 'delete', or 'tag_only'.",
+        )
+
+    # 1. Save to DB
+    acct.spam_filter_enabled = body.enabled
+    acct.spam_threshold = body.threshold
+    acct.spam_action = body.action
+    acct.spam_whitelist = body.whitelist
+    acct.spam_blacklist = body.blacklist
+    db.add(acct)
+    await db.flush()
+
+    # 2. Configure SpamAssassin + Sieve on the system (direct fallback)
+    result = await configure_spam_filter_direct(
+        address=acct.address,
+        enabled=body.enabled,
+        threshold=body.threshold,
+        action=body.action,
+        whitelist=body.whitelist,
+        blacklist=body.blacklist,
+    )
+    if not result.get("ok"):
+        logger.error("configure_spam_filter_direct failed for %s: %s", acct.address, result.get("error"))
+
+    _log(db, request, current_user.id, "email.spam_filter",
+         f"Updated spam filter for {acct.address} (enabled={body.enabled}, action={body.action})")
+
+    return SpamFilterResponse(
+        enabled=acct.spam_filter_enabled,
+        threshold=acct.spam_threshold,
+        action=acct.spam_action,
+        whitelist=acct.spam_whitelist,
+        blacklist=acct.spam_blacklist,
+    )
+
+
+@router.post("/accounts/{email_id}/spam/train-ham", status_code=status.HTTP_200_OK)
+async def train_ham(
+    email_id: uuid.UUID,
+    request: Request,
+    message_path: str = Query(..., description="Path to the message file to train as not-spam"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Train SpamAssassin: mark a message as not-spam (ham)."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    result = await train_spam_direct(
+        address=acct.address,
+        message_path=message_path,
+        is_spam=False,
+    )
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "Failed to train ham."),
+        )
+
+    _log(db, request, current_user.id, "email.spam_train_ham",
+         f"Trained ham for {acct.address}: {message_path}")
+    return result
+
+
+@router.post("/accounts/{email_id}/spam/train-spam", status_code=status.HTTP_200_OK)
+async def train_spam_endpoint(
+    email_id: uuid.UUID,
+    request: Request,
+    message_path: str = Query(..., description="Path to the message file to train as spam"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Train SpamAssassin: mark a message as spam."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    result = await train_spam_direct(
+        address=acct.address,
+        message_path=message_path,
+        is_spam=True,
+    )
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "Failed to train spam."),
+        )
+
+    _log(db, request, current_user.id, "email.spam_train_spam",
+         f"Trained spam for {acct.address}: {message_path}")
+    return result
+
+
+# ==========================================================================
+# Autoresponder endpoints
+# MUST be before /{email_id} catch-all to avoid path conflicts.
+# ==========================================================================
+
+async def _try_agent_configure_autoresponder(agent, address: str, enabled: bool,
+                                              subject: str | None, body: str | None,
+                                              start_date: str | None, end_date: str | None) -> bool:
+    """Attempt to configure autoresponder via agent. Returns True on success."""
+    if agent is None:
+        return False
+    try:
+        await agent._request("PUT", "/mail/autoresponder", json={
+            "address": address,
+            "enabled": enabled,
+            "subject": subject,
+            "body": body,
+            "start_date": start_date,
+            "end_date": end_date,
+        })
+        return True
+    except Exception as exc:
+        logger.warning("Agent configure_autoresponder failed, will use direct fallback: %s", exc)
+        return False
+
+
+@router.get("/{email_id}/autoresponder", response_model=AutoresponderResponse, status_code=status.HTTP_200_OK)
+async def get_autoresponder(
+    email_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get current autoresponder settings for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+    return AutoresponderResponse(
+        enabled=acct.autoresponder_enabled,
+        subject=acct.autoresponder_subject,
+        body=acct.autoresponder_body,
+        start_date=acct.autoresponder_start_date,
+        end_date=acct.autoresponder_end_date,
+    )
+
+
+@router.put("/{email_id}/autoresponder", response_model=AutoresponderResponse, status_code=status.HTTP_200_OK)
+async def update_autoresponder(
+    email_id: uuid.UUID,
+    body: AutoresponderUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Enable or configure the autoresponder for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    # Validate: subject and body required when enabling
+    if body.enabled and (not body.subject or not body.body):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Subject and body are required when enabling autoresponder.",
+        )
+
+    # 1. Save to DB
+    acct.autoresponder_enabled = body.enabled
+    acct.autoresponder_subject = body.subject
+    acct.autoresponder_body = body.body
+    acct.autoresponder_start_date = body.start_date
+    acct.autoresponder_end_date = body.end_date
+    db.add(acct)
+    await db.flush()
+
+    # 2. Configure Sieve on the system (agent -> direct fallback)
+    start_str = body.start_date.isoformat() if body.start_date else None
+    end_str = body.end_date.isoformat() if body.end_date else None
+
+    agent = _get_agent(request)
+    agent_ok = await _try_agent_configure_autoresponder(
+        agent, acct.address, body.enabled, body.subject, body.body, start_str, end_str,
+    )
+
+    if not agent_ok:
+        result = await configure_autoresponder_direct(
+            address=acct.address,
+            enabled=body.enabled,
+            subject=body.subject,
+            body=body.body,
+            start_date=start_str,
+            end_date=end_str,
+        )
+        if not result.get("ok"):
+            logger.error("Direct autoresponder config failed for %s: %s", acct.address, result.get("error"))
+
+    _log(db, request, current_user.id, "email.autoresponder",
+         f"{'Enabled' if body.enabled else 'Updated'} autoresponder for {acct.address}")
+
+    return AutoresponderResponse(
+        enabled=acct.autoresponder_enabled,
+        subject=acct.autoresponder_subject,
+        body=acct.autoresponder_body,
+        start_date=acct.autoresponder_start_date,
+        end_date=acct.autoresponder_end_date,
+    )
+
+
+@router.delete("/{email_id}/autoresponder", status_code=status.HTTP_200_OK)
+async def disable_autoresponder(
+    email_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Disable the autoresponder for an email account."""
+    acct = await _get_email_or_404(email_id, db, current_user)
+
+    # 1. Update DB
+    acct.autoresponder_enabled = False
+    db.add(acct)
+    await db.flush()
+
+    # 2. Remove Sieve script on the system
+    agent = _get_agent(request)
+    agent_ok = await _try_agent_configure_autoresponder(
+        agent, acct.address, False, None, None, None, None,
+    )
+
+    if not agent_ok:
+        result = await configure_autoresponder_direct(
+            address=acct.address,
+            enabled=False,
+        )
+        if not result.get("ok"):
+            logger.error("Direct autoresponder disable failed for %s: %s", acct.address, result.get("error"))
+
+    _log(db, request, current_user.id, "email.autoresponder", f"Disabled autoresponder for {acct.address}")
+    return {"detail": "Autoresponder disabled."}
 
 
 # ==========================================================================

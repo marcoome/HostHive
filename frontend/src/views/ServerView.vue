@@ -107,6 +107,127 @@
       </div>
     </div>
 
+    <!-- Historical Charts -->
+    <div>
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+        <h2 class="text-sm font-semibold text-[var(--text-muted)] uppercase tracking-wider">Resource History</h2>
+        <div class="flex items-center gap-1 p-1 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+          <button
+            v-for="p in historyPeriods"
+            :key="p.value"
+            class="px-3 py-1 rounded-lg text-xs font-medium transition-all duration-200"
+            :class="selectedPeriod === p.value
+              ? 'bg-primary text-white shadow-sm'
+              : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-elevated)]'"
+            @click="changePeriod(p.value)"
+          >
+            {{ p.label }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Loading skeleton -->
+      <div v-if="historyLoading" class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div v-for="i in 5" :key="'hskel-' + i" class="glass rounded-2xl p-5">
+          <div class="skeleton h-4 w-24 rounded mb-4"></div>
+          <div class="skeleton h-[160px] rounded-xl"></div>
+        </div>
+      </div>
+
+      <!-- Charts grid -->
+      <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- CPU Usage -->
+        <div class="glass rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">CPU Usage</h3>
+            <span class="text-xs font-mono text-[#60a5fa]">{{ latestVal(historyData.cpu) }}%</span>
+          </div>
+          <HistoryChart
+            :series="[{ label: 'CPU', color: '#60a5fa', data: historyData.cpu }]"
+            :timestamps="historyData.timestamps"
+            unit="%"
+            :y-max="100"
+            :chart-height="160"
+          />
+        </div>
+
+        <!-- Memory Usage -->
+        <div class="glass rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Memory Usage</h3>
+            <span class="text-xs font-mono text-[#a78bfa]">{{ latestVal(historyData.mem) }}%</span>
+          </div>
+          <HistoryChart
+            :series="[{ label: 'RAM', color: '#a78bfa', data: historyData.mem }]"
+            :timestamps="historyData.timestamps"
+            unit="%"
+            :y-max="100"
+            :chart-height="160"
+          />
+        </div>
+
+        <!-- Disk I/O (used GB as proxy) -->
+        <div class="glass rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Disk Usage</h3>
+            <span class="text-xs font-mono text-[#fb923c]">{{ latestVal(historyData.disk) }}%</span>
+          </div>
+          <HistoryChart
+            :series="[{ label: 'Disk', color: '#fb923c', data: historyData.disk }]"
+            :timestamps="historyData.timestamps"
+            unit="%"
+            :y-max="100"
+            :chart-height="160"
+            :fill="true"
+          />
+        </div>
+
+        <!-- Network I/O -->
+        <div class="glass rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Network I/O</h3>
+            <div class="flex items-center gap-3 text-xs font-mono">
+              <span class="text-[#34d399]">RX {{ formatNetRate(historyData.netRx) }}</span>
+              <span class="text-[#6ee7b7]">TX {{ formatNetRate(historyData.netTx) }}</span>
+            </div>
+          </div>
+          <HistoryChart
+            :series="[
+              { label: 'RX', color: '#34d399', data: historyData.netRxRate },
+              { label: 'TX', color: '#6ee7b7', data: historyData.netTxRate },
+            ]"
+            :timestamps="historyData.timestamps"
+            unit="MB/s"
+            :chart-height="160"
+            :format-value="formatNetAxis"
+          />
+        </div>
+
+        <!-- Load Average -->
+        <div class="glass rounded-2xl p-5 lg:col-span-2">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Load Average</h3>
+            <div class="flex items-center gap-3 text-xs font-mono">
+              <span class="text-[#f87171]">1m: {{ latestVal(historyData.load1, 2) }}</span>
+              <span class="text-[#fca5a5]">5m: {{ latestVal(historyData.load5, 2) }}</span>
+              <span class="text-[#fecaca]">15m: {{ latestVal(historyData.load15, 2) }}</span>
+            </div>
+          </div>
+          <HistoryChart
+            :series="[
+              { label: '1 min', color: '#f87171', data: historyData.load1 },
+              { label: '5 min', color: '#fca5a5', data: historyData.load5 },
+              { label: '15 min', color: '#fecaca', data: historyData.load15 },
+            ]"
+            :timestamps="historyData.timestamps"
+            :chart-height="160"
+            :fill="false"
+            :format-value="(v) => v.toFixed(2)"
+          />
+        </div>
+      </div>
+    </div>
+
     <!-- Firewall Section -->
     <div>
       <div class="flex items-center justify-between mb-3">
@@ -350,7 +471,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useServerStore } from '@/stores/server'
 import { useNotificationsStore } from '@/stores/notifications'
 import client from '@/api/client'
@@ -359,6 +480,7 @@ import Modal from '@/components/Modal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import GaugeChart from '@/components/GaugeChart.vue'
+import HistoryChart from '@/components/HistoryChart.vue'
 
 const serverStore = useServerStore()
 const notifications = useNotificationsStore()
@@ -370,6 +492,104 @@ const loadingServices = ref(false)
 // Stats
 const stats = ref({})
 let statsInterval = null
+
+// History charts
+const historyPeriods = [
+  { label: '1H', value: '1h' },
+  { label: '6H', value: '6h' },
+  { label: '24H', value: '24h' },
+  { label: '7D', value: '7d' },
+  { label: '30D', value: '30d' },
+]
+const selectedPeriod = ref('1h')
+const historyLoading = ref(false)
+
+const historyData = computed(() => {
+  const items = serverStore.history || []
+  if (items.length === 0) {
+    return {
+      timestamps: [], cpu: [], mem: [], disk: [],
+      netRx: [], netTx: [], netRxRate: [], netTxRate: [],
+      load1: [], load5: [], load15: [],
+    }
+  }
+  const timestamps = items.map(i => i.ts)
+  const cpu = items.map(i => i.cpu ?? 0)
+  const mem = items.map(i => i.mem ?? 0)
+  const disk = items.map(i => i.disk ?? 0)
+  const netRx = items.map(i => i.net_rx ?? 0)
+  const netTx = items.map(i => i.net_tx ?? 0)
+
+  // Compute per-interval rate in MB/s from cumulative byte counters
+  const netRxRate = []
+  const netTxRate = []
+  for (let idx = 0; idx < items.length; idx++) {
+    if (idx === 0) {
+      netRxRate.push(0)
+      netTxRate.push(0)
+    } else {
+      const dtSec = (new Date(timestamps[idx]) - new Date(timestamps[idx - 1])) / 1000
+      const dt = dtSec > 0 ? dtSec : 60
+      const rxDiff = Math.max(0, netRx[idx] - netRx[idx - 1])
+      const txDiff = Math.max(0, netTx[idx] - netTx[idx - 1])
+      netRxRate.push(rxDiff / dt / (1024 * 1024)) // MB/s
+      netTxRate.push(txDiff / dt / (1024 * 1024))
+    }
+  }
+
+  return {
+    timestamps,
+    cpu,
+    mem,
+    disk,
+    netRx,
+    netTx,
+    netRxRate,
+    netTxRate,
+    load1: items.map(i => i.load1 ?? 0),
+    load5: items.map(i => i.load5 ?? 0),
+    load15: items.map(i => i.load15 ?? 0),
+  }
+})
+
+function latestVal(arr, decimals = 1) {
+  if (!arr || arr.length === 0) return '--'
+  return arr[arr.length - 1].toFixed(decimals)
+}
+
+function formatNetRate(arr) {
+  if (!arr || arr.length === 0) return '--'
+  const last = arr[arr.length - 1]
+  if (last >= 1073741824) return (last / 1073741824).toFixed(2) + ' GB'
+  if (last >= 1048576) return (last / 1048576).toFixed(1) + ' MB'
+  if (last >= 1024) return (last / 1024).toFixed(1) + ' KB'
+  return last + ' B'
+}
+
+function formatNetAxis(v) {
+  if (v >= 1000) return (v / 1000).toFixed(1) + ' GB/s'
+  if (v >= 1) return v.toFixed(1) + ' MB/s'
+  return (v * 1024).toFixed(0) + ' KB/s'
+}
+
+async function changePeriod(period) {
+  selectedPeriod.value = period
+  historyLoading.value = true
+  try {
+    await serverStore.fetchHistory(period)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function fetchHistoryData() {
+  historyLoading.value = true
+  try {
+    await serverStore.fetchHistory(selectedPeriod.value)
+  } finally {
+    historyLoading.value = false
+  }
+}
 
 // Firewall
 const firewallRules = ref([])
@@ -705,6 +925,7 @@ watch(showTerminal, (val) => {
 function refreshAll() {
   fetchServices()
   fetchStats()
+  fetchHistoryData()
   fetchFirewallRules()
   fetchJails()
   fetchLogs()
@@ -713,6 +934,7 @@ function refreshAll() {
 onMounted(() => {
   fetchServices()
   fetchStats()
+  fetchHistoryData()
   fetchFirewallRules()
   fetchJails()
   fetchLogs()

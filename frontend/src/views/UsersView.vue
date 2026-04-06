@@ -70,29 +70,29 @@
         </template>
 
         <template #actions="{ row }">
-          <div class="flex items-center justify-end gap-2">
+          <div class="flex items-center justify-end gap-1 flex-wrap">
             <router-link
               :to="{ name: 'user-detail', params: { id: row.id } }"
-              class="btn-ghost text-xs px-2 py-1"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px]"
             >
               View
             </router-link>
             <button
               v-if="row.status === 'active'"
-              class="btn-ghost text-xs px-2 py-1 text-warning"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-warning"
               @click="suspendUser(row)"
             >
               Suspend
             </button>
             <button
               v-else-if="row.status === 'suspended'"
-              class="btn-ghost text-xs px-2 py-1 text-success"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-success"
               @click="unsuspendUser(row)"
             >
               Unsuspend
             </button>
             <button
-              class="btn-ghost text-xs px-2 py-1 text-error hover:text-error"
+              class="btn-ghost text-xs px-2 py-1.5 min-h-[36px] text-error hover:text-error"
               @click="confirmDeleteUser(row)"
             >
               Delete

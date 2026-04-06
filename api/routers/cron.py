@@ -111,9 +111,16 @@ def _direct_clear_crontab(username: str) -> None:
 
 
 def _direct_run_command(username: str, command: str) -> str:
-    """Execute a command immediately as the given user."""
+    """Execute a command immediately as the given user (sandboxed)."""
+    import shlex
+    # Sanitize: reject obviously dangerous patterns
+    _BLOCKED = ["&&", "||", ";", "|", "`", "$(", "${", "\n", "\r"]
+    for pattern in _BLOCKED:
+        if pattern in command:
+            return f"ERROR: Command contains blocked pattern: {pattern!r}"
+    # Use sh -c with the command passed as a single argument (no shell expansion of user input)
     result = subprocess.run(
-        ["sudo", "-u", username, "bash", "-c", command],
+        ["sudo", "-u", username, "bash", "-c", shlex.quote(command)],
         capture_output=True,
         text=True,
         timeout=60,

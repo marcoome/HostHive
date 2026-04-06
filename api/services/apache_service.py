@@ -71,9 +71,40 @@ async def _ensure_modules(*modules: str) -> list[str]:
     return warnings
 
 
+APACHE_PROXY_PORT = 8080
+
+
 # ---------------------------------------------------------------------------
 # Apache vhost config templates
 # ---------------------------------------------------------------------------
+def _build_http_vhost_proxy(
+    domain: str,
+    document_root: str,
+    php_version: str,
+    listen_port: int = APACHE_PROXY_PORT,
+) -> str:
+    """Return an Apache vhost that listens on *listen_port* (behind Nginx)."""
+    return f"""<VirtualHost *:{listen_port}>
+    ServerName {domain}
+    ServerAlias www.{domain}
+    DocumentRoot {document_root}
+
+    <Directory {document_root}>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    <FilesMatch \\.php$>
+        SetHandler "proxy:unix:/run/php/php{php_version}-fpm.sock|fcgi://localhost"
+    </FilesMatch>
+
+    ErrorLog /var/log/apache2/{domain}.error.log
+    CustomLog /var/log/apache2/{domain}.access.log combined
+</VirtualHost>
+"""
+
+
 def _build_http_vhost(
     domain: str,
     document_root: str,
@@ -391,6 +422,77 @@ async def issue_letsencrypt(domain: str, email: str) -> dict:
     key_path = f"/etc/letsencrypt/live/{domain}/privkey.pem"
 
     return {"cert_path": cert_path, "key_path": key_path}
+
+
+async def create_vhost_proxy_mode(
+    domain: str,
+    username: str,
+    document_root: Optional[str] = None,
+    php_version: str = "8.2",
+) -> dict:
+    """Create Apache vhost on port 8080 (behind Nginx reverse proxy).
+
+    Returns ``{"ok": True, "warnings": []}`` on success.
+    """
+    warnings: list[str] = []
+    doc_root = document_root or f"/home/{username}/web/{domain}/public_html"
+
+    # Ensure required modules
+    mod_warnings = await _ensure_modules(
+        "proxy_fcgi", "rewrite", "headers", "ssl", "setenvif",
+    )
+    warnings.extend(mod_warnings)
+
+    # Ensure Apache listens on the proxy port
+    port_warnings = await _ensure_listen_port(APACHE_PROXY_PORT)
+    warnings.extend(port_warnings)
+
+    # Create document root
+    doc_root_path = Path(doc_root)
+    try:
+        doc_root_path.mkdir(parents=True, exist_ok=True)
+        await _run(f"chown -R {username}:{username} /home/{username}/web")
+    except Exception as exc:
+        warnings.append(f"Could not create document root: {exc}")
+
+    # Write Apache vhost config on proxy port
+    vhost_path = APACHE_SITES_AVAILABLE / f"{domain}.conf"
+    try:
+        vhost_path.write_text(
+            _build_http_vhost_proxy(domain, doc_root, php_version, APACHE_PROXY_PORT),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write Apache proxy config: {exc}") from exc
+
+    # Enable the site
+    rc, _, err = await _run(f"a2ensite {domain}.conf")
+    if rc != 0:
+        warnings.append(f"a2ensite failed: {err}")
+
+    # Test & reload Apache
+    ok, msg = await _apache_test_and_reload()
+    if not ok:
+        warnings.append(msg)
+
+    return {"ok": True, "warnings": warnings}
+
+
+async def _ensure_listen_port(port: int) -> list[str]:
+    """Make sure Apache has a ``Listen {port}`` directive in ports.conf."""
+    warnings: list[str] = []
+    ports_conf = Path("/etc/apache2/ports.conf")
+    try:
+        if ports_conf.exists():
+            content = ports_conf.read_text(encoding="utf-8")
+            if f"Listen {port}" not in content:
+                content += f"\nListen {port}\n"
+                ports_conf.write_text(content, encoding="utf-8")
+        else:
+            ports_conf.write_text(f"Listen {port}\n", encoding="utf-8")
+    except Exception as exc:
+        warnings.append(f"Could not update ports.conf for port {port}: {exc}")
+    return warnings
 
 
 async def get_status() -> dict:

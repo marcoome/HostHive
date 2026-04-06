@@ -113,8 +113,8 @@ const statsCards = computed(() => {
   return [
     { label: 'Total Users', value: d.total_users ?? 0, icon: '&#9823;' },
     { label: 'Active Users', value: d.active_users ?? 0, icon: '&#9673;' },
-    { label: 'Disk Used', value: formatSize(d.disk_used_bytes ?? 0), icon: '&#9707;' },
-    { label: 'Bandwidth Used', value: formatSize(d.bandwidth_used_bytes ?? 0), icon: '&#8645;' }
+    { label: 'Disk Used', value: (d.used_disk_mb ?? 0) + ' MB', icon: '&#9707;' },
+    { label: 'Bandwidth Used', value: (d.used_bandwidth_gb ?? 0).toFixed(1) + ' GB', icon: '&#8645;' }
   ]
 })
 
@@ -130,13 +130,13 @@ const resourceBars = computed(() => {
   }
   if (l.max_disk_mb != null) {
     const d = store.dashboard || {}
-    const usedMB = Math.round((d.disk_used_bytes ?? 0) / 1048576)
+    const usedMB = d.used_disk_mb ?? l.used_disk_mb ?? 0
     bars.push({ label: 'Disk (MB)', used: usedMB, total: l.max_disk_mb, percent: safePercent(usedMB, l.max_disk_mb) })
   }
   if (l.max_bandwidth_gb != null) {
     const d = store.dashboard || {}
-    const usedGB = Math.round((d.bandwidth_used_bytes ?? 0) / 1073741824)
-    bars.push({ label: 'Bandwidth (GB)', used: usedGB, total: l.max_bandwidth_gb, percent: safePercent(usedGB, l.max_bandwidth_gb) })
+    const usedGB = parseFloat(d.used_bandwidth_gb ?? l.used_bandwidth_gb ?? 0).toFixed(1)
+    bars.push({ label: 'Bandwidth (GB)', used: usedGB, total: l.max_bandwidth_gb, percent: safePercent(parseFloat(usedGB), l.max_bandwidth_gb) })
   }
   if (l.max_domains != null) {
     const d = store.dashboard || {}

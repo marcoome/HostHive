@@ -311,6 +311,7 @@ async def get_limits(
             "max_total_bandwidth_gb": 0,
             "used_users": 0,
             "used_disk_mb": 0,
+            "used_bandwidth_gb": 0.0,
         }
     return ResellerLimitResponse.model_validate(limits)
 
@@ -320,10 +321,29 @@ async def get_limits(
 # --------------------------------------------------------------------------
 @router.get("/packages", status_code=status.HTTP_200_OK)
 async def list_packages(
+    scope: str = Query("all", description="all | reseller | global"),
     db: AsyncSession = Depends(get_db),
     reseller: User = Depends(_reseller),
 ):
-    result = await db.execute(select(Package).order_by(Package.name.asc()))
+    """List packages visible to this reseller.
+
+    scope=all     -- global + reseller's own (default)
+    scope=reseller -- only packages created by this reseller
+    scope=global  -- only admin/global packages (created_by IS NULL)
+    """
+    from sqlalchemy import or_
+
+    if scope == "reseller":
+        q = select(Package).where(Package.created_by == reseller.id)
+    elif scope == "global":
+        q = select(Package).where(Package.created_by.is_(None))
+    else:
+        # all: global + own
+        q = select(Package).where(
+            or_(Package.created_by.is_(None), Package.created_by == reseller.id)
+        )
+
+    result = await db.execute(q.order_by(Package.name.asc()))
     packages = result.scalars().all()
     return {
         "items": [
@@ -338,8 +358,189 @@ async def list_packages(
                 "max_ftp_accounts": p.max_ftp_accounts,
                 "max_cron_jobs": p.max_cron_jobs,
                 "price_monthly": str(p.price_monthly),
+                "created_by": str(p.created_by) if p.created_by else None,
             }
             for p in packages
         ],
         "total": len(packages),
     }
+
+
+# --------------------------------------------------------------------------
+# POST /packages -- reseller creates own package
+# --------------------------------------------------------------------------
+@router.post("/packages", status_code=status.HTTP_201_CREATED)
+async def create_reseller_package(
+    body: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    reseller: User = Depends(_reseller),
+):
+    """Create a package scoped to this reseller.
+
+    Package limits cannot exceed the reseller's own allocation.
+    """
+    from api.schemas.packages import PackageCreate
+
+    svc = ResellerService(db)
+    limits = await svc.get_limits(reseller.id)
+    if limits is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No reseller limits configured. Contact admin.",
+        )
+
+    # Validate the body via PackageCreate schema (ignore created_by from body)
+    try:
+        pkg_data = PackageCreate(**body)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+
+    # Enforce: package resource limits must not exceed reseller allocation
+    if pkg_data.disk_quota_mb > limits.max_total_disk_mb:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"disk_quota_mb ({pkg_data.disk_quota_mb}) exceeds your allocation ({limits.max_total_disk_mb} MB).",
+        )
+    if pkg_data.bandwidth_gb > limits.max_total_bandwidth_gb:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"bandwidth_gb ({pkg_data.bandwidth_gb}) exceeds your allocation ({limits.max_total_bandwidth_gb} GB).",
+        )
+
+    # Check name uniqueness
+    exists = await db.execute(select(Package).where(Package.name == pkg_data.name))
+    if exists.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Package name already exists.",
+        )
+
+    pkg = Package(**pkg_data.model_dump(), created_by=reseller.id)
+    db.add(pkg)
+    await db.flush()
+
+    _log(db, request, reseller.id, "reseller.create_package",
+         f"Reseller created package {pkg_data.name}")
+
+    return {
+        "id": str(pkg.id),
+        "name": pkg.name,
+        "disk_quota_mb": pkg.disk_quota_mb,
+        "bandwidth_gb": pkg.bandwidth_gb,
+        "max_domains": pkg.max_domains,
+        "max_databases": pkg.max_databases,
+        "max_email_accounts": pkg.max_email_accounts,
+        "max_ftp_accounts": pkg.max_ftp_accounts,
+        "max_cron_jobs": pkg.max_cron_jobs,
+        "price_monthly": str(pkg.price_monthly),
+        "created_by": str(pkg.created_by),
+    }
+
+
+# --------------------------------------------------------------------------
+# PUT /packages/{id} -- reseller updates own package
+# --------------------------------------------------------------------------
+@router.put("/packages/{pkg_id}", status_code=status.HTTP_200_OK)
+async def update_reseller_package(
+    pkg_id: uuid.UUID,
+    body: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    reseller: User = Depends(_reseller),
+):
+    """Update a reseller-owned package. Cannot modify global packages."""
+    result = await db.execute(
+        select(Package).where(Package.id == pkg_id, Package.created_by == reseller.id)
+    )
+    pkg = result.scalar_one_or_none()
+    if pkg is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package not found or not owned by you.",
+        )
+
+    svc = ResellerService(db)
+    limits = await svc.get_limits(reseller.id)
+
+    # Only update allowed fields
+    allowed = {
+        "name", "disk_quota_mb", "bandwidth_gb", "max_domains", "max_databases",
+        "max_email_accounts", "max_ftp_accounts", "max_cron_jobs", "price_monthly",
+    }
+    for field, value in body.items():
+        if field not in allowed:
+            continue
+        # Enforce allocation limits on resource fields
+        if field == "disk_quota_mb" and limits and value > limits.max_total_disk_mb:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"disk_quota_mb ({value}) exceeds your allocation ({limits.max_total_disk_mb} MB).",
+            )
+        if field == "bandwidth_gb" and limits and value > limits.max_total_bandwidth_gb:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"bandwidth_gb ({value}) exceeds your allocation ({limits.max_total_bandwidth_gb} GB).",
+            )
+        setattr(pkg, field, value)
+
+    db.add(pkg)
+    await db.flush()
+
+    _log(db, request, reseller.id, "reseller.update_package",
+         f"Reseller updated package {pkg.name}")
+
+    return {
+        "id": str(pkg.id),
+        "name": pkg.name,
+        "disk_quota_mb": pkg.disk_quota_mb,
+        "bandwidth_gb": pkg.bandwidth_gb,
+        "max_domains": pkg.max_domains,
+        "max_databases": pkg.max_databases,
+        "max_email_accounts": pkg.max_email_accounts,
+        "max_ftp_accounts": pkg.max_ftp_accounts,
+        "max_cron_jobs": pkg.max_cron_jobs,
+        "price_monthly": str(pkg.price_monthly),
+        "created_by": str(pkg.created_by),
+    }
+
+
+# --------------------------------------------------------------------------
+# DELETE /packages/{id} -- reseller deletes own package
+# --------------------------------------------------------------------------
+@router.delete("/packages/{pkg_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_reseller_package(
+    pkg_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    reseller: User = Depends(_reseller),
+):
+    """Delete a reseller-owned package. Cannot delete global packages."""
+    result = await db.execute(
+        select(Package).where(Package.id == pkg_id, Package.created_by == reseller.id)
+    )
+    pkg = result.scalar_one_or_none()
+    if pkg is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package not found or not owned by you.",
+        )
+
+    # Check if any users are on this package
+    user_count = (await db.execute(
+        select(func.count()).select_from(User).where(User.package_id == pkg_id)
+    )).scalar() or 0
+    if user_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot delete package with {user_count} assigned user(s).",
+        )
+
+    _log(db, request, reseller.id, "reseller.delete_package",
+         f"Reseller deleted package {pkg.name}")
+
+    await db.delete(pkg)
+    await db.flush()

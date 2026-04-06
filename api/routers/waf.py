@@ -9,6 +9,10 @@ from api.core.database import get_db
 from api.core.security import get_current_user
 from api.models.users import User
 from api.schemas.waf import (
+    GeoModeUpdate,
+    GeoRule,
+    GeoRulesListResponse,
+    GeoStatus,
     WAFLogResponse,
     WAFModeUpdate,
     WAFRuleCreate,
@@ -16,6 +20,7 @@ from api.schemas.waf import (
     WAFStatsResponse,
     WAFStatusResponse,
 )
+from api.services.geo_service import GeoBlockingService
 
 router = APIRouter()
 
@@ -191,3 +196,73 @@ async def waf_stats(
     agent = request.app.state.agent
     resp = await agent.get("/waf/stats")
     return resp.get("data", resp)
+
+
+# ==========================================================================
+# Geo-blocking endpoints
+# ==========================================================================
+
+_geo = GeoBlockingService()
+
+
+@router.get("/geo/status", response_model=GeoStatus)
+async def geo_status(
+    current_user: User = Depends(get_current_user),
+):
+    """Check if GeoIP2 module is installed and the MaxMind database is current."""
+    _require_admin(current_user)
+    return await _geo.get_status()
+
+
+@router.get("/geo/rules", response_model=GeoRulesListResponse)
+async def geo_list_rules(
+    current_user: User = Depends(get_current_user),
+):
+    """List all current geo-blocking rules."""
+    _require_admin(current_user)
+    return await _geo.list_rules()
+
+
+@router.post("/geo/rules", response_model=GeoRulesListResponse)
+async def geo_add_rule(
+    body: GeoRule,
+    current_user: User = Depends(get_current_user),
+):
+    """Add a country block or allow rule."""
+    _require_admin(current_user)
+    return await _geo.add_rule(body.country_code, body.action)
+
+
+@router.delete("/geo/rules/{country_code}", response_model=GeoRulesListResponse)
+async def geo_delete_rule(
+    country_code: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Remove a geo-blocking rule by country code."""
+    _require_admin(current_user)
+    cc = country_code.upper().strip()
+    if len(cc) != 2 or not cc.isalpha():
+        raise HTTPException(status_code=400, detail="Invalid country code")
+    return await _geo.remove_rule(cc)
+
+
+@router.put("/geo/mode", response_model=GeoRulesListResponse)
+async def geo_set_mode(
+    body: GeoModeUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    """Set geo-blocking mode: whitelist or blacklist."""
+    _require_admin(current_user)
+    return await _geo.set_mode(body.mode)
+
+
+@router.post("/geo/update-db")
+async def geo_update_db(
+    current_user: User = Depends(get_current_user),
+):
+    """Trigger geoipupdate to refresh the MaxMind GeoLite2-Country database."""
+    _require_admin(current_user)
+    result = await _geo.update_database()
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result.get("error", "Update failed"))
+    return result

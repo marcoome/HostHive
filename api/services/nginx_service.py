@@ -1,15 +1,20 @@
 """Direct nginx & SSL management -- no agent required.
 
 All file-system and process operations happen locally via asyncio.subprocess.
+Vhost configs are rendered from Jinja2 templates in data/templates/nginx/.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Optional
+
+from jinja2 import Environment, FileSystemLoader
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +24,100 @@ logger = logging.getLogger(__name__)
 NGINX_SITES_AVAILABLE = Path("/etc/nginx/sites-available")
 NGINX_SITES_ENABLED = Path("/etc/nginx/sites-enabled")
 SSL_BASE_DIR = Path("/etc/ssl/hosthive")
+HTPASSWD_DIR = Path("/etc/nginx/htpasswd")
+NGINX_TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "templates" / "nginx"
+
+# ---------------------------------------------------------------------------
+# Jinja2 environment -- single source of truth shared with nginx_executor
+# ---------------------------------------------------------------------------
+_jinja = Environment(
+    loader=FileSystemLoader(str(NGINX_TEMPLATE_DIR)),
+    autoescape=False,
+    keep_trailing_newline=True,
+)
+
+AVAILABLE_TEMPLATES = ("default", "wordpress", "proxy", "static")
+
+
+def list_templates() -> list[dict[str, str]]:
+    """Return the list of available nginx templates with descriptions."""
+    descriptions = {
+        "default": "Standard PHP-FPM site with security headers and static caching",
+        "wordpress": "WordPress-optimized with permalinks, upload limits, and xmlrpc protection",
+        "proxy": "Reverse proxy to a backend service (Node.js, Python, etc.)",
+        "static": "Static files only -- no PHP, aggressive caching and gzip",
+    }
+    return [
+        {"name": name, "description": descriptions.get(name, "")}
+        for name in AVAILABLE_TEMPLATES
+    ]
+
+
+def render_vhost(
+    *,
+    template_name: str = "default",
+    domain: str,
+    document_root: str = "",
+    php_version: str = "8.2",
+    ssl: bool = False,
+    ssl_certificate: Optional[str] = None,
+    ssl_certificate_key: Optional[str] = None,
+    backend_port: int = 8080,
+    custom_nginx_config: Optional[str] = None,
+    cache_enabled: bool = False,
+    cache_type: str = "fastcgi",
+    cache_ttl: int = 3600,
+    cache_bypass_cookie: str = "wordpress_logged_in",
+    geo_enabled: bool = False,
+    hotlink_protection: bool = False,
+    hotlink_allowed_domains: Optional[str] = None,
+    hotlink_extensions: str = "jpg,jpeg,png,gif,webp,svg,mp4,mp3",
+    hotlink_redirect_url: Optional[str] = None,
+    custom_error_pages: Optional[dict] = None,
+) -> str:
+    """Render an nginx vhost config from a Jinja2 template.
+
+    This is the single rendering function used by both the API service
+    and the agent executor.
+    """
+    if template_name not in AVAILABLE_TEMPLATES:
+        raise ValueError(
+            f"Unknown template {template_name!r}. "
+            f"Available: {', '.join(AVAILABLE_TEMPLATES)}"
+        )
+
+    # Build the pipe-separated extension regex and space-separated allowed
+    # referers list for the nginx valid_referers directive.
+    hotlink_ext_regex = hotlink_extensions.replace(",", "|") if hotlink_extensions else ""
+    hotlink_allowed = ""
+    if hotlink_allowed_domains:
+        # Convert comma-separated or newline-separated list to space-separated
+        raw = hotlink_allowed_domains.replace("\n", ",").replace("\r", "")
+        hotlink_allowed = " ".join(
+            d.strip() for d in raw.split(",") if d.strip()
+        )
+
+    template = _jinja.get_template(f"{template_name}.j2")
+    return template.render(
+        domain=domain,
+        document_root=document_root,
+        php_version=php_version,
+        ssl=ssl,
+        ssl_certificate=ssl_certificate,
+        ssl_certificate_key=ssl_certificate_key,
+        backend_port=backend_port,
+        custom_nginx_config=custom_nginx_config,
+        cache_enabled=cache_enabled,
+        cache_type=cache_type,
+        cache_ttl=cache_ttl,
+        cache_bypass_cookie=cache_bypass_cookie,
+        geo_enabled=geo_enabled,
+        hotlink_protection=hotlink_protection,
+        hotlink_extensions=hotlink_ext_regex,
+        hotlink_allowed_domains=hotlink_allowed,
+        hotlink_redirect_url=hotlink_redirect_url,
+        custom_error_pages=custom_error_pages,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -55,80 +154,29 @@ async def _nginx_test_and_reload() -> tuple[bool, str]:
     return True, "nginx reloaded successfully"
 
 
-# ---------------------------------------------------------------------------
-# Nginx vhost config templates
-# ---------------------------------------------------------------------------
-def _build_http_vhost(
-    domain: str,
-    document_root: str,
-    php_version: str,
-) -> str:
-    """Return an HTTP-only nginx server block."""
-    return f"""server {{
-    listen 80;
-    listen [::]:80;
-    server_name {domain} www.{domain};
-    root {document_root};
-    index index.html index.php;
+async def _validate_custom_config(domain: str, full_config: str) -> tuple[bool, str]:
+    """Write config to sites-available, run ``nginx -t``, then restore.
 
-    location / {{
-        try_files $uri $uri/ /index.php?$args;
-    }}
+    Returns (valid, message).
+    """
+    vhost_path = NGINX_SITES_AVAILABLE / domain
+    backup = None
+    if vhost_path.exists():
+        backup = vhost_path.read_text(encoding="utf-8")
 
-    location ~ \\.php$ {{
-        fastcgi_pass unix:/run/php/php{php_version}-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        include fastcgi_params;
-    }}
+    try:
+        vhost_path.write_text(full_config, encoding="utf-8")
+        rc, out, err = await _run("nginx -t")
 
-    access_log /var/log/nginx/{domain}.access.log;
-    error_log /var/log/nginx/{domain}.error.log;
-}}
-"""
-
-
-def _build_ssl_vhost(
-    domain: str,
-    document_root: str,
-    php_version: str,
-    cert_path: str,
-    key_path: str,
-) -> str:
-    """Return a combined HTTP-redirect + HTTPS nginx server block."""
-    return f"""server {{
-    listen 80;
-    listen [::]:80;
-    server_name {domain} www.{domain};
-    return 301 https://$host$request_uri;
-}}
-
-server {{
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name {domain} www.{domain};
-    root {document_root};
-    index index.html index.php;
-
-    ssl_certificate {cert_path};
-    ssl_certificate_key {key_path};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-
-    location / {{
-        try_files $uri $uri/ /index.php?$args;
-    }}
-
-    location ~ \\.php$ {{
-        fastcgi_pass unix:/run/php/php{php_version}-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        include fastcgi_params;
-    }}
-
-    access_log /var/log/nginx/{domain}.access.log;
-    error_log /var/log/nginx/{domain}.error.log;
-}}
-"""
+        if rc != 0:
+            return False, f"nginx config validation failed: {err or out}"
+        return True, "ok"
+    finally:
+        # Restore original config
+        if backup is not None:
+            vhost_path.write_text(backup, encoding="utf-8")
+        elif vhost_path.exists():
+            vhost_path.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +187,9 @@ async def create_vhost(
     username: str,
     document_root: str,
     php_version: str = "8.2",
+    template_name: str = "default",
+    custom_nginx_config: Optional[str] = None,
+    backend_port: int = 8080,
 ) -> dict:
     """Create nginx vhost, document root, symlink, and reload nginx.
 
@@ -198,17 +249,31 @@ async def create_vhost(
         except Exception as exc:
             warnings.append(f"Could not create index.html: {exc}")
 
-    # 3. Write nginx vhost config
+    # 3. Render nginx vhost config from Jinja2 template
+    config = render_vhost(
+        template_name=template_name,
+        domain=domain,
+        document_root=document_root,
+        php_version=php_version,
+        ssl=False,
+        backend_port=backend_port,
+        custom_nginx_config=custom_nginx_config,
+    )
+
+    # 4. If custom config is present, validate before applying
+    if custom_nginx_config:
+        valid, msg = await _validate_custom_config(domain, config)
+        if not valid:
+            raise RuntimeError(f"Custom nginx config is invalid: {msg}")
+
+    # 5. Write nginx vhost config
     vhost_path = NGINX_SITES_AVAILABLE / domain
     try:
-        vhost_path.write_text(
-            _build_http_vhost(domain, document_root, php_version),
-            encoding="utf-8",
-        )
+        vhost_path.write_text(config, encoding="utf-8")
     except Exception as exc:
         raise RuntimeError(f"Failed to write nginx config: {exc}") from exc
 
-    # 4. Create symlink in sites-enabled
+    # 6. Create symlink in sites-enabled
     symlink_path = NGINX_SITES_ENABLED / domain
     try:
         if symlink_path.exists() or symlink_path.is_symlink():
@@ -217,7 +282,7 @@ async def create_vhost(
     except Exception as exc:
         raise RuntimeError(f"Failed to create symlink: {exc}") from exc
 
-    # 5. Test & reload nginx
+    # 7. Test & reload nginx
     ok, msg = await _nginx_test_and_reload()
     if not ok:
         warnings.append(msg)
@@ -225,15 +290,27 @@ async def create_vhost(
     return {"ok": True, "warnings": warnings}
 
 
-async def update_vhost_php(
+async def update_vhost(
     domain: str,
     document_root: str,
-    new_php_version: str,
+    php_version: str = "8.2",
     ssl_enabled: bool = False,
     cert_path: Optional[str] = None,
     key_path: Optional[str] = None,
+    template_name: str = "default",
+    custom_nginx_config: Optional[str] = None,
+    backend_port: int = 8080,
+    cache_enabled: bool = False,
+    cache_type: str = "fastcgi",
+    cache_ttl: int = 3600,
+    cache_bypass_cookie: str = "wordpress_logged_in",
+    hotlink_protection: bool = False,
+    hotlink_allowed_domains: Optional[str] = None,
+    hotlink_extensions: str = "jpg,jpeg,png,gif,webp,svg,mp4,mp3",
+    hotlink_redirect_url: Optional[str] = None,
+    custom_error_pages: Optional[dict] = None,
 ) -> dict:
-    """Rewrite the nginx vhost with a new PHP version and reload.
+    """Rewrite the nginx vhost from the template and reload.
 
     Returns ``{"ok": True, "warnings": []}`` on success.
     """
@@ -243,10 +320,32 @@ async def update_vhost_php(
     if not vhost_path.exists():
         raise RuntimeError(f"Nginx config for {domain} does not exist.")
 
-    if ssl_enabled and cert_path and key_path:
-        config = _build_ssl_vhost(domain, document_root, new_php_version, cert_path, key_path)
-    else:
-        config = _build_http_vhost(domain, document_root, new_php_version)
+    config = render_vhost(
+        template_name=template_name,
+        domain=domain,
+        document_root=document_root,
+        php_version=php_version,
+        ssl=ssl_enabled and bool(cert_path and key_path),
+        ssl_certificate=cert_path,
+        ssl_certificate_key=key_path,
+        backend_port=backend_port,
+        custom_nginx_config=custom_nginx_config,
+        cache_enabled=cache_enabled,
+        cache_type=cache_type,
+        cache_ttl=cache_ttl,
+        cache_bypass_cookie=cache_bypass_cookie,
+        hotlink_protection=hotlink_protection,
+        hotlink_allowed_domains=hotlink_allowed_domains,
+        hotlink_extensions=hotlink_extensions,
+        hotlink_redirect_url=hotlink_redirect_url,
+        custom_error_pages=custom_error_pages,
+    )
+
+    # Validate custom config before applying
+    if custom_nginx_config:
+        valid, msg = await _validate_custom_config(domain, config)
+        if not valid:
+            raise RuntimeError(f"Custom nginx config is invalid: {msg}")
 
     try:
         vhost_path.write_text(config, encoding="utf-8")
@@ -258,6 +357,32 @@ async def update_vhost_php(
         warnings.append(msg)
 
     return {"ok": True, "warnings": warnings}
+
+
+# Backward-compatible alias
+async def update_vhost_php(
+    domain: str,
+    document_root: str,
+    new_php_version: str,
+    ssl_enabled: bool = False,
+    cert_path: Optional[str] = None,
+    key_path: Optional[str] = None,
+    template_name: str = "default",
+    custom_nginx_config: Optional[str] = None,
+    backend_port: int = 8080,
+) -> dict:
+    """Backward-compatible wrapper around ``update_vhost``."""
+    return await update_vhost(
+        domain=domain,
+        document_root=document_root,
+        php_version=new_php_version,
+        ssl_enabled=ssl_enabled,
+        cert_path=cert_path,
+        key_path=key_path,
+        template_name=template_name,
+        custom_nginx_config=custom_nginx_config,
+        backend_port=backend_port,
+    )
 
 
 async def delete_vhost(domain: str) -> dict:
@@ -327,6 +452,9 @@ async def apply_ssl_to_nginx(
     php_version: str,
     cert_path: str,
     key_path: str,
+    template_name: str = "default",
+    custom_nginx_config: Optional[str] = None,
+    backend_port: int = 8080,
 ) -> dict:
     """Rewrite the nginx vhost with SSL and reload.
 
@@ -335,7 +463,18 @@ async def apply_ssl_to_nginx(
     warnings: list[str] = []
     vhost_path = NGINX_SITES_AVAILABLE / domain
 
-    config = _build_ssl_vhost(domain, document_root, php_version, cert_path, key_path)
+    config = render_vhost(
+        template_name=template_name,
+        domain=domain,
+        document_root=document_root,
+        php_version=php_version,
+        ssl=True,
+        ssl_certificate=cert_path,
+        ssl_certificate_key=key_path,
+        backend_port=backend_port,
+        custom_nginx_config=custom_nginx_config,
+    )
+
     try:
         vhost_path.write_text(config, encoding="utf-8")
     except Exception as exc:
@@ -377,3 +516,206 @@ async def install_custom_ssl(
     os.chmod(key_path, 0o600)
 
     return {"cert_path": str(cert_path), "key_path": str(key_path)}
+
+
+# ---------------------------------------------------------------------------
+# Public API -- Cache
+# ---------------------------------------------------------------------------
+async def purge_cache(domain: str) -> dict:
+    """Purge the nginx cache directory for the given domain.
+
+    Returns ``{"ok": True, "warnings": []}`` on success.
+    """
+    warnings: list[str] = []
+    cache_dir = Path(f"/var/cache/nginx/{domain}")
+
+    if cache_dir.exists():
+        rc, out, err = await _run(f"rm -rf {cache_dir}")
+        if rc != 0:
+            warnings.append(f"Failed to remove cache directory: {err or out}")
+        else:
+            # Recreate empty dir so nginx doesn't complain
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                await _run(f"chown www-data:www-data {cache_dir}")
+            except Exception as exc:
+                warnings.append(f"Cache purged but could not recreate directory: {exc}")
+    else:
+        warnings.append("Cache directory does not exist (nothing to purge).")
+
+    # Reload nginx to clear any in-memory cache references
+    ok, msg = await _nginx_test_and_reload()
+    if not ok:
+        warnings.append(msg)
+
+    return {"ok": True, "warnings": warnings}
+
+
+# ---------------------------------------------------------------------------
+# Public API -- Directory Privacy (.htpasswd)
+# ---------------------------------------------------------------------------
+
+def _htpasswd_filename(domain: str, path: str) -> str:
+    """Generate a safe htpasswd filename from domain + path.
+
+    e.g. domain.com + /admin -> domain.com_admin
+    """
+    safe_path = path.strip("/").replace("/", "_") or "root"
+    return f"{domain}_{safe_path}"
+
+
+def generate_htpasswd_hash(password: str) -> str:
+    """Generate a password hash compatible with nginx/htpasswd.
+
+    Uses the standard htpasswd-compatible {SHA} format.
+    """
+    import base64
+    sha1_digest = hashlib.sha1(password.encode("utf-8")).digest()
+    return "{SHA}" + base64.b64encode(sha1_digest).decode("ascii")
+
+
+async def write_htpasswd_file(domain: str, path: str, users: list[dict]) -> Path:
+    """Write a .htpasswd file for the given domain/path.
+
+    *users* is a list of ``{"username": ..., "password_hash": ...}``.
+    Returns the path to the htpasswd file.
+    """
+    HTPASSWD_DIR.mkdir(parents=True, exist_ok=True)
+
+    filename = _htpasswd_filename(domain, path)
+    htpasswd_path = HTPASSWD_DIR / filename
+
+    lines = [f"{u['username']}:{u['password_hash']}" for u in users]
+    htpasswd_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Secure permissions
+    os.chmod(htpasswd_path, 0o644)
+
+    return htpasswd_path
+
+
+async def remove_htpasswd_file(domain: str, path: str) -> None:
+    """Remove the .htpasswd file for the given domain/path."""
+    filename = _htpasswd_filename(domain, path)
+    htpasswd_path = HTPASSWD_DIR / filename
+    if htpasswd_path.exists():
+        htpasswd_path.unlink()
+
+
+def _build_auth_basic_directives(domain: str, rules: list[dict]) -> str:
+    """Build nginx auth_basic location blocks for directory privacy rules.
+
+    Each rule is ``{"path": "/admin", "auth_name": "Restricted Area", "users": [...]}``.
+    Returns a string of nginx location blocks to inject into the vhost.
+    """
+    blocks = []
+    for rule in rules:
+        path = rule["path"]
+        auth_name = rule["auth_name"]
+        filename = _htpasswd_filename(domain, path)
+        htpasswd_path = HTPASSWD_DIR / filename
+
+        location_path = path if path != "/" else "= /"
+
+        block = (
+            f"location {location_path} {{\n"
+            f"    auth_basic \"{auth_name}\";\n"
+            f"    auth_basic_user_file {htpasswd_path};\n"
+            f"    try_files $uri $uri/ /index.php?$query_string;\n"
+            f"}}"
+        )
+        blocks.append(block)
+
+    return "\n\n".join(blocks)
+
+
+async def sync_directory_privacy(
+    domain: str,
+    rules: list[dict],
+    document_root: str,
+    php_version: str = "8.2",
+    ssl_enabled: bool = False,
+    cert_path: Optional[str] = None,
+    key_path: Optional[str] = None,
+    template_name: str = "default",
+    custom_nginx_config: Optional[str] = None,
+    webserver: str = "nginx",
+    cache_enabled: bool = False,
+    cache_type: str = "fastcgi",
+    cache_ttl: int = 3600,
+    cache_bypass_cookie: str = "wordpress_logged_in",
+) -> dict:
+    """Sync all .htpasswd files and regenerate the nginx vhost with auth directives.
+
+    *rules* is a list of active rules, each with path, auth_name, and users.
+    Returns ``{"ok": True, "warnings": []}``.
+    """
+    import re
+
+    warnings: list[str] = []
+
+    # 1. Write htpasswd files for each active rule
+    for rule in rules:
+        try:
+            await write_htpasswd_file(domain, rule["path"], rule["users"])
+        except Exception as exc:
+            warnings.append(f"Failed to write htpasswd for {rule['path']}: {exc}")
+
+    # 2. Build auth_basic directives
+    auth_directives = _build_auth_basic_directives(domain, rules)
+
+    # 3. Combine with existing custom_nginx_config
+    # Strip any previously auto-generated directory privacy blocks
+    base_custom = custom_nginx_config or ""
+    base_custom = re.sub(
+        r"\n?# --- Directory Privacy \(auto-generated\) ---.*?# --- End Directory Privacy ---\n?",
+        "",
+        base_custom,
+        flags=re.DOTALL,
+    ).strip()
+
+    combined_custom = base_custom
+    if auth_directives:
+        if combined_custom:
+            combined_custom += "\n\n"
+        combined_custom += (
+            "# --- Directory Privacy (auto-generated) ---\n"
+            + auth_directives
+            + "\n# --- End Directory Privacy ---"
+        )
+    combined_custom = combined_custom.strip() or None
+
+    # 4. Regenerate vhost
+    if webserver in ("nginx", "nginx_apache"):
+        vhost_path = NGINX_SITES_AVAILABLE / domain
+        if not vhost_path.exists():
+            warnings.append("Nginx config does not exist yet; skipping vhost regeneration.")
+            return {"ok": True, "warnings": warnings}
+
+        tpl = template_name if webserver == "nginx" else "proxy"
+        config = render_vhost(
+            template_name=tpl,
+            domain=domain,
+            document_root=document_root,
+            php_version=php_version,
+            ssl=ssl_enabled and bool(cert_path and key_path),
+            ssl_certificate=cert_path,
+            ssl_certificate_key=key_path,
+            backend_port=8080,
+            custom_nginx_config=combined_custom,
+            cache_enabled=cache_enabled,
+            cache_type=cache_type,
+            cache_ttl=cache_ttl,
+            cache_bypass_cookie=cache_bypass_cookie,
+        )
+
+        try:
+            vhost_path.write_text(config, encoding="utf-8")
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write nginx config: {exc}") from exc
+
+        ok, msg = await _nginx_test_and_reload()
+        if not ok:
+            warnings.append(msg)
+
+    return {"ok": True, "warnings": warnings}

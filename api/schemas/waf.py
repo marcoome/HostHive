@@ -61,3 +61,56 @@ class WAFStatsResponse(BaseModel):
     top_attack_types: list[dict[str, int]] = []
     top_ips: list[dict[str, int]] = []
     domains_with_waf: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Geo-blocking schemas
+# ---------------------------------------------------------------------------
+
+
+class GeoRule(BaseModel):
+    country_code: str = Field(
+        ...,
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Z]{2}$",
+        description="ISO 3166-1 alpha-2 country code (e.g. CN, RU, KP)",
+    )
+    action: str = Field(
+        ...,
+        pattern=r"^(block|allow)$",
+        description="Action to take: 'block' or 'allow'",
+    )
+
+
+class GeoRuleResponse(BaseModel):
+    country_code: str
+    action: str
+
+
+class GeoRulesListResponse(BaseModel):
+    mode: str = Field(description="'blacklist' or 'whitelist'")
+    rules: list[GeoRuleResponse] = []
+    total: int = 0
+
+
+class GeoStatus(BaseModel):
+    installed: bool = Field(description="Whether libnginx-mod-http-geoip2 is installed")
+    db_exists: bool = Field(description="Whether the GeoLite2-Country.mmdb file exists")
+    db_path: str = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
+    db_last_modified: Optional[str] = Field(
+        None, description="Last modification time of the database file"
+    )
+    geoipupdate_installed: bool = Field(
+        description="Whether geoipupdate binary is available"
+    )
+    enabled: bool = Field(description="Whether geo-blocking is currently active")
+
+
+class GeoModeUpdate(BaseModel):
+    mode: str = Field(
+        ...,
+        pattern=r"^(blacklist|whitelist)$",
+        description="Geo-blocking mode: 'blacklist' (listed countries blocked) "
+        "or 'whitelist' (only listed countries allowed)",
+    )

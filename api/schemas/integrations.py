@@ -36,6 +36,27 @@ class S3Config(BaseModel):
     region: str = Field(default="us-east-1")
 
 
+class SFTPConfig(BaseModel):
+    hostname: str = Field(..., min_length=1, description="SFTP server hostname or IP")
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(..., min_length=1)
+    password: Optional[str] = Field(default=None, description="Password (if not using key)")
+    key_path: Optional[str] = Field(
+        default=None, description="Path to SSH private key on the server"
+    )
+    remote_path: str = Field(default="/backups", description="Remote directory for backups")
+
+
+class RcloneConfig(BaseModel):
+    remote_name: str = Field(
+        ..., min_length=1,
+        description="Pre-configured rclone remote name (e.g. 'gdrive', 'b2')",
+    )
+    remote_path: str = Field(
+        default="/backups", description="Path within the remote for backups"
+    )
+
+
 class TelegramConfig(BaseModel):
     bot_token: str = Field(..., min_length=1)
     chat_id: str = Field(..., min_length=1)
