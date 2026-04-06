@@ -75,7 +75,8 @@ class User(TimestampedBase):
 
     # Relationships
     package: Mapped[Optional["Package"]] = relationship(
-        back_populates="users", lazy="selectin",
+        lazy="selectin",
+        foreign_keys=[package_id],
     )
     environment: Mapped[Optional["UserEnvironment"]] = relationship(
         back_populates="user", lazy="selectin", uselist=False,
