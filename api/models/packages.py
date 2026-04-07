@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import enum
 import uuid
 from decimal import Decimal
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Boolean, Enum as SAEnum, Float, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from api.models.base import TimestampedBase
@@ -15,10 +16,31 @@ if TYPE_CHECKING:
     from api.models.users import User
 
 
+class PackageType(str, enum.Enum):
+    """Distinguishes regular hosting plans from reseller allocations.
+
+    - ``USER`` packages may only be assigned to ``UserRole.USER`` accounts.
+    - ``RESELLER`` packages may only be assigned to ``UserRole.RESELLER``
+      accounts and define their wholesale pool (max sub-users, total disk,
+      total bandwidth, total domains, etc.).
+    """
+
+    USER = "user"
+    RESELLER = "reseller"
+
+
 class Package(TimestampedBase):
     __tablename__ = "packages"
 
     name: Mapped[str] = mapped_column(String(128), unique=True)
+
+    # Package classification: "user" plans (default) vs "reseller" allocations.
+    package_type: Mapped[PackageType] = mapped_column(
+        SAEnum(PackageType, name="package_type", native_enum=True),
+        default=PackageType.USER,
+        nullable=False,
+        index=True,
+    )
 
     # null = global/admin package; non-null = reseller-owned package
     created_by: Mapped[Optional[uuid.UUID]] = mapped_column(
@@ -57,6 +79,16 @@ class Package(TimestampedBase):
     # Shell access
     shell_access: Mapped[bool] = mapped_column(Boolean, default=False)
     shell_type: Mapped[str] = mapped_column(String(16), default="nologin")  # nologin, bash, sh, rbash
+
+    # ------------------------------------------------------------------
+    # Reseller-package allocation fields (only meaningful when
+    # package_type == PackageType.RESELLER). For "user" packages these
+    # are kept at zero and ignored.
+    # ------------------------------------------------------------------
+    max_users: Mapped[int] = mapped_column(Integer, default=0)
+    max_total_disk_gb: Mapped[int] = mapped_column(Integer, default=0)
+    max_total_bandwidth_gb: Mapped[int] = mapped_column(Integer, default=0)
+    max_total_domains: Mapped[int] = mapped_column(Integer, default=0)
 
     # Relationships
     # NOTE: Use "noload" to prevent circular eager loading.

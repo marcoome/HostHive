@@ -1,12 +1,18 @@
-"""Prometheus metrics router -- /metrics (Bearer token auth)."""
+"""Prometheus metrics router -- /metrics (Bearer token auth).
+
+System metrics are collected directly via psutil (no agent proxy).
+Blocking psutil calls are dispatched to a thread executor to avoid
+blocking the asyncio event loop.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+import psutil
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
@@ -58,33 +64,52 @@ def _prom_line(name: str, value: float | int, help_text: str = "", ptype: str = 
     return "\n".join(lines)
 
 
+def _collect_system_stats() -> dict[str, float | int]:
+    """Blocking call -- must be run in an executor.
+
+    Gathers CPU, RAM, disk, and cumulative network counters via psutil.
+    """
+    # cpu_percent(interval=None) returns the value since the last call
+    # (non-blocking). A short interval would block the worker thread.
+    cpu_pct = psutil.cpu_percent(interval=None)
+    vmem = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    net = psutil.net_io_counters()
+    return {
+        "cpu_percent": float(cpu_pct),
+        "ram_percent": float(vmem.percent),
+        "disk_percent": float(disk.percent),
+        "network_in_bytes": int(net.bytes_recv),
+        "network_out_bytes": int(net.bytes_sent),
+    }
+
+
 # ---------------------------------------------------------------------------
 # GET / -- Prometheus text format metrics
 # ---------------------------------------------------------------------------
 @router.get("", response_class=PlainTextResponse, status_code=status.HTTP_200_OK)
 async def prometheus_metrics(
-    request: Request,
     db: AsyncSession = Depends(get_db),
     _auth: None = Depends(_verify_metrics_token),
 ):
     sections: list[str] = []
 
-    # System metrics from agent (best effort)
-    cpu_pct = 0.0
-    ram_pct = 0.0
-    disk_pct = 0.0
-    net_in = 0
-    net_out = 0
+    # System metrics via psutil (run blocking calls in executor).
+    cpu_pct: float = 0.0
+    ram_pct: float = 0.0
+    disk_pct: float = 0.0
+    net_in: int = 0
+    net_out: int = 0
     try:
-        agent = request.app.state.agent
-        stats = await agent.get_server_stats()
-        cpu_pct = stats.get("cpu_percent", 0.0)
-        ram_pct = stats.get("ram_percent", 0.0)
-        disk_pct = stats.get("disk_percent", 0.0)
-        net_in = stats.get("network_in_bytes", 0)
-        net_out = stats.get("network_out_bytes", 0)
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, _collect_system_stats)
+        cpu_pct = stats["cpu_percent"]
+        ram_pct = stats["ram_percent"]
+        disk_pct = stats["disk_percent"]
+        net_in = stats["network_in_bytes"]
+        net_out = stats["network_out_bytes"]
     except Exception:
-        logger.debug("Could not fetch server stats from agent for metrics")
+        logger.debug("Could not collect system stats via psutil", exc_info=True)
 
     sections.append(_prom_line("hosthive_cpu_percent", cpu_pct, "CPU usage percentage"))
     sections.append(_prom_line("hosthive_ram_percent", ram_pct, "RAM usage percentage"))

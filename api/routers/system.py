@@ -2,6 +2,12 @@
 
 Provides detailed system information: OS, kernel, CPU, RAM, disk, network,
 top processes, SMART disk health, hostname management, and reboot control.
+
+All endpoints use psutil and subprocess directly. This router NEVER proxies
+to the on-host agent on port 7080 -- the panel collects everything in-process
+to avoid the agent dependency. Blocking syscalls are dispatched through
+asyncio.get_running_loop().run_in_executor() so the event loop is never
+blocked.
 """
 
 from __future__ import annotations
@@ -9,11 +15,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
 import re
+import socket
 import subprocess
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
+import psutil
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +37,8 @@ log = logging.getLogger("novapanel.system")
 
 _admin = require_role("admin")
 
+T = TypeVar("T")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,13 +49,53 @@ def _log_activity(db: AsyncSession, request: Request, user_id, action: str, deta
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
-def _run(cmd: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-
-
-async def _run_async(cmd: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
+async def _to_thread(func: Callable[..., T], *args, **kwargs) -> T:
+    """Run a blocking function in the default executor (thread pool)."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: _run(cmd, timeout))
+    if kwargs:
+        from functools import partial
+        return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+    return await loop.run_in_executor(None, func, *args)
+
+
+def _run(cmd: list[str], timeout: int = 15, input_data: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Synchronous subprocess wrapper. Always call via _run_async."""
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        input=input_data,
+    )
+
+
+async def _run_async(
+    cmd: list[str],
+    timeout: int = 15,
+    input_data: Optional[str] = None,
+) -> subprocess.CompletedProcess:
+    """Run a subprocess command in the default executor."""
+    return await _to_thread(_run, cmd, timeout, input_data)
+
+
+def _read_text(path: str) -> str:
+    """Read a text file synchronously (call via _to_thread)."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def _parse_os_release() -> dict[str, str]:
+    """Parse /etc/os-release into a dict (blocking)."""
+    result: dict[str, str] = {}
+    try:
+        content = _read_text("/etc/os-release")
+    except Exception:
+        return result
+    for line in content.splitlines():
+        if "=" in line:
+            key, _, val = line.partition("=")
+            result[key.strip()] = val.strip().strip('"')
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -64,195 +115,273 @@ class RebootRequest(BaseModel):
 # GET /info -- Detailed system information
 # ---------------------------------------------------------------------------
 
+def _collect_system_info() -> dict[str, Any]:
+    """Collect comprehensive system information using psutil + /proc.
+
+    This is a single blocking function so the entire collection runs in
+    one executor task instead of bouncing through many subprocess calls.
+    """
+    info: dict[str, Any] = {}
+
+    # ----- OS release -----
+    os_release = _parse_os_release()
+    info["os"] = {
+        "name": os_release.get("PRETTY_NAME", "Unknown"),
+        "id": os_release.get("ID", ""),
+        "version": os_release.get("VERSION_ID", ""),
+        "codename": os_release.get("VERSION_CODENAME", ""),
+    }
+
+    # ----- Kernel info (platform.uname is a pure-python call into uname(3)) -----
+    try:
+        uname = platform.uname()
+        info["kernel"] = f"{uname.system} {uname.node} {uname.release} {uname.version} {uname.machine}"
+        info["kernel_version"] = uname.release
+    except Exception:
+        pass
+
+    # ----- CPU info via psutil -----
+    try:
+        cpu_freq = psutil.cpu_freq()
+        cpu_count_logical = psutil.cpu_count(logical=True) or 0
+        cpu_count_physical = psutil.cpu_count(logical=False) or 0
+        threads_per_core = (
+            cpu_count_logical // cpu_count_physical
+            if cpu_count_physical > 0
+            else 1
+        )
+
+        # Try to get a friendly model name from /proc/cpuinfo
+        model = "Unknown"
+        try:
+            cpuinfo = _read_text("/proc/cpuinfo")
+            for line in cpuinfo.splitlines():
+                if line.lower().startswith("model name"):
+                    _, _, val = line.partition(":")
+                    model = val.strip()
+                    break
+        except Exception:
+            pass
+
+        info["cpu"] = {
+            "model": model,
+            "architecture": platform.machine(),
+            "cores": cpu_count_logical,
+            "physical_cores": cpu_count_physical,
+            "threads_per_core": threads_per_core,
+            "max_mhz": str(cpu_freq.max) if cpu_freq else "",
+            "min_mhz": str(cpu_freq.min) if cpu_freq else "",
+            "current_mhz": str(round(cpu_freq.current, 1)) if cpu_freq else "",
+            "percent": psutil.cpu_percent(interval=0.1),
+        }
+    except Exception as e:
+        info["cpu"] = {"model": "Unknown", "cores": os.cpu_count() or 0}
+        log.debug("CPU info collection failed: %s", e)
+
+    # ----- Memory info via psutil -----
+    try:
+        vm = psutil.virtual_memory()
+        info["memory"] = {
+            "total_mb": vm.total // (1024 * 1024),
+            "used_mb": vm.used // (1024 * 1024),
+            "free_mb": vm.free // (1024 * 1024),
+            "available_mb": vm.available // (1024 * 1024),
+            "buff_cache_mb": (getattr(vm, "buffers", 0) + getattr(vm, "cached", 0)) // (1024 * 1024),
+            "shared_mb": getattr(vm, "shared", 0) // (1024 * 1024),
+            "percent_used": round(vm.percent, 1),
+        }
+    except Exception as e:
+        log.debug("Memory info collection failed: %s", e)
+
+    try:
+        sm = psutil.swap_memory()
+        info["swap"] = {
+            "total_mb": sm.total // (1024 * 1024),
+            "used_mb": sm.used // (1024 * 1024),
+            "free_mb": sm.free // (1024 * 1024),
+            "percent_used": round(sm.percent, 1),
+        }
+    except Exception as e:
+        log.debug("Swap info collection failed: %s", e)
+
+    # ----- Disks via psutil.disk_partitions -----
+    try:
+        disks: list[dict] = []
+        for part in psutil.disk_partitions(all=False):
+            disk_entry: dict[str, Any] = {
+                "device": part.device,
+                "mountpoint": part.mountpoint,
+                "fstype": part.fstype,
+                "opts": part.opts,
+            }
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+                disk_entry.update({
+                    "total_bytes": usage.total,
+                    "used_bytes": usage.used,
+                    "free_bytes": usage.free,
+                    "percent_used": round(usage.percent, 1),
+                })
+            except (PermissionError, OSError):
+                pass
+            disks.append(disk_entry)
+        info["disks"] = disks
+    except Exception as e:
+        log.debug("Disk info collection failed: %s", e)
+
+    # ----- Filesystems summary (same as disks but flattened) -----
+    try:
+        filesystems: list[dict] = []
+        for part in psutil.disk_partitions(all=False):
+            if part.device.startswith(("tmpfs", "udev", "devtmpfs")):
+                continue
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+                filesystems.append({
+                    "filesystem": part.device,
+                    "size": _human_bytes(usage.total),
+                    "used": _human_bytes(usage.used),
+                    "available": _human_bytes(usage.free),
+                    "use_percent": f"{round(usage.percent)}%",
+                    "mount": part.mountpoint,
+                })
+            except (PermissionError, OSError):
+                continue
+        info["filesystems"] = filesystems
+    except Exception as e:
+        log.debug("Filesystems collection failed: %s", e)
+
+    # ----- Uptime via psutil -----
+    try:
+        boot_time = psutil.boot_time()
+        uptime_seconds = datetime.now().timestamp() - boot_time
+        days = int(uptime_seconds // 86400)
+        hours = int((uptime_seconds % 86400) // 3600)
+        minutes = int((uptime_seconds % 3600) // 60)
+        info["uptime"] = {
+            "seconds": int(uptime_seconds),
+            "boot_time": datetime.fromtimestamp(boot_time, tz=timezone.utc).isoformat(),
+            "human": f"{days}d {hours}h {minutes}m",
+        }
+    except Exception as e:
+        log.debug("Uptime collection failed: %s", e)
+
+    # ----- Load average -----
+    try:
+        load1, load5, load15 = psutil.getloadavg()
+        info["load_average"] = {
+            "1min": round(load1, 2),
+            "5min": round(load5, 2),
+            "15min": round(load15, 2),
+        }
+    except Exception as e:
+        log.debug("Load average collection failed: %s", e)
+
+    # ----- Hostname -----
+    try:
+        info["hostname"] = socket.getfqdn() or socket.gethostname()
+    except Exception:
+        try:
+            info["hostname"] = socket.gethostname()
+        except Exception:
+            pass
+
+    # ----- Timezone (read /etc/timezone, fall back to time.tzname) -----
+    try:
+        tz_content = _read_text("/etc/timezone").strip()
+        if tz_content:
+            info["timezone"] = tz_content
+    except Exception:
+        try:
+            import time as _time
+            info["timezone"] = _time.tzname[0] if _time.tzname else ""
+        except Exception:
+            pass
+
+    info["collected_at"] = datetime.now(timezone.utc).isoformat()
+    return info
+
+
+def _human_bytes(num: int) -> str:
+    """Format a byte count as a human-readable string."""
+    for unit in ("B", "K", "M", "G", "T", "P"):
+        if abs(num) < 1024:
+            return f"{num:.1f}{unit}" if unit != "B" else f"{num}{unit}"
+        num /= 1024
+    return f"{num:.1f}E"
+
+
 @router.get("/info", status_code=status.HTTP_200_OK)
 async def system_info(
     request: Request,
     admin: User = Depends(_admin),
 ):
     """Return comprehensive system information: OS, kernel, CPU, RAM, disks."""
-    info: dict[str, Any] = {}
-
-    # OS release info
-    try:
-        result = await _run_async(["cat", "/etc/os-release"], timeout=5)
-        if result.returncode == 0:
-            os_info: dict[str, str] = {}
-            for line in result.stdout.strip().splitlines():
-                if "=" in line:
-                    key, _, val = line.partition("=")
-                    os_info[key.strip()] = val.strip().strip('"')
-            info["os"] = {
-                "name": os_info.get("PRETTY_NAME", "Unknown"),
-                "id": os_info.get("ID", ""),
-                "version": os_info.get("VERSION_ID", ""),
-                "codename": os_info.get("VERSION_CODENAME", ""),
-            }
-    except Exception:
-        info["os"] = {"name": "Unknown"}
-
-    # Kernel info
-    try:
-        result = await _run_async(["uname", "-a"], timeout=5)
-        if result.returncode == 0:
-            info["kernel"] = result.stdout.strip()
-
-        result = await _run_async(["uname", "-r"], timeout=5)
-        if result.returncode == 0:
-            info["kernel_version"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    # CPU info
-    try:
-        result = await _run_async(["lscpu"], timeout=5)
-        if result.returncode == 0:
-            cpu_info: dict[str, str] = {}
-            for line in result.stdout.strip().splitlines():
-                if ":" in line:
-                    key, _, val = line.partition(":")
-                    cpu_info[key.strip()] = val.strip()
-            info["cpu"] = {
-                "model": cpu_info.get("Model name", "Unknown"),
-                "architecture": cpu_info.get("Architecture", ""),
-                "cores": int(cpu_info.get("CPU(s)", "0")) if cpu_info.get("CPU(s)", "").isdigit() else 0,
-                "threads_per_core": int(cpu_info.get("Thread(s) per core", "1")) if cpu_info.get("Thread(s) per core", "").isdigit() else 1,
-                "sockets": int(cpu_info.get("Socket(s)", "1")) if cpu_info.get("Socket(s)", "").isdigit() else 1,
-                "max_mhz": cpu_info.get("CPU max MHz", ""),
-                "min_mhz": cpu_info.get("CPU min MHz", ""),
-                "cache_l2": cpu_info.get("L2 cache", ""),
-                "cache_l3": cpu_info.get("L3 cache", ""),
-                "virtualization": cpu_info.get("Virtualization", ""),
-                "hypervisor_vendor": cpu_info.get("Hypervisor vendor", ""),
-            }
-    except Exception:
-        info["cpu"] = {"model": "Unknown", "cores": os.cpu_count() or 0}
-
-    # Memory info
-    try:
-        result = await _run_async(["free", "-m"], timeout=5)
-        if result.returncode == 0:
-            lines = result.stdout.strip().splitlines()
-            for line in lines:
-                if line.startswith("Mem:"):
-                    parts = line.split()
-                    if len(parts) >= 7:
-                        info["memory"] = {
-                            "total_mb": int(parts[1]),
-                            "used_mb": int(parts[2]),
-                            "free_mb": int(parts[3]),
-                            "shared_mb": int(parts[4]),
-                            "buff_cache_mb": int(parts[5]),
-                            "available_mb": int(parts[6]),
-                            "percent_used": round(int(parts[2]) / int(parts[1]) * 100, 1) if int(parts[1]) > 0 else 0,
-                        }
-                elif line.startswith("Swap:"):
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        info["swap"] = {
-                            "total_mb": int(parts[1]),
-                            "used_mb": int(parts[2]),
-                            "free_mb": int(parts[3]) if len(parts) > 3 else 0,
-                        }
-    except Exception:
-        pass
-
-    # Disk info
-    try:
-        result = await _run_async(["lsblk", "-Jb", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL"], timeout=5)
-        if result.returncode == 0:
-            import json
-            try:
-                lsblk_data = json.loads(result.stdout)
-                info["disks"] = lsblk_data.get("blockdevices", [])
-            except json.JSONDecodeError:
-                info["disks"] = []
-        else:
-            # Fallback: plain lsblk
-            result = await _run_async(["lsblk", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE"], timeout=5)
-            if result.returncode == 0:
-                info["disks_raw"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    # Disk usage (df)
-    try:
-        result = await _run_async(["df", "-h", "--output=source,size,used,avail,pcent,target"], timeout=5)
-        if result.returncode == 0:
-            filesystems: list[dict] = []
-            for line in result.stdout.strip().splitlines()[1:]:  # Skip header
-                parts = line.split()
-                if len(parts) >= 6 and not parts[0].startswith("tmpfs") and not parts[0].startswith("udev"):
-                    filesystems.append({
-                        "filesystem": parts[0],
-                        "size": parts[1],
-                        "used": parts[2],
-                        "available": parts[3],
-                        "use_percent": parts[4],
-                        "mount": parts[5],
-                    })
-            info["filesystems"] = filesystems
-    except Exception:
-        pass
-
-    # Uptime
-    try:
-        result = await _run_async(["cat", "/proc/uptime"], timeout=5)
-        if result.returncode == 0:
-            parts = result.stdout.strip().split()
-            if parts:
-                uptime_seconds = float(parts[0])
-                days = int(uptime_seconds // 86400)
-                hours = int((uptime_seconds % 86400) // 3600)
-                minutes = int((uptime_seconds % 3600) // 60)
-                info["uptime"] = {
-                    "seconds": int(uptime_seconds),
-                    "human": f"{days}d {hours}h {minutes}m",
-                }
-    except Exception:
-        pass
-
-    # Load average
-    try:
-        result = await _run_async(["cat", "/proc/loadavg"], timeout=5)
-        if result.returncode == 0:
-            parts = result.stdout.strip().split()
-            if len(parts) >= 3:
-                info["load_average"] = {
-                    "1min": float(parts[0]),
-                    "5min": float(parts[1]),
-                    "15min": float(parts[2]),
-                }
-    except Exception:
-        pass
-
-    # Hostname
-    try:
-        result = await _run_async(["hostname", "-f"], timeout=5)
-        if result.returncode == 0:
-            info["hostname"] = result.stdout.strip()
-        else:
-            result = await _run_async(["hostname"], timeout=5)
-            if result.returncode == 0:
-                info["hostname"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    # Timezone
-    try:
-        result = await _run_async(["timedatectl", "show", "--property=Timezone", "--value"], timeout=5)
-        if result.returncode == 0:
-            info["timezone"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    info["collected_at"] = datetime.now(timezone.utc).isoformat()
-
-    return info
+    return await _to_thread(_collect_system_info)
 
 
 # ---------------------------------------------------------------------------
 # GET /processes -- Top processes by CPU/RAM
 # ---------------------------------------------------------------------------
+
+def _collect_processes(sort_by: str, limit: int) -> dict[str, Any]:
+    """Collect and sort process info via psutil."""
+    procs: list[dict] = []
+
+    # First pass primes cpu_percent so the next reading is meaningful.
+    for p in psutil.process_iter(["pid"]):
+        try:
+            p.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    # Tiny sleep so cpu_percent has a delta to compute against.
+    import time as _time
+    _time.sleep(0.1)
+
+    for p in psutil.process_iter([
+        "pid", "username", "name", "cmdline", "status",
+        "create_time", "memory_info", "memory_percent",
+    ]):
+        try:
+            with p.oneshot():
+                cpu = p.cpu_percent(interval=None)
+                mem_pct = p.memory_percent()
+                meminfo = p.memory_info()
+                cmdline = " ".join(p.info.get("cmdline") or []) or p.info.get("name") or ""
+                start_ts = p.info.get("create_time") or 0
+                start_human = (
+                    datetime.fromtimestamp(start_ts).strftime("%H:%M")
+                    if start_ts
+                    else ""
+                )
+                procs.append({
+                    "user": p.info.get("username") or "",
+                    "pid": p.info.get("pid"),
+                    "cpu_percent": round(cpu, 1),
+                    "mem_percent": round(mem_pct, 1),
+                    "vsz_kb": meminfo.vms // 1024 if meminfo else 0,
+                    "rss_kb": meminfo.rss // 1024 if meminfo else 0,
+                    "tty": "?",
+                    "state": p.info.get("status") or "",
+                    "start": start_human,
+                    "time": "",
+                    "command": cmdline,
+                })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    total = len(procs)
+
+    key = "cpu_percent" if sort_by == "cpu" else "mem_percent"
+    procs.sort(key=lambda d: d.get(key, 0.0), reverse=True)
+
+    return {
+        "processes": procs[:limit],
+        "total": total,
+        "sort_by": sort_by,
+    }
+
 
 @router.get("/processes", status_code=status.HTTP_200_OK)
 async def top_processes(
@@ -262,74 +391,149 @@ async def top_processes(
     admin: User = Depends(_admin),
 ):
     """Return top processes sorted by CPU or memory usage."""
-    sort_flag = "-%cpu" if sort_by == "cpu" else "-%mem"
-
     try:
-        result = await _run_async(
-            ["ps", "aux", f"--sort={sort_flag}"],
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to list processes: {result.stderr.strip()}",
-            )
-    except subprocess.TimeoutExpired:
+        return await _to_thread(_collect_processes, sort_by, limit)
+    except Exception as e:
+        log.exception("Failed to collect processes")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Timeout listing processes.",
+            detail=f"Failed to list processes: {e}",
         )
-
-    lines = result.stdout.strip().splitlines()
-    if not lines:
-        return {"processes": [], "total": 0}
-
-    # Parse header and rows
-    header = lines[0]
-    processes: list[dict] = []
-
-    for line in lines[1:limit + 1]:
-        parts = line.split(None, 10)
-        if len(parts) >= 11:
-            processes.append({
-                "user": parts[0],
-                "pid": int(parts[1]) if parts[1].isdigit() else parts[1],
-                "cpu_percent": float(parts[2]) if _is_float(parts[2]) else 0.0,
-                "mem_percent": float(parts[3]) if _is_float(parts[3]) else 0.0,
-                "vsz_kb": int(parts[4]) if parts[4].isdigit() else 0,
-                "rss_kb": int(parts[5]) if parts[5].isdigit() else 0,
-                "tty": parts[6],
-                "state": parts[7],
-                "start": parts[8],
-                "time": parts[9],
-                "command": parts[10],
-            })
-
-    # Total process count
-    try:
-        count_result = await _run_async(["ps", "aux", "--no-headers"], timeout=5)
-        total = len(count_result.stdout.strip().splitlines()) if count_result.returncode == 0 else len(lines) - 1
-    except Exception:
-        total = len(lines) - 1
-
-    return {
-        "processes": processes,
-        "total": total,
-        "sort_by": sort_by,
-    }
-
-
-def _is_float(s: str) -> bool:
-    try:
-        float(s)
-        return True
-    except ValueError:
-        return False
 
 
 # ---------------------------------------------------------------------------
 # GET /network -- Network interfaces and IPs
 # ---------------------------------------------------------------------------
+
+def _collect_network() -> dict[str, Any]:
+    """Collect network interface info using psutil + /proc."""
+    info: dict[str, Any] = {"interfaces": [], "routes": [], "dns": []}
+
+    # ----- Interfaces via psutil -----
+    try:
+        addrs = psutil.net_if_addrs()
+        stats = psutil.net_if_stats()
+        io_counters = psutil.net_io_counters(pernic=True)
+
+        interfaces: list[dict] = []
+        for ifname, addr_list in addrs.items():
+            iface_addresses: list[dict] = []
+            mac = ""
+            for addr in addr_list:
+                family_name = ""
+                if addr.family == socket.AF_INET:
+                    family_name = "inet"
+                elif addr.family == socket.AF_INET6:
+                    family_name = "inet6"
+                elif hasattr(psutil, "AF_LINK") and addr.family == psutil.AF_LINK:
+                    mac = addr.address
+                    continue
+                else:
+                    # Linux packet family for MAC
+                    try:
+                        from socket import AF_PACKET
+                        if addr.family == AF_PACKET:
+                            mac = addr.address
+                            continue
+                    except ImportError:
+                        pass
+                    continue
+
+                # Convert netmask to CIDR prefix length
+                prefix_len = 0
+                if addr.netmask:
+                    try:
+                        if family_name == "inet":
+                            prefix_len = bin(int.from_bytes(
+                                socket.inet_aton(addr.netmask), "big"
+                            )).count("1")
+                        elif family_name == "inet6":
+                            prefix_len = bin(int.from_bytes(
+                                socket.inet_pton(socket.AF_INET6, addr.netmask), "big"
+                            )).count("1")
+                    except Exception:
+                        pass
+
+                iface_addresses.append({
+                    "family": family_name,
+                    "address": addr.address.split("%")[0] if family_name == "inet6" else addr.address,
+                    "prefix_len": prefix_len,
+                    "scope": "global",
+                })
+
+            stat = stats.get(ifname)
+            io = io_counters.get(ifname)
+
+            interfaces.append({
+                "name": ifname,
+                "state": "UP" if (stat and stat.isup) else "DOWN",
+                "mtu": stat.mtu if stat else 0,
+                "speed_mbps": stat.speed if stat else 0,
+                "duplex": str(stat.duplex) if stat else "",
+                "mac": mac,
+                "addresses": iface_addresses,
+                "bytes_sent": io.bytes_sent if io else 0,
+                "bytes_recv": io.bytes_recv if io else 0,
+                "packets_sent": io.packets_sent if io else 0,
+                "packets_recv": io.packets_recv if io else 0,
+            })
+        info["interfaces"] = interfaces
+    except Exception as e:
+        log.debug("Interface collection failed: %s", e)
+
+    # ----- Routes via /proc/net/route -----
+    try:
+        routes_text = _read_text("/proc/net/route")
+        routes: list[dict] = []
+        lines = routes_text.strip().splitlines()
+        for line in lines[1:]:  # skip header
+            parts = line.split()
+            if len(parts) < 11:
+                continue
+            iface, dest_hex, gw_hex, _flags, _refcnt, _use, metric, mask_hex = parts[:8]
+            try:
+                dest_int = int(dest_hex, 16)
+                mask_int = int(mask_hex, 16)
+                gw_int = int(gw_hex, 16)
+                dest_ip = socket.inet_ntoa(dest_int.to_bytes(4, "little"))
+                mask_ip = socket.inet_ntoa(mask_int.to_bytes(4, "little"))
+                gw_ip = socket.inet_ntoa(gw_int.to_bytes(4, "little"))
+                prefix_len = bin(mask_int).count("1")
+                if dest_int == 0:
+                    dest_str = "default"
+                else:
+                    dest_str = f"{dest_ip}/{prefix_len}"
+                routes.append({
+                    "destination": dest_str,
+                    "gateway": gw_ip if gw_int else "",
+                    "device": iface,
+                    "protocol": "",
+                    "scope": "",
+                    "metric": int(metric) if metric.isdigit() else 0,
+                    "netmask": mask_ip,
+                })
+            except Exception:
+                continue
+        info["routes"] = routes
+    except Exception as e:
+        log.debug("Route collection failed: %s", e)
+
+    # ----- DNS resolvers from /etc/resolv.conf -----
+    try:
+        resolv = _read_text("/etc/resolv.conf")
+        dns_servers: list[str] = []
+        for line in resolv.splitlines():
+            line = line.strip()
+            if line.startswith("nameserver"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    dns_servers.append(parts[1])
+        info["dns"] = dns_servers
+    except Exception as e:
+        log.debug("DNS collection failed: %s", e)
+
+    return info
+
 
 @router.get("/network", status_code=status.HTTP_200_OK)
 async def network_info(
@@ -337,96 +541,7 @@ async def network_info(
     admin: User = Depends(_admin),
 ):
     """Return network interfaces, IPs, and routing information."""
-    info: dict[str, Any] = {"interfaces": [], "routes": [], "dns": []}
-
-    # Network interfaces via ip addr
-    try:
-        result = await _run_async(["ip", "-j", "addr", "show"], timeout=10)
-        if result.returncode == 0:
-            import json
-            try:
-                interfaces_data = json.loads(result.stdout)
-                interfaces: list[dict] = []
-                for iface in interfaces_data:
-                    addresses: list[dict] = []
-                    for addr_info in iface.get("addr_info", []):
-                        addresses.append({
-                            "family": addr_info.get("family", ""),
-                            "address": addr_info.get("local", ""),
-                            "prefix_len": addr_info.get("prefixlen", 0),
-                            "scope": addr_info.get("scope", ""),
-                        })
-                    interfaces.append({
-                        "name": iface.get("ifname", ""),
-                        "state": iface.get("operstate", "UNKNOWN"),
-                        "mtu": iface.get("mtu", 0),
-                        "mac": iface.get("address", ""),
-                        "addresses": addresses,
-                        "flags": iface.get("flags", []),
-                    })
-                info["interfaces"] = interfaces
-            except json.JSONDecodeError:
-                # Fallback to plain text parsing
-                info["interfaces_raw"] = result.stdout.strip()
-        else:
-            # Fallback: plain ip addr
-            result = await _run_async(["ip", "addr", "show"], timeout=10)
-            if result.returncode == 0:
-                info["interfaces_raw"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    # Routes
-    try:
-        result = await _run_async(["ip", "-j", "route", "show"], timeout=5)
-        if result.returncode == 0:
-            import json
-            try:
-                routes_data = json.loads(result.stdout)
-                routes: list[dict] = []
-                for route in routes_data:
-                    routes.append({
-                        "destination": route.get("dst", ""),
-                        "gateway": route.get("gateway", ""),
-                        "device": route.get("dev", ""),
-                        "protocol": route.get("protocol", ""),
-                        "scope": route.get("scope", ""),
-                        "metric": route.get("metric", 0),
-                    })
-                info["routes"] = routes
-            except json.JSONDecodeError:
-                pass
-        else:
-            result = await _run_async(["ip", "route", "show"], timeout=5)
-            if result.returncode == 0:
-                info["routes_raw"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    # DNS resolvers
-    try:
-        result = await _run_async(["cat", "/etc/resolv.conf"], timeout=5)
-        if result.returncode == 0:
-            dns_servers: list[str] = []
-            for line in result.stdout.strip().splitlines():
-                line = line.strip()
-                if line.startswith("nameserver"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        dns_servers.append(parts[1])
-            info["dns"] = dns_servers
-    except Exception:
-        pass
-
-    # Public IP (try multiple sources)
-    try:
-        result = await _run_async(["curl", "-s", "--max-time", "3", "https://ifconfig.me"], timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            info["public_ip"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    return info
+    return await _to_thread(_collect_network)
 
 
 # ---------------------------------------------------------------------------
@@ -453,19 +568,16 @@ async def disk_smart(
         "available": False,
     }
 
-    # Check if smartctl is available
-    try:
-        which = await _run_async(["which", "smartctl"], timeout=5)
-        if which.returncode != 0:
-            result_dict["error"] = "smartmontools not installed. Install with: apt install smartmontools"
-            return result_dict
-    except Exception:
-        result_dict["error"] = "Cannot check for smartctl"
+    # Check if smartctl is available (use shutil.which, no subprocess needed)
+    import shutil
+    smartctl_path = await _to_thread(shutil.which, "smartctl")
+    if not smartctl_path:
+        result_dict["error"] = "smartmontools not installed. Install with: apt install smartmontools"
         return result_dict
 
     result_dict["available"] = True
 
-    # Get SMART info
+    # Get SMART info via subprocess in executor
     try:
         result = await _run_async(["sudo", "smartctl", "-a", device], timeout=15)
         output = result.stdout
@@ -582,7 +694,7 @@ async def reboot_server(
     return {
         "status": "rebooting",
         "delay_minutes": body.delay_minutes,
-        "detail": f"Server reboot initiated." + (
+        "detail": "Server reboot initiated." + (
             f" System will reboot in {body.delay_minutes} minute(s)." if body.delay_minutes > 0 else " Rebooting now."
         ),
     }
@@ -592,36 +704,43 @@ async def reboot_server(
 # GET /hostname -- Current hostname
 # ---------------------------------------------------------------------------
 
+def _collect_hostname() -> dict[str, Any]:
+    """Collect hostname / FQDN / local IPs via socket + psutil."""
+    result_dict: dict[str, Any] = {}
+
+    try:
+        result_dict["hostname"] = socket.gethostname()
+    except Exception:
+        pass
+
+    try:
+        result_dict["fqdn"] = socket.getfqdn()
+    except Exception:
+        pass
+
+    # Local IPs from psutil interfaces (skip loopback)
+    try:
+        ips: list[str] = []
+        for ifname, addr_list in psutil.net_if_addrs().items():
+            if ifname == "lo":
+                continue
+            for addr in addr_list:
+                if addr.family == socket.AF_INET and addr.address:
+                    ips.append(addr.address)
+        result_dict["ips"] = ips
+    except Exception:
+        pass
+
+    return result_dict
+
+
 @router.get("/hostname", status_code=status.HTTP_200_OK)
 async def get_hostname(
     request: Request,
     admin: User = Depends(_admin),
 ):
     """Return the current system hostname."""
-    result_dict: dict[str, Any] = {}
-
-    try:
-        result = await _run_async(["hostname"], timeout=5)
-        if result.returncode == 0:
-            result_dict["hostname"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    try:
-        result = await _run_async(["hostname", "-f"], timeout=5)
-        if result.returncode == 0:
-            result_dict["fqdn"] = result.stdout.strip()
-    except Exception:
-        pass
-
-    try:
-        result = await _run_async(["hostname", "-I"], timeout=5)
-        if result.returncode == 0:
-            result_dict["ips"] = result.stdout.strip().split()
-    except Exception:
-        pass
-
-    return result_dict
+    return await _to_thread(_collect_hostname)
 
 
 # ---------------------------------------------------------------------------
@@ -638,14 +757,13 @@ async def set_hostname(
     """Change the system hostname."""
     new_hostname = body.hostname.strip()
 
-    # Get old hostname
+    # Get old hostname (no subprocess needed)
     try:
-        old_result = await _run_async(["hostname"], timeout=5)
-        old_hostname = old_result.stdout.strip() if old_result.returncode == 0 else "unknown"
+        old_hostname = await _to_thread(socket.gethostname)
     except Exception:
         old_hostname = "unknown"
 
-    # Set hostname using hostnamectl
+    # Set hostname using hostnamectl (subprocess in executor)
     try:
         result = await _run_async(["sudo", "hostnamectl", "set-hostname", new_hostname], timeout=10)
         if result.returncode != 0:
@@ -659,22 +777,21 @@ async def set_hostname(
             detail="Timeout setting hostname.",
         )
 
-    # Update /etc/hosts
+    # Update /etc/hosts: read directly, then write via `sudo tee`
     try:
-        hosts_result = await _run_async(["sudo", "cat", "/etc/hosts"], timeout=5)
-        if hosts_result.returncode == 0:
-            hosts_content = hosts_result.stdout
-            # Replace old hostname with new
+        try:
+            hosts_content = await _to_thread(_read_text, "/etc/hosts")
+        except Exception:
+            # Fall back to `sudo cat` if /etc/hosts isn't world-readable
+            cat_result = await _run_async(["sudo", "cat", "/etc/hosts"], timeout=5)
+            hosts_content = cat_result.stdout if cat_result.returncode == 0 else ""
+
+        if hosts_content and old_hostname and old_hostname != "unknown":
             updated_hosts = hosts_content.replace(old_hostname, new_hostname)
-            proc = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["sudo", "tee", "/etc/hosts"],
-                    input=updated_hosts,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                ),
+            await _run_async(
+                ["sudo", "tee", "/etc/hosts"],
+                timeout=5,
+                input_data=updated_hosts,
             )
     except Exception:
         log.warning("Could not update /etc/hosts")

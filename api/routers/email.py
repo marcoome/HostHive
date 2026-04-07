@@ -2,11 +2,14 @@
 
 All operations follow a DB-first pattern:
   1. Validate & save to database
-  2. Try the agent for system-level changes
-  3. If the agent is unavailable, fall back to direct system operations
+  2. Apply system-level changes via direct mail_ops functions
 
 Every system call is wrapped in try/except so a DB record always persists
 even if the underlying OS operations fail.
+
+NOTE: This router intentionally does NOT proxy to the HostHive agent on
+port 7080.  All system-level mail operations are performed in-process via
+``api.services.mail_ops``.
 """
 
 from __future__ import annotations
@@ -104,113 +107,8 @@ def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, de
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
-def _get_agent(request: Request):
-    """Return the agent client or None if unavailable."""
-    try:
-        agent = getattr(request.app.state, "agent", None)
-        return agent
-    except Exception:
-        return None
-
-
-async def _try_agent_create_mailbox(agent, address: str, password: str, quota_mb: int) -> bool:
-    """Attempt mailbox creation via agent.  Returns True on success."""
-    if agent is None:
-        return False
-    try:
-        await agent.create_mailbox(address=address, password=password, quota_mb=quota_mb)
-        return True
-    except Exception as exc:
-        logger.warning("Agent create_mailbox failed, will use direct fallback: %s", exc)
-        return False
-
-
-async def _try_agent_delete_mailbox(agent, address: str) -> bool:
-    """Attempt mailbox deletion via agent.  Returns True on success."""
-    if agent is None:
-        return False
-    try:
-        await agent.delete_mailbox(address)
-        return True
-    except Exception as exc:
-        logger.warning("Agent delete_mailbox failed, will use direct fallback: %s", exc)
-        return False
-
-
-async def _try_agent_create_alias(agent, source: str, destination: str) -> bool:
-    """Attempt alias creation via agent.  Returns True on success."""
-    if agent is None:
-        return False
-    try:
-        await agent.create_mail_alias(source=source, destination=destination)
-        return True
-    except Exception as exc:
-        logger.warning("Agent create_mail_alias failed, will use direct fallback: %s", exc)
-        return False
-
-
-async def _try_agent_delete_alias(agent, alias_id: str) -> bool:
-    """Attempt alias deletion via agent.  Returns True on success."""
-    if agent is None:
-        return False
-    try:
-        await agent._request("DELETE", f"/mail/alias/{alias_id}")
-        return True
-    except Exception as exc:
-        logger.warning("Agent delete_alias failed, will use direct fallback: %s", exc)
-        return False
-
-
-async def _try_agent_list_aliases(agent) -> dict | None:
-    """Attempt to list aliases via agent.  Returns dict or None."""
-    if agent is None:
-        return None
-    try:
-        return await agent._request("GET", "/mail/aliases")
-    except Exception as exc:
-        logger.warning("Agent list_aliases failed, will use direct fallback: %s", exc)
-        return None
-
-
-async def _try_agent_get_queue(agent) -> dict | None:
-    """Attempt to get mail queue via agent.  Returns dict or None."""
-    if agent is None:
-        return None
-    try:
-        return await agent._request("GET", "/mail/queue")
-    except Exception as exc:
-        logger.warning("Agent get_queue failed, will use direct fallback: %s", exc)
-        return None
-
-
-async def _try_agent_set_password(agent, address: str, new_password: str) -> bool:
-    """Attempt password change via agent.  Returns True on success."""
-    if agent is None:
-        return False
-    try:
-        await agent._request("PUT", "/mail/set-password", json={
-            "address": address,
-            "new_password": new_password,
-        })
-        return True
-    except Exception as exc:
-        logger.warning("Agent set_password failed, will use direct fallback: %s", exc)
-        return False
-
-
-async def _try_agent_flush_queue(agent) -> dict | None:
-    """Attempt to flush mail queue via agent.  Returns dict or None."""
-    if agent is None:
-        return None
-    try:
-        return await agent._request("POST", "/mail/queue/flush")
-    except Exception as exc:
-        logger.warning("Agent flush_queue failed, will use direct fallback: %s", exc)
-        return None
-
-
 # ==========================================================================
-# GET / -- list mailboxes (DB only, no agent needed)
+# GET / -- list mailboxes (DB only)
 # ==========================================================================
 
 @router.get("", status_code=status.HTTP_200_OK)
@@ -294,16 +192,12 @@ async def create_mailbox(
     db.add(acct)
     await db.flush()
 
-    # 2. Try agent, fall back to direct system operations
+    # 2. Apply system-level changes via direct mail_ops
     system_warning = None
-    agent = _get_agent(request)
-    agent_ok = await _try_agent_create_mailbox(agent, body.address, body.password, body.quota_mb)
-
-    if not agent_ok:
-        result = await create_mailbox_direct(body.address, body.password, body.quota_mb)
-        if not result.get("ok"):
-            system_warning = result.get("error", "Direct mailbox creation returned an error")
-            logger.error("Direct mailbox creation failed for %s: %s", body.address, system_warning)
+    result = await create_mailbox_direct(body.address, body.password, body.quota_mb)
+    if not result.get("ok"):
+        system_warning = result.get("error", "Direct mailbox creation returned an error")
+        logger.error("Direct mailbox creation failed for %s: %s", body.address, system_warning)
 
     _log(db, request, current_user.id, "email.create", f"Created mailbox {body.address}")
 
@@ -410,18 +304,14 @@ async def create_alias(
     db.add(alias)
     await db.flush()
 
-    # 3. Try agent, fall back to direct
-    agent = _get_agent(request)
-    agent_ok = await _try_agent_create_alias(agent, body.source, dest_str)
-
-    if not agent_ok:
-        result = await create_alias_direct(
-            body.source, dest_str,
-            destinations=dest_list,
-            keep_local_copy=body.keep_local_copy,
-        )
-        if not result.get("ok"):
-            logger.error("Direct alias creation failed for %s: %s", body.source, result.get("error"))
+    # 3. Apply via direct mail_ops
+    result = await create_alias_direct(
+        body.source, dest_str,
+        destinations=dest_list,
+        keep_local_copy=body.keep_local_copy,
+    )
+    if not result.get("ok"):
+        logger.error("Direct alias creation failed for %s: %s", body.source, result.get("error"))
 
     _log(db, request, current_user.id, "email.create_alias", f"Created alias {body.source} -> {dest_str}")
     return AliasResponse.from_alias(alias)
@@ -451,13 +341,8 @@ async def list_aliases(
             "total": total,
         }
 
-    # If DB is empty, try agent then direct file as a migration path
-    agent = _get_agent(request)
-    agent_result = await _try_agent_list_aliases(agent)
-    if agent_result is not None:
-        return agent_result
-
-    # Direct fallback -- read from Exim virtual_aliases file
+    # If DB is empty, read directly from the Exim virtual_aliases file
+    # as a migration path.
     try:
         direct = await list_aliases_direct()
         return {"aliases": direct.get("aliases", []), "total": len(direct.get("aliases", []))}
@@ -490,14 +375,10 @@ async def delete_alias(
         await db.delete(db_alias)
         await db.flush()
 
-    # System-level removal: try agent, then direct
-    agent = _get_agent(request)
-    agent_ok = await _try_agent_delete_alias(agent, alias_id)
-
-    if not agent_ok:
-        result = await delete_alias_direct(source_for_file)
-        if not result.get("ok"):
-            logger.error("Direct alias deletion failed for %s: %s", source_for_file, result.get("error"))
+    # System-level removal via direct mail_ops
+    result = await delete_alias_direct(source_for_file)
+    if not result.get("ok"):
+        logger.error("Direct alias deletion failed for %s: %s", source_for_file, result.get("error"))
 
     _log(db, request, current_user.id, "email.delete_alias", f"Deleted alias {alias_id}")
 
@@ -511,13 +392,7 @@ async def mail_queue(
     request: Request,
     admin: User = Depends(_admin),
 ):
-    # Try agent first, fall back to direct
-    agent = _get_agent(request)
-    agent_result = await _try_agent_get_queue(agent)
-    if agent_result is not None:
-        return agent_result
-
-    # Direct fallback
+    """List the Exim4 mail queue using direct mail_ops."""
     try:
         result = await get_mail_queue()
         return {
@@ -536,20 +411,10 @@ async def remove_queue_message(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    # Try agent first
-    agent = _get_agent(request)
-    if agent is not None:
-        try:
-            result = await agent._request("DELETE", f"/mail/queue/{message_id}")
-            _log(db, request, admin.id, "email.queue_remove", f"Removed message {message_id} from queue")
-            return result
-        except Exception as exc:
-            logger.warning("Agent remove_queue failed: %s", exc)
-
-    # Direct fallback
+    """Remove a single Exim4 queued message via direct mail_ops."""
     try:
         result = await remove_from_queue(message_id)
-        _log(db, request, admin.id, "email.queue_remove", f"Removed message {message_id} from queue (direct)")
+        _log(db, request, admin.id, "email.queue_remove", f"Removed message {message_id} from queue")
         return result
     except Exception as exc:
         raise HTTPException(
@@ -564,17 +429,10 @@ async def flush_mail_queue_endpoint(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    # Try agent first
-    agent = _get_agent(request)
-    agent_result = await _try_agent_flush_queue(agent)
-    if agent_result is not None:
-        _log(db, request, admin.id, "email.flush_queue", "Flushed mail queue")
-        return agent_result
-
-    # Direct fallback
+    """Flush the Exim4 mail queue via direct mail_ops."""
     try:
         result = await flush_mail_queue()
-        _log(db, request, admin.id, "email.flush_queue", "Flushed mail queue (direct)")
+        _log(db, request, admin.id, "email.flush_queue", "Flushed mail queue")
         return result
     except Exception as exc:
         raise HTTPException(
@@ -692,14 +550,10 @@ async def change_password(
     db.add(acct)
     await db.flush()
 
-    # 2. Update system: agent -> direct fallback
-    agent = _get_agent(request)
-    agent_ok = await _try_agent_set_password(agent, acct.address, body.new_password)
-
-    if not agent_ok:
-        result = await set_password_direct(acct.address, body.new_password)
-        if not result.get("ok"):
-            logger.error("Direct set_password failed for %s: %s", acct.address, result.get("error"))
+    # 2. Update system via direct mail_ops
+    result = await set_password_direct(acct.address, body.new_password)
+    if not result.get("ok"):
+        logger.error("Direct set_password failed for %s: %s", acct.address, result.get("error"))
 
     _log(db, request, current_user.id, "email.change_password", f"Changed password for {acct.address}")
     return {"detail": "Password changed successfully."}
@@ -760,7 +614,7 @@ async def update_rate_limit(
     db.add(acct)
     await db.flush()
 
-    # 2. Configure in Exim4 (direct -- no agent endpoint for this yet)
+    # 2. Configure in Exim4 via direct mail_ops
     result = await configure_ratelimit_direct(acct.address, body.max_emails_per_hour)
     if not result.get("ok"):
         logger.error("configure_ratelimit_direct failed for %s: %s", acct.address, result.get("error"))
@@ -1101,27 +955,6 @@ async def train_spam_endpoint(
 # MUST be before /{email_id} catch-all to avoid path conflicts.
 # ==========================================================================
 
-async def _try_agent_configure_autoresponder(agent, address: str, enabled: bool,
-                                              subject: str | None, body: str | None,
-                                              start_date: str | None, end_date: str | None) -> bool:
-    """Attempt to configure autoresponder via agent. Returns True on success."""
-    if agent is None:
-        return False
-    try:
-        await agent._request("PUT", "/mail/autoresponder", json={
-            "address": address,
-            "enabled": enabled,
-            "subject": subject,
-            "body": body,
-            "start_date": start_date,
-            "end_date": end_date,
-        })
-        return True
-    except Exception as exc:
-        logger.warning("Agent configure_autoresponder failed, will use direct fallback: %s", exc)
-        return False
-
-
 @router.get("/{email_id}/autoresponder", response_model=AutoresponderResponse, status_code=status.HTTP_200_OK)
 async def get_autoresponder(
     email_id: uuid.UUID,
@@ -1166,26 +999,20 @@ async def update_autoresponder(
     db.add(acct)
     await db.flush()
 
-    # 2. Configure Sieve on the system (agent -> direct fallback)
+    # 2. Configure Sieve on the system via direct mail_ops
     start_str = body.start_date.isoformat() if body.start_date else None
     end_str = body.end_date.isoformat() if body.end_date else None
 
-    agent = _get_agent(request)
-    agent_ok = await _try_agent_configure_autoresponder(
-        agent, acct.address, body.enabled, body.subject, body.body, start_str, end_str,
+    result = await configure_autoresponder_direct(
+        address=acct.address,
+        enabled=body.enabled,
+        subject=body.subject,
+        body=body.body,
+        start_date=start_str,
+        end_date=end_str,
     )
-
-    if not agent_ok:
-        result = await configure_autoresponder_direct(
-            address=acct.address,
-            enabled=body.enabled,
-            subject=body.subject,
-            body=body.body,
-            start_date=start_str,
-            end_date=end_str,
-        )
-        if not result.get("ok"):
-            logger.error("Direct autoresponder config failed for %s: %s", acct.address, result.get("error"))
+    if not result.get("ok"):
+        logger.error("Direct autoresponder config failed for %s: %s", acct.address, result.get("error"))
 
     _log(db, request, current_user.id, "email.autoresponder",
          f"{'Enabled' if body.enabled else 'Updated'} autoresponder for {acct.address}")
@@ -1214,19 +1041,13 @@ async def disable_autoresponder(
     db.add(acct)
     await db.flush()
 
-    # 2. Remove Sieve script on the system
-    agent = _get_agent(request)
-    agent_ok = await _try_agent_configure_autoresponder(
-        agent, acct.address, False, None, None, None, None,
+    # 2. Remove Sieve script on the system via direct mail_ops
+    result = await configure_autoresponder_direct(
+        address=acct.address,
+        enabled=False,
     )
-
-    if not agent_ok:
-        result = await configure_autoresponder_direct(
-            address=acct.address,
-            enabled=False,
-        )
-        if not result.get("ok"):
-            logger.error("Direct autoresponder disable failed for %s: %s", acct.address, result.get("error"))
+    if not result.get("ok"):
+        logger.error("Direct autoresponder disable failed for %s: %s", acct.address, result.get("error"))
 
     _log(db, request, current_user.id, "email.autoresponder", f"Disabled autoresponder for {acct.address}")
     return {"detail": "Autoresponder disabled."}
@@ -1289,11 +1110,7 @@ async def delete_mailbox(
     await db.delete(acct)
     await db.flush()
 
-    # 2. Try agent, fall back to direct system operations
-    agent = _get_agent(request)
-    agent_ok = await _try_agent_delete_mailbox(agent, address)
-
-    if not agent_ok:
-        result = await delete_mailbox_direct(address, remove_directory=False)
-        if not result.get("ok"):
-            logger.error("Direct mailbox deletion failed for %s: %s", address, result.get("error"))
+    # 2. Apply system-level changes via direct mail_ops
+    result = await delete_mailbox_direct(address, remove_directory=False)
+    if not result.get("ok"):
+        logger.error("Direct mailbox deletion failed for %s: %s", address, result.get("error"))

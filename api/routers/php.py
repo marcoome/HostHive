@@ -1,18 +1,25 @@
 """PHP version and configuration management router -- /api/v1/php.
 
 Manages PHP installations, php.ini configuration, and extensions on Debian 12.
+
+This router executes PHP management commands directly via subprocess
+(phpenmod, phpdismod, php -m, systemctl, apt-get) on the local host.
+It does NOT proxy to any external agent. All blocking calls are dispatched
+through asyncio.get_running_loop().run_in_executor() so the event loop
+remains responsive.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from api.core.security import get_current_user
@@ -22,6 +29,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 PHP_ETC_BASE = Path("/etc/php")
+PHP_ETC_BASE_STR = "/etc/php/"
 
 # Allowed PHP config directives that users may update (whitelist approach)
 SAFE_PHP_DIRECTIVES = {
@@ -65,21 +73,45 @@ def _require_admin(user: User) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Subprocess helpers (direct local execution, no agent proxy)
 # ---------------------------------------------------------------------------
-async def _run(cmd: str, timeout: int = 120) -> tuple[int, str, str]:
-    """Run a shell command and return (returncode, stdout, stderr)."""
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+def _run_blocking(argv: list[str], timeout: int = 120) -> tuple[int, str, str]:
+    """Synchronously run a command with arg list (no shell). Returns (rc, stdout, stderr).
+
+    Intended to be wrapped by asyncio.get_running_loop().run_in_executor().
+    """
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return 1, "", "Command timed out"
-    return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        return 1, "", f"Command timed out after {timeout}s: {' '.join(argv)}"
+    except FileNotFoundError as exc:
+        return 127, "", f"Executable not found: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return 1, "", f"Subprocess error: {exc}"
+
+
+async def _run(argv: list[str], timeout: int = 120) -> tuple[int, str, str]:
+    """Run a command directly on this host via subprocess in a worker thread.
+
+    Uses an explicit argv list (no shell interpolation) and dispatches the
+    blocking call onto the default executor so the asyncio event loop is
+    not blocked.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run_blocking, argv, timeout)
+
+
+async def _run_in_executor(func, *args):
+    """Generic wrapper to run any blocking callable in the default executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, func, *args)
 
 
 def _validate_php_version(version: str) -> str:
@@ -120,7 +152,7 @@ def _parse_php_ini(content: str) -> dict[str, str]:
             value = value.strip().rstrip(";").strip()
             # Strip inline comments
             if ";" in value:
-                value = value[:value.index(";")].strip()
+                value = value[: value.index(";")].strip()
             directives[key] = value
     return directives
 
@@ -155,6 +187,39 @@ def _update_php_ini(content: str, updates: dict[str, str]) -> str:
             lines.append(f"{key} = {value}")
 
     return "\n".join(lines)
+
+
+def _list_php_versions_blocking() -> list[str]:
+    """List PHP version directories under /etc/php/ using os.listdir.
+
+    Returns sorted version strings like ['7.4', '8.1', '8.2', '8.3'].
+    """
+    if not os.path.isdir(PHP_ETC_BASE_STR):
+        return []
+    entries = os.listdir(PHP_ETC_BASE_STR)
+    versions = [
+        name for name in entries
+        if re.match(r"^\d+\.\d+$", name)
+        and os.path.isdir(os.path.join(PHP_ETC_BASE_STR, name))
+    ]
+    return sorted(versions)
+
+
+def _list_dir_blocking(path: str) -> list[str]:
+    """Return entries in a directory, or [] if it does not exist."""
+    if not os.path.isdir(path):
+        return []
+    return os.listdir(path)
+
+
+def _read_text_blocking(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _write_text_blocking(path: str, content: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
 
 
 # ---------------------------------------------------------------------------
@@ -194,38 +259,40 @@ class PhpInstallRequest(BaseModel):
 async def list_php_versions(
     current_user: User = Depends(get_current_user),
 ):
-    """List all installed PHP versions with their status."""
+    """List all installed PHP versions with their status.
+
+    Discovery is performed by listing /etc/php/ via os.listdir, executed
+    in a worker thread to avoid blocking the event loop.
+    """
     _require_admin(current_user)
 
-    versions: list[dict[str, Any]] = []
-
-    if not PHP_ETC_BASE.exists():
+    version_names = await _run_in_executor(_list_php_versions_blocking)
+    if not version_names:
         return {"versions": []}
 
-    for entry in sorted(PHP_ETC_BASE.iterdir()):
-        if not entry.is_dir():
-            continue
-        name = entry.name
-        if not re.match(r"^\d+\.\d+$", name):
-            continue
-
-        # Check FPM service status
-        rc, out, _ = await _run(f"systemctl is-active php{name}-fpm")
+    versions: list[dict[str, Any]] = []
+    for name in version_names:
+        # Check FPM service status via direct systemctl call
+        _, out, _ = await _run(["systemctl", "is-active", f"php{name}-fpm"])
         fpm_active = out.strip() == "active"
 
-        # Get full version string
-        rc2, ver_out, _ = await _run(f"php{name} -v 2>/dev/null")
+        # Get full version string via direct php<ver> -v call
+        _, ver_out, _ = await _run([f"php{name}", "-v"])
         full_version = ver_out.split("\n")[0] if ver_out else f"PHP {name}"
 
-        # Check installed SAPIs
-        sapis = [d.name for d in entry.iterdir() if d.is_dir()]
+        # Check installed SAPIs by listing /etc/php/<ver>/
+        sapi_entries = await _run_in_executor(_list_dir_blocking, str(PHP_ETC_BASE / name))
+        sapis = sorted(
+            d for d in sapi_entries
+            if os.path.isdir(os.path.join(PHP_ETC_BASE_STR, name, d))
+        )
 
         versions.append({
             "version": name,
             "full_version": full_version,
             "fpm_active": fpm_active,
             "sapis": sapis,
-            "config_path": str(entry),
+            "config_path": str(PHP_ETC_BASE / name),
         })
 
     return {"versions": versions}
@@ -245,7 +312,7 @@ async def get_php_config(
     version = _validate_php_version(version)
 
     ini_path = _get_php_ini_path(version, sapi)
-    content = ini_path.read_text(encoding="utf-8")
+    content = await _run_in_executor(_read_text_blocking, str(ini_path))
     directives = _parse_php_ini(content)
 
     # Return only the commonly interesting directives plus full dump
@@ -294,21 +361,21 @@ async def update_php_config(
         )
 
     ini_path = _get_php_ini_path(version, body.sapi)
-    content = ini_path.read_text(encoding="utf-8")
+    content = await _run_in_executor(_read_text_blocking, str(ini_path))
 
     # Create backup
-    backup_path = ini_path.with_suffix(f".ini.bak.hosthive")
-    backup_path.write_text(content, encoding="utf-8")
+    backup_path = ini_path.with_suffix(".ini.bak.hosthive")
+    await _run_in_executor(_write_text_blocking, str(backup_path), content)
 
     new_content = _update_php_ini(content, body.directives)
-    ini_path.write_text(new_content, encoding="utf-8")
+    await _run_in_executor(_write_text_blocking, str(ini_path), new_content)
 
-    # Reload PHP-FPM if editing fpm config
+    # Restart PHP-FPM if editing fpm config (direct systemctl call)
     warnings: list[str] = []
     if body.sapi == "fpm":
-        rc, _, err = await _run(f"systemctl reload php{version}-fpm")
+        rc, _, err = await _run(["systemctl", "restart", f"php{version}-fpm"])
         if rc != 0:
-            warnings.append(f"PHP-FPM reload failed: {err}")
+            warnings.append(f"PHP-FPM restart failed: {err}")
 
     logger.info(
         "PHP %s %s config updated by %s: %s",
@@ -332,11 +399,11 @@ async def list_php_extensions(
     version: str,
     current_user: User = Depends(get_current_user),
 ):
-    """List installed PHP extensions for a given version."""
+    """List installed PHP extensions for a given version using `php<ver> -m`."""
     _require_admin(current_user)
     version = _validate_php_version(version)
 
-    rc, out, err = await _run(f"php{version} -m 2>/dev/null")
+    rc, out, err = await _run([f"php{version}", "-m"])
     if rc != 0:
         raise HTTPException(status_code=500, detail=f"Failed to list extensions: {err or out}")
 
@@ -358,12 +425,13 @@ async def list_php_extensions(
         modules.setdefault(current_section, []).append(line)
 
     # Also check available .ini files in mods-available
-    mods_dir = PHP_ETC_BASE / version / "mods-available"
-    available: list[str] = []
-    if mods_dir.exists():
-        available = sorted(
-            f.stem for f in mods_dir.iterdir() if f.suffix == ".ini"
-        )
+    mods_dir_str = str(PHP_ETC_BASE / version / "mods-available")
+    mods_entries = await _run_in_executor(_list_dir_blocking, mods_dir_str)
+    available = sorted(
+        os.path.splitext(name)[0]
+        for name in mods_entries
+        if name.endswith(".ini")
+    )
 
     return {
         "version": version,
@@ -383,7 +451,7 @@ async def toggle_php_extension(
     body: PhpExtensionToggle,
     current_user: User = Depends(get_current_user),
 ):
-    """Enable or disable a PHP extension using phpenmod/phpdismod."""
+    """Enable or disable a PHP extension using phpenmod/phpdismod directly."""
     _require_admin(current_user)
     version = _validate_php_version(version)
 
@@ -392,27 +460,36 @@ async def toggle_php_extension(
     if not ext_name:
         raise HTTPException(status_code=400, detail="Invalid extension name.")
 
+    # Optional SAPI restriction must also be sanitised
+    sapi: Optional[str] = None
+    if body.sapi:
+        if not re.match(r"^[a-zA-Z0-9_-]+$", body.sapi):
+            raise HTTPException(status_code=400, detail="Invalid SAPI name.")
+        sapi = body.sapi
+
     if body.enable:
-        sapi_flag = f"-s {body.sapi}" if body.sapi else ""
-        cmd = f"phpenmod -v {version} {sapi_flag} {ext_name}"
+        argv = ["phpenmod", "-v", version]
         action = "enabled"
     else:
-        sapi_flag = f"-s {body.sapi}" if body.sapi else ""
-        cmd = f"phpdismod -v {version} {sapi_flag} {ext_name}"
+        argv = ["phpdismod", "-v", version]
         action = "disabled"
 
-    rc, out, err = await _run(cmd)
+    if sapi:
+        argv += ["-s", sapi]
+    argv.append(ext_name)
+
+    rc, out, err = await _run(argv)
     if rc != 0:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to {action.rstrip('d')} extension {ext_name}: {err or out}",
         )
 
-    # Reload PHP-FPM
+    # Restart PHP-FPM (direct systemctl call)
     warnings: list[str] = []
-    rc2, _, err2 = await _run(f"systemctl reload php{version}-fpm")
+    rc2, _, err2 = await _run(["systemctl", "restart", f"php{version}-fpm"])
     if rc2 != 0:
-        warnings.append(f"PHP-FPM reload failed: {err2}")
+        warnings.append(f"PHP-FPM restart failed: {err2}")
 
     logger.info(
         "PHP %s extension '%s' %s by %s", version, ext_name, action, current_user.username,
@@ -435,13 +512,18 @@ async def install_php_version(
 ):
     """Install a new PHP version with common extensions from the Sury repository.
 
-    This is a long-running operation.
+    This is a long-running operation executed via direct apt-get subprocess
+    calls (no agent proxy). All blocking work is dispatched to the default
+    executor.
     """
     _require_admin(current_user)
     version = _validate_php_version(version)
 
-    # Check if already installed
-    if (PHP_ETC_BASE / version).exists():
+    # Check if already installed via os.path.isdir on /etc/php/<ver>
+    already_installed = await _run_in_executor(
+        os.path.isdir, os.path.join(PHP_ETC_BASE_STR, version)
+    )
+    if already_installed:
         raise HTTPException(
             status_code=409,
             detail=f"PHP {version} is already installed.",
@@ -453,48 +535,97 @@ async def install_php_version(
         "redis", "imagick", "opcache",
     ]
 
+    # Sanitise extension names so they can never inject extra apt args
+    safe_extensions: list[str] = []
+    for ext in extensions:
+        if not re.match(r"^[a-zA-Z0-9_+-]+$", ext):
+            raise HTTPException(status_code=400, detail=f"Invalid extension name: {ext}")
+        safe_extensions.append(ext)
+
     # Build package list
-    packages = [f"php{version}-{ext}" for ext in extensions]
-    # Always include the base package
-    packages.insert(0, f"php{version}")
-    packages_str = " ".join(packages)
+    packages = [f"php{version}"] + [f"php{version}-{ext}" for ext in safe_extensions]
 
     # Ensure the Sury PHP repository is available
-    rc, _, _ = await _run("test -f /etc/apt/sources.list.d/php.list || test -f /etc/apt/sources.list.d/sury-php.list")
-    if rc != 0:
-        logger.info("Adding Sury PHP repository...")
-        setup_cmds = [
-            "apt-get update -qq",
-            "apt-get install -y -qq apt-transport-https lsb-release ca-certificates curl",
-            "curl -sSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php.gpg",
-            'echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/sury-php.list',
-            "apt-get update -qq",
-        ]
-        for cmd in setup_cmds:
-            rc, _, err = await _run(cmd, timeout=120)
-            if rc != 0:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to set up Sury repository: {err}",
-                )
-
-    # Install packages
-    logger.info("Installing PHP %s: %s", version, packages_str)
-    rc, out, err = await _run(
-        f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {packages_str}",
-        timeout=300,
+    sury_present = await _run_in_executor(
+        os.path.exists, "/etc/apt/sources.list.d/sury-php.list"
     )
+    php_list_present = await _run_in_executor(
+        os.path.exists, "/etc/apt/sources.list.d/php.list"
+    )
+    if not (sury_present or php_list_present):
+        logger.info("Adding Sury PHP repository...")
+        # Each step issued as a direct subprocess call
+        rc, _, err = await _run(["apt-get", "update", "-qq"], timeout=120)
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"apt-get update failed: {err}")
+
+        rc, _, err = await _run(
+            ["apt-get", "install", "-y", "-qq",
+             "apt-transport-https", "lsb-release", "ca-certificates", "curl"],
+            timeout=180,
+        )
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"apt-get install prereqs failed: {err}")
+
+        rc, _, err = await _run(
+            ["curl", "-sSL", "https://packages.sury.org/php/apt.gpg",
+             "-o", "/etc/apt/trusted.gpg.d/php.gpg"],
+            timeout=60,
+        )
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"Sury GPG fetch failed: {err}")
+
+        # lsb_release -sc to discover codename
+        rc, codename, err = await _run(["lsb_release", "-sc"], timeout=10)
+        if rc != 0 or not codename:
+            raise HTTPException(status_code=500, detail=f"lsb_release failed: {err}")
+        codename = codename.strip()
+        if not re.match(r"^[a-z]+$", codename):
+            raise HTTPException(status_code=500, detail=f"Unexpected codename: {codename}")
+
+        sury_line = f"deb https://packages.sury.org/php/ {codename} main\n"
+        await _run_in_executor(
+            _write_text_blocking, "/etc/apt/sources.list.d/sury-php.list", sury_line
+        )
+
+        rc, _, err = await _run(["apt-get", "update", "-qq"], timeout=120)
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"apt-get update (post-Sury) failed: {err}")
+
+    # Install packages -- direct subprocess call, env via subprocess.run
+    logger.info("Installing PHP %s: %s", version, " ".join(packages))
+
+    def _install_packages_blocking() -> tuple[int, str, str]:
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        try:
+            proc = subprocess.run(
+                ["apt-get", "install", "-y", "-qq", *packages],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=env,
+                check=False,
+            )
+            return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+        except subprocess.TimeoutExpired:
+            return 1, "", "apt-get install timed out"
+
+    rc, out, err = await _run_in_executor(_install_packages_blocking)
     if rc != 0:
         raise HTTPException(
             status_code=500,
             detail=f"PHP {version} installation failed: {err or out}",
         )
 
-    # Enable and start PHP-FPM
+    # Enable and start PHP-FPM via direct systemctl calls
     warnings: list[str] = []
-    rc2, _, err2 = await _run(f"systemctl enable php{version}-fpm && systemctl start php{version}-fpm")
+    rc2, _, err2 = await _run(["systemctl", "enable", f"php{version}-fpm"])
     if rc2 != 0:
-        warnings.append(f"PHP-FPM start failed: {err2}")
+        warnings.append(f"PHP-FPM enable failed: {err2}")
+    rc3, _, err3 = await _run(["systemctl", "restart", f"php{version}-fpm"])
+    if rc3 != 0:
+        warnings.append(f"PHP-FPM restart failed: {err3}")
 
     logger.info("PHP %s installed by %s", version, current_user.username)
 
@@ -517,29 +648,65 @@ async def uninstall_php_version(
     _require_admin(current_user)
     version = _validate_php_version(version)
 
-    if not (PHP_ETC_BASE / version).exists():
+    target_path = os.path.join(PHP_ETC_BASE_STR, version)
+    exists = await _run_in_executor(os.path.isdir, target_path)
+    if not exists:
         raise HTTPException(status_code=404, detail=f"PHP {version} is not installed.")
 
-    # Safety: don't remove the last version
-    installed = [
-        d.name for d in PHP_ETC_BASE.iterdir()
-        if d.is_dir() and re.match(r"^\d+\.\d+$", d.name)
-    ]
+    # Safety: don't remove the last version (use os.listdir for discovery)
+    installed = await _run_in_executor(_list_php_versions_blocking)
     if len(installed) <= 1:
         raise HTTPException(
             status_code=400,
             detail="Cannot remove the last installed PHP version.",
         )
 
-    # Stop FPM
-    await _run(f"systemctl stop php{version}-fpm")
-    await _run(f"systemctl disable php{version}-fpm")
+    # Stop & disable FPM via direct systemctl calls
+    await _run(["systemctl", "stop", f"php{version}-fpm"])
+    await _run(["systemctl", "disable", f"php{version}-fpm"])
 
-    # Purge packages
-    rc, out, err = await _run(
-        f"DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq 'php{version}-*'",
-        timeout=120,
-    )
+    # Purge packages -- glob is shell-syntax so we resolve the package list first
+    def _purge_blocking() -> tuple[int, str, str]:
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        # Discover installed php<ver>-* packages via dpkg-query
+        try:
+            list_proc = subprocess.run(
+                ["dpkg-query", "-W", "-f=${Package}\n", f"php{version}-*"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return 1, "", "dpkg-query timed out"
+
+        pkgs = [
+            line.strip() for line in (list_proc.stdout or "").splitlines() if line.strip()
+        ]
+        # Always include the base package as well
+        base_pkg = f"php{version}"
+        if base_pkg not in pkgs:
+            pkgs.append(base_pkg)
+
+        try:
+            purge_proc = subprocess.run(
+                ["apt-get", "purge", "-y", "-qq", *pkgs],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+                check=False,
+            )
+            return (
+                purge_proc.returncode,
+                (purge_proc.stdout or "").strip(),
+                (purge_proc.stderr or "").strip(),
+            )
+        except subprocess.TimeoutExpired:
+            return 1, "", "apt-get purge timed out"
+
+    rc, out, err = await _run_in_executor(_purge_blocking)
     if rc != 0:
         raise HTTPException(
             status_code=500,
@@ -562,22 +729,22 @@ async def php_fpm_status(
     _require_admin(current_user)
     version = _validate_php_version(version)
 
-    rc, out, _ = await _run(f"systemctl is-active php{version}-fpm")
+    _, out, _ = await _run(["systemctl", "is-active", f"php{version}-fpm"])
     active = out.strip() == "active"
 
-    # List pool configs
-    pool_dir = PHP_ETC_BASE / version / "fpm" / "pool.d"
+    # List pool configs via os.listdir wrapped in executor
+    pool_dir_str = str(PHP_ETC_BASE / version / "fpm" / "pool.d")
+    pool_entries = await _run_in_executor(_list_dir_blocking, pool_dir_str)
     pools: list[dict[str, str]] = []
-    if pool_dir.exists():
-        for conf in sorted(pool_dir.iterdir()):
-            if conf.suffix == ".conf":
-                pools.append({
-                    "name": conf.stem,
-                    "path": str(conf),
-                })
+    for name in sorted(pool_entries):
+        if name.endswith(".conf"):
+            pools.append({
+                "name": os.path.splitext(name)[0],
+                "path": os.path.join(pool_dir_str, name),
+            })
 
-    # Get process count
-    rc2, ps_out, _ = await _run(f"pgrep -c -f 'php-fpm: pool' 2>/dev/null || echo 0")
+    # Get process count via direct pgrep call
+    rc2, ps_out, _ = await _run(["pgrep", "-c", "-f", "php-fpm: pool"])
     process_count = int(ps_out.strip()) if ps_out.strip().isdigit() else 0
 
     return {

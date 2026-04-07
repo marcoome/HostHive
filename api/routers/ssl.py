@@ -1,6 +1,10 @@
 """SSL certificates router -- /api/v1/ssl.
 
-All certbot and file operations are performed directly via nginx_service (no agent).
+All certbot, openssl and file-system operations are performed directly via
+``nginx_service`` (which uses ``asyncio.subprocess`` and
+``loop.run_in_executor`` for blocking I/O). This module never proxies to the
+node agent on port 7080 and must not import or reference
+``request.app.state.agent``.
 """
 
 from __future__ import annotations
@@ -109,6 +113,11 @@ async def issue_certificate(
         )
         cert.cert_path = cert_result["cert_path"]
         cert.key_path = cert_result["key_path"]
+
+        # Parse the real notAfter date from the cert with openssl.
+        real_expiry = await nginx_service.parse_cert_expiry(cert.cert_path)
+        if real_expiry is not None:
+            cert.expires_at = real_expiry
     except Exception as exc:
         system_warning = f"Certificate saved to DB but certbot failed: {exc}"
         # Set fallback paths so DB record is consistent
@@ -193,6 +202,11 @@ async def install_custom_certificate(
             detail=f"Failed to save certificate files: {exc}",
         )
 
+    # Parse the real expiry from the uploaded cert via openssl.
+    real_expiry = await nginx_service.parse_cert_expiry(cert.cert_path)
+    if real_expiry is not None:
+        cert.expires_at = real_expiry
+
     # 3. Update nginx config with SSL
     try:
         await nginx_service.apply_ssl_to_nginx(
@@ -268,7 +282,11 @@ async def renew_certificate(
     # Update DB records
     cert.cert_path = cert_result["cert_path"]
     cert.key_path = cert_result["key_path"]
-    cert.expires_at = datetime.utcnow() + timedelta(days=90)
+
+    # Parse the real notAfter date from the renewed cert via openssl, fall
+    # back to the conservative +90d default if openssl fails.
+    real_expiry = await nginx_service.parse_cert_expiry(cert.cert_path)
+    cert.expires_at = real_expiry or (datetime.utcnow() + timedelta(days=90))
     cert.last_renewed_at = datetime.utcnow()
     db.add(cert)
 

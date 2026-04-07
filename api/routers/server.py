@@ -1,8 +1,9 @@
 """Server router -- /api/v1/server (admin only).
 
-Every endpoint tries the agent first; if the agent is unreachable or errors,
-it falls back to direct system commands (systemctl, psutil, ufw, fail2ban-client,
-reading log files, etc.).
+Every endpoint uses direct system commands (systemctl, psutil, ufw,
+fail2ban-client, reading log files, etc.) and never proxies to a remote agent.
+All blocking work is dispatched through asyncio's default executor so the
+event loop is never blocked.
 
 NOTE: The API process typically runs as user 'hosthive'.  Direct service control
 (start/stop/restart) and firewall/fail2ban mutations require sudo privileges.
@@ -213,22 +214,25 @@ async def _direct_service_action(service_name: str, action: str) -> dict:
 
 
 async def _direct_server_stats() -> dict:
-    """Gather server stats via psutil / os."""
+    """Gather server stats via psutil / os, off the event loop."""
     try:
-        import psutil  # noqa: local import — only needed in fallback path
+        import psutil  # noqa: local import — psutil is the canonical source
     except ImportError:
-        return {"error": "psutil not installed", "_agent_down": True}
+        return {"error": "psutil not installed"}
 
     loop = asyncio.get_running_loop()
 
-    def _gather():
+    def _gather() -> dict:
         cpu = psutil.cpu_percent(interval=0.5)
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
         net = psutil.net_io_counters()
         load = os.getloadavg()
         uptime = time.time() - psutil.boot_time()
-        conns = len(psutil.net_connections(kind="inet"))
+        try:
+            conns = len(psutil.net_connections(kind="inet"))
+        except (psutil.AccessDenied, PermissionError):
+            conns = 0
 
         return {
             "cpu_percent": cpu,
@@ -481,7 +485,7 @@ async def _direct_read_journal(service: str, lines: int = 200) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# GET /stats -- current CPU/RAM/disk/net; agent first, then psutil
+# GET /stats -- current CPU/RAM/disk/net via psutil (run in executor)
 # ---------------------------------------------------------------------------
 @router.get("/stats", status_code=status.HTTP_200_OK)
 async def server_stats(
@@ -504,19 +508,7 @@ async def server_stats(
         "active_connections": 0,
     }
 
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent.get_server_stats()
-        if isinstance(result, dict):
-            for key, default in _DEFAULTS.items():
-                if result.get(key) is None:
-                    result[key] = default
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct system commands via psutil ---
+    # --- Direct system commands via psutil (no agent proxy) ---
     try:
         result = await _direct_server_stats()
         if isinstance(result, dict) and "error" not in result:
@@ -524,10 +516,10 @@ async def server_stats(
                 if result.get(key) is None:
                     result[key] = default
             return result
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("server_stats psutil collection failed: %s", exc)
 
-    return {**_DEFAULTS, "_agent_down": True}
+    return {**_DEFAULTS, "_collection_failed": True}
 
 
 # --------------------------------------------------------------------------
@@ -583,35 +575,19 @@ async def stats_history(
 
 
 # --------------------------------------------------------------------------
-# GET /services -- all service statuses; agent first, then systemctl
+# GET /services -- all service statuses via systemctl (run in executor)
 # --------------------------------------------------------------------------
 @router.get("/services", status_code=status.HTTP_200_OK)
 async def list_services(
     request: Request,
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request("GET", "/system/services")
-        if isinstance(result, dict) and "services" in result:
-            services = result["services"]
-        elif isinstance(result, list):
-            services = result
-        else:
-            services = []
-        for svc in services:
-            if isinstance(svc, dict) and "display_name" not in svc:
-                svc["display_name"] = _DISPLAY_NAMES.get(svc.get("name", ""), svc.get("name", ""))
-        return services
-    except Exception:
-        pass
-
-    # --- Fallback: direct systemctl ---
+    # --- Direct systemctl (no agent proxy) ---
     try:
         services = await _direct_list_services()
         return list(services)
-    except Exception:
+    except Exception as exc:
+        log.warning("list_services systemctl query failed: %s", exc)
         return [
             {"name": s, "display_name": _DISPLAY_NAMES.get(s, s), "status": "unknown", "enabled": False}
             for s in _MONITORED_SERVICES
@@ -619,7 +595,7 @@ async def list_services(
 
 
 # --------------------------------------------------------------------------
-# POST /services/{name}/restart
+# POST /services/{name}/restart -- direct systemctl (run in executor)
 # --------------------------------------------------------------------------
 @router.post("/services/{service_name}/restart", status_code=status.HTTP_200_OK)
 async def restart_service(
@@ -629,24 +605,13 @@ async def restart_service(
     admin: User = Depends(_admin),
 ):
     service_name = _validate_service_name(service_name)
-
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent.service_action(service_name, "restart")
-        _log_activity(db, request, admin.id, "server.restart_service", f"Restarted service {service_name}")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct systemctl ---
     result = await _direct_service_action(service_name, "restart")
-    _log_activity(db, request, admin.id, "server.restart_service", f"Restarted service {service_name} (direct)")
+    _log_activity(db, request, admin.id, "server.restart_service", f"Restarted service {service_name}")
     return result
 
 
 # --------------------------------------------------------------------------
-# POST /services/{name}/start
+# POST /services/{name}/start -- direct systemctl (run in executor)
 # --------------------------------------------------------------------------
 @router.post("/services/{service_name}/start", status_code=status.HTTP_200_OK)
 async def start_service(
@@ -656,27 +621,13 @@ async def start_service(
     admin: User = Depends(_admin),
 ):
     service_name = _validate_service_name(service_name)
-
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
-            "POST", "/system/service/restart",
-            json_body={"name": service_name, "action": "start"},
-        )
-        _log_activity(db, request, admin.id, "server.start_service", f"Started service {service_name}")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct systemctl ---
     result = await _direct_service_action(service_name, "start")
-    _log_activity(db, request, admin.id, "server.start_service", f"Started service {service_name} (direct)")
+    _log_activity(db, request, admin.id, "server.start_service", f"Started service {service_name}")
     return result
 
 
 # --------------------------------------------------------------------------
-# POST /services/{name}/stop
+# POST /services/{name}/stop -- direct systemctl (run in executor)
 # --------------------------------------------------------------------------
 @router.post("/services/{service_name}/stop", status_code=status.HTTP_200_OK)
 async def stop_service(
@@ -686,22 +637,8 @@ async def stop_service(
     admin: User = Depends(_admin),
 ):
     service_name = _validate_service_name(service_name)
-
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
-            "POST", "/system/service/restart",
-            json_body={"name": service_name, "action": "stop"},
-        )
-        _log_activity(db, request, admin.id, "server.stop_service", f"Stopped service {service_name}")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct systemctl ---
     result = await _direct_service_action(service_name, "stop")
-    _log_activity(db, request, admin.id, "server.stop_service", f"Stopped service {service_name} (direct)")
+    _log_activity(db, request, admin.id, "server.stop_service", f"Stopped service {service_name}")
     return result
 
 
@@ -714,19 +651,12 @@ async def firewall_rules(
     request: Request,
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request("GET", "/system/firewall")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct ufw ---
+    # --- Direct ufw (no agent proxy) ---
     try:
         return await _direct_firewall_rules()
-    except Exception:
-        return {"rules": [], "_agent_down": True}
+    except Exception as exc:
+        log.warning("firewall_rules ufw query failed: %s", exc)
+        return {"rules": [], "status": "unknown", "_collection_failed": True}
 
 
 @router.post("/firewall", status_code=status.HTTP_201_CREATED)
@@ -737,19 +667,9 @@ async def add_firewall_rule(
     admin: User = Depends(_admin),
 ):
     rule_data = body.model_dump()
-
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent.firewall_add_rule(rule_data)
-        _log_activity(db, request, admin.id, "server.firewall_add", f"Added firewall rule: {rule_data}")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct ufw ---
+    # --- Direct ufw (no agent proxy) ---
     result = await _direct_firewall_add_rule(rule_data)
-    _log_activity(db, request, admin.id, "server.firewall_add", f"Added firewall rule (direct): {rule_data}")
+    _log_activity(db, request, admin.id, "server.firewall_add", f"Added firewall rule: {rule_data}")
     return result
 
 
@@ -760,18 +680,9 @@ async def delete_firewall_rule(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        await agent.firewall_delete_rule(rule_id)
-        _log_activity(db, request, admin.id, "server.firewall_delete", f"Deleted firewall rule {rule_id}")
-        return
-    except Exception:
-        pass
-
-    # --- Fallback: direct ufw ---
+    # --- Direct ufw (no agent proxy) ---
     await _direct_firewall_delete_rule(rule_id)
-    _log_activity(db, request, admin.id, "server.firewall_delete", f"Deleted firewall rule {rule_id} (direct)")
+    _log_activity(db, request, admin.id, "server.firewall_delete", f"Deleted firewall rule {rule_id}")
 
 
 # --------------------------------------------------------------------------
@@ -783,19 +694,12 @@ async def fail2ban_jails(
     request: Request,
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request("GET", "/system/fail2ban")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct fail2ban-client ---
+    # --- Direct fail2ban-client (no agent proxy) ---
     try:
         return await _direct_fail2ban_status()
-    except Exception:
-        return {"jails": [], "_agent_down": True}
+    except Exception as exc:
+        log.warning("fail2ban_jails query failed: %s", exc)
+        return {"jails": [], "_collection_failed": True}
 
 
 @router.post("/fail2ban/unban", status_code=status.HTTP_200_OK)
@@ -805,27 +709,14 @@ async def fail2ban_unban(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
-            "POST",
-            "/system/fail2ban/unban",
-            json_body={"ip": ip},
-        )
-        _log_activity(db, request, admin.id, "server.fail2ban_unban", f"Unbanned IP {ip}")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct fail2ban-client ---
+    # --- Direct fail2ban-client (no agent proxy) ---
     result = await _direct_fail2ban_unban(ip)
-    _log_activity(db, request, admin.id, "server.fail2ban_unban", f"Unbanned IP {ip} (direct)")
+    _log_activity(db, request, admin.id, "server.fail2ban_unban", f"Unbanned IP {ip}")
     return result
 
 
 # --------------------------------------------------------------------------
-# POST /fail2ban/{jail}/enable
+# POST /fail2ban/{jail}/enable -- direct fail2ban-client
 # --------------------------------------------------------------------------
 @router.post("/fail2ban/{jail_name}/enable", status_code=status.HTTP_200_OK)
 async def fail2ban_enable_jail(
@@ -834,26 +725,14 @@ async def fail2ban_enable_jail(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
-            "POST", "/system/fail2ban/enable",
-            json_body={"jail": jail_name},
-        )
-        _log_activity(db, request, admin.id, "server.fail2ban_enable", f"Enabled jail {jail_name}")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct fail2ban-client ---
+    # --- Direct fail2ban-client (no agent proxy) ---
     result = await _direct_fail2ban_enable_jail(jail_name)
-    _log_activity(db, request, admin.id, "server.fail2ban_enable", f"Enabled jail {jail_name} (direct)")
+    _log_activity(db, request, admin.id, "server.fail2ban_enable", f"Enabled jail {jail_name}")
     return result
 
 
 # --------------------------------------------------------------------------
-# POST /fail2ban/{jail}/disable
+# POST /fail2ban/{jail}/disable -- direct fail2ban-client
 # --------------------------------------------------------------------------
 @router.post("/fail2ban/{jail_name}/disable", status_code=status.HTTP_200_OK)
 async def fail2ban_disable_jail(
@@ -862,26 +741,14 @@ async def fail2ban_disable_jail(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
-            "POST", "/system/fail2ban/disable",
-            json_body={"jail": jail_name},
-        )
-        _log_activity(db, request, admin.id, "server.fail2ban_disable", f"Disabled jail {jail_name}")
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct fail2ban-client ---
+    # --- Direct fail2ban-client (no agent proxy) ---
     result = await _direct_fail2ban_disable_jail(jail_name)
-    _log_activity(db, request, admin.id, "server.fail2ban_disable", f"Disabled jail {jail_name} (direct)")
+    _log_activity(db, request, admin.id, "server.fail2ban_disable", f"Disabled jail {jail_name}")
     return result
 
 
 # --------------------------------------------------------------------------
-# GET /logs/{service} -- last N lines; agent first, then direct file read
+# GET /logs/{service} -- last N lines via direct file read / journalctl
 # --------------------------------------------------------------------------
 @router.get("/logs/{service}", status_code=status.HTTP_200_OK)
 async def service_logs(
@@ -890,23 +757,12 @@ async def service_logs(
     request: Request = None,
     admin: User = Depends(_admin),
 ):
-    # --- Try agent first ---
-    agent = request.app.state.agent
-    try:
-        result = await agent._request(
-            "GET",
-            f"/system/logs/{service}",
-            params={"lines": lines},
-        )
-        return result
-    except Exception:
-        pass
-
-    # --- Fallback: direct log reading ---
+    # --- Direct log reading (no agent proxy) ---
     try:
         return await _direct_read_logs(service, lines)
-    except Exception:
-        return {"lines": [], "service": service, "_agent_down": True}
+    except Exception as exc:
+        log.warning("service_logs read failed for %s: %s", service, exc)
+        return {"lines": [], "service": service, "_collection_failed": True}
 
 
 # --------------------------------------------------------------------------
@@ -943,7 +799,6 @@ async def ws_terminal(websocket: WebSocket):
         return
 
     await websocket.accept()
-    agent = websocket.app.state.agent
 
     try:
         while True:
@@ -955,19 +810,7 @@ async def ws_terminal(websocket: WebSocket):
                     await websocket.send_json({"error": "Empty command"})
                     continue
 
-                # --- Try agent first ---
-                try:
-                    result = await agent._request(
-                        "POST",
-                        "/terminal/exec",
-                        json_body={"command": command},
-                    )
-                    await websocket.send_json(result)
-                    continue
-                except Exception:
-                    pass
-
-                # --- Fallback: direct subprocess ---
+                # --- Direct subprocess (no agent proxy) ---
                 try:
                     proc_result = await _run_async(
                         ["bash", "-c", command], timeout=30
@@ -1008,24 +851,10 @@ async def ws_log_stream(websocket: WebSocket, service: str):
         return
 
     await websocket.accept()
-    agent = websocket.app.state.agent
 
     try:
         while True:
-            # --- Try agent first ---
-            try:
-                result = await agent._request(
-                    "GET",
-                    f"/system/logs/{service}/tail",
-                    params={"lines": 20},
-                )
-                await websocket.send_json(result)
-                await asyncio.sleep(2)
-                continue
-            except Exception:
-                pass
-
-            # --- Fallback: direct tail ---
+            # --- Direct tail (no agent proxy) ---
             try:
                 result = await _direct_read_logs(service, 20)
                 await websocket.send_json(result)

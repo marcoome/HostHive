@@ -2,17 +2,21 @@
 
 All operations follow the DB-first pattern:
 1. Validate & persist to database.
-2. Try to sync to BIND9 (directly via zone files + ``rndc reload``).
-3. Optionally try the agent as a secondary sync path.
-4. If Cloudflare is enabled for the zone, auto-sync changes to CF.
+2. Sync to BIND9 directly via zone files + ``rndc reload`` (no agent proxy).
+3. If Cloudflare is enabled for the zone, auto-sync changes to CF.
 
-If BIND or the agent is unavailable the data is still safely in the DB and
-a warning is attached to the response so the operator knows manual sync may
-be needed.
+BIND interaction is handled in-process by ``api.services.bind_service`` which
+writes zone files, manages ``named.conf.local`` entries and runs ``rndc``.
+There is no longer any HTTP call-out to a node agent on port 7080 -- this
+router talks to BIND directly.
+
+If BIND is unavailable the data is still safely in the DB and a warning is
+attached to the response so the operator knows manual sync may be needed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -143,17 +147,15 @@ async def _sync_zone_to_bind(
     return None
 
 
-async def _try_agent(request: Request, coro_factory, label: str) -> dict | None:
-    """Try calling the agent; return a warning dict on failure, None on success."""
-    try:
-        agent = getattr(request.app.state, "agent", None)
-        if agent is None:
-            return {"agent_warning": "Agent not configured."}
-        await coro_factory(agent)
-    except Exception as exc:
-        _dns_logger.warning("Agent error (%s): %s", label, exc)
-        return {"agent_warning": f"Agent error: {exc}"}
-    return None
+async def _generate_zone_file_async(zone_name: str, records: list[DnsRecord]) -> str:
+    """Run the synchronous BIND zone-file generator in the default executor.
+
+    ``generate_zone_file`` performs blocking filesystem reads (to grab the
+    current SOA serial), so we offload it to a thread to avoid blocking the
+    event loop.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, generate_zone_file, zone_name, records)
 
 
 def _attach_warnings(response_dict: dict, *warnings: dict | None) -> dict:
@@ -241,8 +243,7 @@ async def create_zone(
 
     1. Validate domain ownership (if domain_id given).
     2. Persist zone to DB.
-    3. Generate BIND zone file & reload.
-    4. Try agent as secondary sync.
+    3. Generate BIND zone file & reload directly via bind_service.
     """
     try:
         # -- Domain ownership check --
@@ -301,18 +302,11 @@ async def create_zone(
 
         _log(db, request, current_user.id, "dns.create_zone", f"Created zone {zone_name}")
 
-        # -- 2. BIND sync (direct) --
+        # -- 2. BIND sync (direct, in-process via bind_service) --
         bind_warn = await _sync_zone_to_bind(zone_name, [])
 
-        # -- 3. Agent sync (best-effort) --
-        agent_warn = await _try_agent(
-            request,
-            lambda ag: ag.create_zone(zone_name),
-            f"create_zone({zone_name})",
-        )
-
         response = DnsZoneResponse.model_validate(zone).model_dump(mode="json")
-        return _attach_warnings(response, bind_warn, agent_warn)
+        return _attach_warnings(response, bind_warn)
 
     except HTTPException:
         raise
@@ -345,7 +339,7 @@ async def delete_zone(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete a zone from DB, remove BIND zone file, and try agent."""
+    """Delete a zone from DB and remove the BIND zone file directly."""
     zone = await _get_zone_or_404(zone_id, db, current_user)
 
     # -- 1. DB first --
@@ -353,18 +347,11 @@ async def delete_zone(
     await db.delete(zone)
     await db.flush()
 
-    # -- 2. Remove BIND zone file --
+    # -- 2. Remove BIND zone file (direct via bind_service) --
     try:
         await remove_zone(zone.zone_name)
     except Exception as exc:
         _dns_logger.warning("BIND zone removal failed for %s: %s", zone.zone_name, exc)
-
-    # -- 3. Agent (best-effort) --
-    await _try_agent(
-        request,
-        lambda ag: ag.delete_zone(zone.zone_name),
-        f"delete_zone({zone.zone_name})",
-    )
 
 
 # =========================================================================
@@ -405,8 +392,8 @@ async def create_record(
     """Create a DNS record.
 
     1. Persist to DB.
-    2. Regenerate full zone file and reload BIND.
-    3. Try agent as secondary sync.
+    2. Regenerate full zone file and reload BIND directly via bind_service.
+    3. Mirror to Cloudflare if enabled for this zone.
     """
     zone = await _get_zone_or_404(zone_id, db, current_user)
 
@@ -424,29 +411,15 @@ async def create_record(
 
     _log(db, request, current_user.id, "dns.create_record", f"Added {body.record_type} record to {zone.zone_name}")
 
-    # -- 2. BIND sync (with DNSSEC re-sign if enabled) --
+    # -- 2. BIND sync (direct, with DNSSEC re-sign if enabled) --
     all_records = await _fetch_zone_records(db, zone_id)
     bind_warn = await _sync_zone_to_bind(zone.zone_name, all_records, dnssec_enabled=zone.dnssec_enabled)
 
-    # -- 3. Agent sync --
-    agent_warn = await _try_agent(
-        request,
-        lambda ag: ag.add_dns_record(
-            zone=zone.zone_name,
-            record_type=body.record_type,
-            name=body.name,
-            value=body.value,
-            ttl=body.ttl,
-            priority=body.priority,
-        ),
-        f"add_record({zone.zone_name})",
-    )
-
-    # -- 4. Cloudflare auto-sync --
+    # -- 3. Cloudflare auto-sync --
     cf_warn = await _try_cf_sync(zone, all_records)
 
     response = DnsRecordResponse.model_validate(record).model_dump(mode="json")
-    return _attach_warnings(response, bind_warn, agent_warn, cf_warn)
+    return _attach_warnings(response, bind_warn, cf_warn)
 
 
 @router.put("/zones/{zone_id}/records/{record_id}", status_code=status.HTTP_200_OK)
@@ -461,8 +434,8 @@ async def update_record(
     """Update an existing DNS record.
 
     1. Update fields in DB.
-    2. Regenerate full zone file and reload BIND.
-    3. Try agent as secondary sync.
+    2. Regenerate full zone file and reload BIND directly via bind_service.
+    3. Mirror to Cloudflare if enabled for this zone.
     """
     zone = await _get_zone_or_404(zone_id, db, current_user)
     record = await _get_record_or_404(record_id, zone_id, db)
@@ -484,29 +457,15 @@ async def update_record(
         f"Updated record {record_id} in {zone.zone_name}",
     )
 
-    # -- 2. BIND sync (with DNSSEC re-sign if enabled) --
+    # -- 2. BIND sync (direct, with DNSSEC re-sign if enabled) --
     all_records = await _fetch_zone_records(db, zone_id)
     bind_warn = await _sync_zone_to_bind(zone.zone_name, all_records, dnssec_enabled=zone.dnssec_enabled)
 
-    # -- 3. Agent sync (best-effort: delete old + create new) --
-    agent_warn = await _try_agent(
-        request,
-        lambda ag: ag.add_dns_record(
-            zone=zone.zone_name,
-            record_type=record.record_type,
-            name=record.name,
-            value=record.value,
-            ttl=record.ttl,
-            priority=record.priority,
-        ),
-        f"update_record({zone.zone_name})",
-    )
-
-    # -- 4. Cloudflare auto-sync --
+    # -- 3. Cloudflare auto-sync --
     cf_warn = await _try_cf_sync(zone, all_records)
 
     response = DnsRecordResponse.model_validate(record).model_dump(mode="json")
-    return _attach_warnings(response, bind_warn, agent_warn, cf_warn)
+    return _attach_warnings(response, bind_warn, cf_warn)
 
 
 @router.delete("/zones/{zone_id}/records/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -520,8 +479,9 @@ async def delete_record(
     """Delete a DNS record.
 
     1. Remove from DB.
-    2. Regenerate zone file (without the deleted record) and reload BIND.
-    3. Try agent as secondary sync.
+    2. Regenerate zone file (without the deleted record) and reload BIND
+       directly via bind_service.
+    3. Mirror to Cloudflare if enabled for this zone.
     """
     zone = await _get_zone_or_404(zone_id, db, current_user)
     record = await _get_record_or_404(record_id, zone_id, db)
@@ -531,7 +491,7 @@ async def delete_record(
     await db.delete(record)
     await db.flush()
 
-    # -- 2. BIND sync --
+    # -- 2. BIND sync (direct) --
     remaining_records = await _fetch_zone_records(db, zone_id)
     try:
         await write_zone(zone.zone_name, remaining_records)
@@ -544,14 +504,7 @@ async def delete_record(
     except Exception as exc:
         _dns_logger.warning("BIND sync after record delete failed for %s: %s", zone.zone_name, exc)
 
-    # -- 3. Agent sync --
-    await _try_agent(
-        request,
-        lambda ag: ag.delete_dns_record(zone.zone_name, str(record_id)),
-        f"delete_record({zone.zone_name})",
-    )
-
-    # -- 4. Cloudflare auto-sync --
+    # -- 3. Cloudflare auto-sync --
     await _try_cf_sync(zone, remaining_records)
 
 
@@ -635,25 +588,14 @@ async def import_zone(
 
     await db.flush()
 
-    # Sync to BIND
+    # Sync to BIND directly via bind_service (no agent proxy)
     all_records = await _fetch_zone_records(db, zone_id)
     bind_warn = await _sync_zone_to_bind(zone.zone_name, all_records)
-
-    # Try agent too
-    agent_warn = await _try_agent(
-        request,
-        lambda ag: ag._request(
-            "POST",
-            f"/dns/zone/{zone.zone_name}/import",
-            json_body={"zone_data": content},
-        ),
-        f"import_zone({zone.zone_name})",
-    )
 
     _log(db, request, current_user.id, "dns.import_zone", f"Imported {imported} records for {zone.zone_name}")
 
     result = {"detail": "Zone imported successfully.", "records_imported": imported}
-    return _attach_warnings(result, bind_warn, agent_warn)
+    return _attach_warnings(result, bind_warn)
 
 
 @router.get("/zones/{zone_id}/export", status_code=status.HTTP_200_OK)
@@ -667,7 +609,8 @@ async def export_zone(
     zone = await _get_zone_or_404(zone_id, db, current_user)
     records = await _fetch_zone_records(db, zone_id)
 
-    bind_content = generate_zone_file(zone.zone_name, records)
+    # Run the blocking generator (file I/O for SOA serial) in the executor
+    bind_content = await _generate_zone_file_async(zone.zone_name, records)
 
     return {
         "zone_name": zone.zone_name,
@@ -1214,8 +1157,17 @@ async def receive_zone_from_cluster(
     This endpoint is called by the master node to push zone data to this slave.
     Authentication is via the ``Authorization: Bearer <api_key>`` header, which
     should match the key configured for this node on the master.
+
+    All BIND interaction is performed in-process via ``bind_service`` --
+    blocking filesystem writes are dispatched to the default thread pool
+    executor and the ``rndc reload`` invocation uses the non-blocking
+    ``asyncio.create_subprocess_exec`` helper inside ``bind_service``.
     """
-    from api.services.bind_service import _ensure_named_conf_entry_sync, _write_zone_file_sync, _rndc_reload
+    from api.services.bind_service import (
+        _ensure_named_conf_entry_sync,
+        _write_zone_file_sync,
+        _rndc_reload,
+    )
 
     body = await request.json()
     zone_name = body.get("zone_name")
@@ -1227,11 +1179,12 @@ async def receive_zone_from_cluster(
             detail="zone_name and zone_content are required.",
         )
 
-    # Write the zone file and reload BIND
-    import asyncio
-    await asyncio.to_thread(_write_zone_file_sync, zone_name, zone_content)
-    await asyncio.to_thread(_ensure_named_conf_entry_sync, zone_name, [])
+    # Offload blocking filesystem writes to the default executor
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _write_zone_file_sync, zone_name, zone_content)
+    await loop.run_in_executor(None, _ensure_named_conf_entry_sync, zone_name, [])
 
+    # rndc reload itself is non-blocking (asyncio.create_subprocess_exec)
     ok, output = await _rndc_reload(zone_name)
 
     return {

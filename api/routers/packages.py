@@ -14,8 +14,9 @@ from sqlalchemy.orm import selectinload
 from api.core.database import get_db
 from api.core.security import require_role
 from api.models.activity_log import ActivityLog
-from api.models.packages import Package
-from api.models.users import User
+from api.models.packages import Package, PackageType
+from api.models.reseller import ResellerLimit
+from api.models.users import User, UserRole
 from api.schemas.packages import PackageCreate, PackageResponse, PackageUpdate
 from api.schemas.users import UserResponse
 
@@ -62,6 +63,48 @@ def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, de
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
+async def sync_reseller_limit_from_package(
+    db: AsyncSession,
+    reseller_id: uuid.UUID,
+    pkg: Package,
+) -> ResellerLimit:
+    """Create or update a reseller's ResellerLimit row from a reseller-type package.
+
+    Called whenever a reseller-type package is assigned to a reseller account
+    (on create or update). Resource caps come from the package; live ``used_*``
+    counters are preserved.
+    """
+    if pkg.package_type != PackageType.RESELLER:
+        raise ValueError("sync_reseller_limit_from_package requires a reseller-type package")
+
+    result = await db.execute(
+        select(ResellerLimit).where(ResellerLimit.reseller_id == reseller_id)
+    )
+    limits = result.scalar_one_or_none()
+
+    # Convert GB -> MB for the disk column (ResellerLimit stores MB).
+    new_max_disk_mb = int(pkg.max_total_disk_gb) * 1024
+
+    if limits is None:
+        limits = ResellerLimit(
+            reseller_id=reseller_id,
+            max_users=pkg.max_users,
+            max_total_disk_mb=new_max_disk_mb,
+            max_total_bandwidth_gb=pkg.max_total_bandwidth_gb,
+            used_users=0,
+            used_disk_mb=0,
+            used_bandwidth_gb=0.0,
+        )
+    else:
+        limits.max_users = pkg.max_users
+        limits.max_total_disk_mb = new_max_disk_mb
+        limits.max_total_bandwidth_gb = pkg.max_total_bandwidth_gb
+
+    db.add(limits)
+    await db.flush()
+    return limits
+
+
 # --------------------------------------------------------------------------
 # GET / -- list packages
 # --------------------------------------------------------------------------
@@ -69,15 +112,23 @@ def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, de
 async def list_packages(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    type: PackageType | None = Query(
+        None,
+        description="Filter by package_type: 'user' or 'reseller'",
+    ),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    count_query = select(func.count()).select_from(Package)
-    total = (await db.execute(count_query)).scalar() or 0
+    base_q = select(Package)
+    count_q = select(func.count()).select_from(Package)
+    if type is not None:
+        base_q = base_q.where(Package.package_type == type)
+        count_q = count_q.where(Package.package_type == type)
 
-    results = (await db.execute(
-        select(Package).order_by(Package.name).offset(skip).limit(limit)
-    )).scalars().all()
+    total = (await db.execute(count_q)).scalar() or 0
+    results = (
+        await db.execute(base_q.order_by(Package.name).offset(skip).limit(limit))
+    ).scalars().all()
 
     return {
         "items": [PackageResponse.model_validate(p) for p in results],
@@ -103,7 +154,13 @@ async def create_package(
     db.add(pkg)
     await db.flush()
 
-    _log(db, request, admin.id, "packages.create", f"Created package {body.name}")
+    _log(
+        db,
+        request,
+        admin.id,
+        "packages.create",
+        f"Created {pkg.package_type.value} package {body.name}",
+    )
     return PackageResponse.model_validate(pkg)
 
 
@@ -133,7 +190,17 @@ async def update_package(
     pkg = await _get_package_or_404(pkg_id, db)
     update_data = body.model_dump(exclude_unset=True)
 
+    # Strip out reseller-only fields when this is a user-type package, and
+    # vice versa, to keep the two domains cleanly separated.
+    if pkg.package_type == PackageType.USER:
+        for f in ("max_users", "max_total_disk_gb", "max_total_bandwidth_gb", "max_total_domains"):
+            update_data.pop(f, None)
+
     shell_changed = "shell_access" in update_data or "shell_type" in update_data
+    reseller_alloc_changed = pkg.package_type == PackageType.RESELLER and any(
+        k in update_data
+        for k in ("max_users", "max_total_disk_gb", "max_total_bandwidth_gb", "max_total_domains")
+    )
 
     for field, value in update_data.items():
         setattr(pkg, field, value)
@@ -147,6 +214,18 @@ async def update_package(
         )
         for user in users_result.scalars().all():
             await _apply_shell_for_user(user.username, pkg.shell_access, pkg.shell_type)
+
+    # If a reseller-package's allocation changed, propagate the new caps to
+    # every reseller currently assigned to it.
+    if reseller_alloc_changed:
+        resellers_result = await db.execute(
+            select(User).where(
+                User.package_id == pkg_id,
+                User.role == UserRole.RESELLER,
+            )
+        )
+        for reseller in resellers_result.scalars().all():
+            await sync_reseller_limit_from_package(db, reseller.id, pkg)
 
     _log(db, request, admin.id, "packages.update", f"Updated package {pkg.name}")
     return PackageResponse.model_validate(pkg)

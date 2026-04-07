@@ -30,9 +30,11 @@
 
     <!-- Navigation -->
     <nav class="flex-1 overflow-y-auto py-4 px-3">
+      <!-- Primary navigation: resellers see a DIFFERENT menu than regular users.
+           Admins see the regular mainNav (and additionally adminNav below). -->
       <div class="space-y-0.5">
         <router-link
-          v-for="item in mainNav"
+          v-for="item in primaryNav"
           :key="item.to"
           :to="item.to"
           class="nav-link"
@@ -43,27 +45,6 @@
           <span class="nav-icon" v-html="item.icon"></span>
           <span>{{ item.label }}</span>
         </router-link>
-      </div>
-
-      <!-- Reseller Section -->
-      <div v-if="auth.isReseller" class="mt-6">
-        <div class="px-3 mb-2 text-xs font-semibold uppercase tracking-wider" :style="{ color: 'var(--text-muted)' }">
-          Reseller
-        </div>
-        <div class="space-y-0.5">
-          <router-link
-            v-for="item in resellerNav"
-            :key="item.to"
-            :to="item.to"
-            class="nav-link"
-            active-class="nav-link-active"
-            @click="closeMobile"
-          >
-            <!-- v-html safe: icon is a hardcoded HTML entity from trusted source, not user input -->
-            <span class="nav-icon" v-html="item.icon"></span>
-            <span>{{ item.label }}</span>
-          </router-link>
-        </div>
       </div>
 
       <!-- Admin Section -->
@@ -154,11 +135,24 @@ const mainNav = computed(() => [
   { to: '/wordpress', label: t('nav.wordpress'), icon: '&#127760;' }
 ])
 
-const resellerNav = computed(() => [
+// Reseller-only navigation. Resellers do NOT manage their own domains/databases/etc.
+// They manage their sub-users and white-label settings.
+const resellerOnlyNav = computed(() => [
   { to: '/reseller', label: t('nav.reseller_dashboard', 'Reseller Dashboard'), icon: '&#9632;' },
   { to: '/reseller/users', label: t('nav.my_users', 'My Users'), icon: '&#9823;' },
-  { to: '/reseller/branding', label: t('nav.branding', 'Branding'), icon: '&#9998;' }
+  { to: '/reseller/packages', label: t('nav.my_packages', 'My Packages'), icon: '&#9830;' },
+  { to: '/reseller/branding', label: t('nav.branding', 'Branding'), icon: '&#9998;' },
+  { to: '/reseller/bandwidth', label: t('nav.bandwidth', 'Bandwidth & Usage'), icon: '&#9906;' },
+  { to: '/reseller/billing', label: t('nav.billing', 'Billing'), icon: '&#9788;' },
+  { to: '/reseller/rate-limits', label: t('nav.rate_limits', 'Rate Limits'), icon: '&#9203;' },
+  { to: '/settings', label: t('nav.settings'), icon: '&#9881;' }
 ])
+
+// Primary navigation switcher: resellers see resellerOnlyNav INSTEAD of mainNav.
+// Admins still see mainNav (plus adminNav further down).
+const primaryNav = computed(() =>
+  auth.isResellerOnly ? resellerOnlyNav.value : mainNav.value
+)
 
 const adminNav = computed(() => [
   { to: '/packages', label: t('nav.packages'), icon: '&#9830;' },

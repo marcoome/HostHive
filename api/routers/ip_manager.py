@@ -7,11 +7,11 @@ via UFW firewall rules.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import subprocess
-from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
@@ -110,7 +110,6 @@ async def list_ip_addresses(
     try:
         result = await _run_async(["ip", "-j", "addr", "show"], timeout=10)
         if result.returncode == 0:
-            import json
             try:
                 interfaces = json.loads(result.stdout)
                 for iface in interfaces:

@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
@@ -41,6 +42,9 @@ logger = logging.getLogger(__name__)
 SYSTEMD_DIR = Path("/etc/systemd/system")
 LOG_DIR = Path("/var/log/hosthive/runtime")
 
+# Default subprocess timeout (seconds) so a hung command never blocks the API.
+_DEFAULT_TIMEOUT = 300
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,15 +54,68 @@ def _is_admin(user: User) -> bool:
     return user.role.value == "admin"
 
 
-async def _run(cmd: str) -> tuple[int, str, str]:
-    """Run a shell command and return (returncode, stdout, stderr)."""
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+def _run_sync(
+    cmd: Union[str, Sequence[str]],
+    *,
+    shell: bool = False,
+    timeout: int = _DEFAULT_TIMEOUT,
+    cwd: Optional[str] = None,
+) -> tuple[int, str, str]:
+    """Synchronous subprocess runner -- intended for run_in_executor.
+
+    Runs the command directly via subprocess.run (no proxying through any
+    agent / network service). Prefers list-form arguments to avoid shell
+    injection; only falls back to shell=True when explicitly requested.
+    """
+    try:
+        completed = subprocess.run(
+            cmd,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            cwd=cwd,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return 124, "", f"Command timed out after {timeout}s: {exc}"
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+    except Exception as exc:  # noqa: BLE001 - surface any subprocess error
+        return 1, "", str(exc)
+
+    stdout = (completed.stdout or b"").decode(errors="replace").strip()
+    stderr = (completed.stderr or b"").decode(errors="replace").strip()
+    return completed.returncode, stdout, stderr
+
+
+async def _run(
+    cmd: Union[str, Sequence[str]],
+    *,
+    shell: bool = False,
+    timeout: int = _DEFAULT_TIMEOUT,
+    cwd: Optional[str] = None,
+) -> tuple[int, str, str]:
+    """Run a command off the event loop via run_in_executor.
+
+    All blocking subprocess work happens in a thread pool so the FastAPI
+    event loop stays responsive. This deliberately uses local subprocess --
+    there is no remote agent / port 7080 proxy.
+    """
+    loop = asyncio.get_running_loop()
+    # If a string is passed without shell=True, treat it as a shell command
+    # for backwards compatibility with the original API.
+    if isinstance(cmd, str) and not shell:
+        shell = True
+    return await loop.run_in_executor(
+        None, lambda: _run_sync(cmd, shell=shell, timeout=timeout, cwd=cwd)
     )
-    stdout, stderr = await proc.communicate()
-    return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
+
+
+async def _to_thread(func, *args, **kwargs):
+    """Run a blocking callable in the default thread pool."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, details: str):
@@ -89,6 +146,17 @@ def _service_file_path(app_id: uuid.UUID) -> Path:
     return SYSTEMD_DIR / f"{_service_name(app_id)}.service"
 
 
+def _path_owner(path: Path) -> Optional[str]:
+    """Return the owning username of a filesystem path, or None on failure."""
+    try:
+        import pwd
+
+        stat = path.stat()
+        return pwd.getpwuid(stat.st_uid).pw_name
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Node.js helpers (PM2)
 # ---------------------------------------------------------------------------
@@ -100,8 +168,8 @@ async def _setup_node_app(app: RuntimeApp, username: str) -> dict:
 
     # Ensure app root exists
     try:
-        app_root.mkdir(parents=True, exist_ok=True)
-        await _run(f"chown -R {username}:{username} {app_root}")
+        await _to_thread(app_root.mkdir, parents=True, exist_ok=True)
+        await _run(["chown", "-R", f"{username}:{username}", str(app_root)])
     except Exception as exc:
         warnings.append(f"Could not create app root: {exc}")
 
@@ -128,17 +196,14 @@ async def _setup_node_app(app: RuntimeApp, username: str) -> dict:
 
     eco_path = app_root / "ecosystem.config.json"
     try:
-        eco_path.write_text(json.dumps(ecosystem, indent=2), encoding="utf-8")
-        await _run(f"chown {username}:{username} {eco_path}")
+        await _to_thread(
+            eco_path.write_text,
+            json.dumps(ecosystem, indent=2),
+            encoding="utf-8",
+        )
+        await _run(["chown", f"{username}:{username}", str(eco_path)])
     except Exception as exc:
         warnings.append(f"Could not write ecosystem file: {exc}")
-
-    # Also create a systemd service as a fallback / wrapper for PM2
-    node_bin = f"/usr/bin/node"
-    # Try to use nvm-installed node if available
-    nvm_node = f"/home/{username}/.nvm/versions/node/v{app.runtime_version}/bin/node"
-    pm2_bin = "/usr/bin/pm2"
-    nvm_pm2 = f"/home/{username}/.nvm/versions/node/v{app.runtime_version}/bin/pm2"
 
     service_content = f"""[Unit]
 Description=HostHive Node.js App {app.id}
@@ -168,9 +233,13 @@ StandardError=append:{LOG_DIR}/{app.id}.stderr.log
 WantedBy=multi-user.target
 """
     try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        _service_file_path(app.id).write_text(service_content, encoding="utf-8")
-        await _run("systemctl daemon-reload")
+        await _to_thread(LOG_DIR.mkdir, parents=True, exist_ok=True)
+        await _to_thread(
+            _service_file_path(app.id).write_text,
+            service_content,
+            encoding="utf-8",
+        )
+        await _run(["systemctl", "daemon-reload"])
     except Exception as exc:
         warnings.append(f"Could not create systemd service: {exc}")
 
@@ -188,27 +257,35 @@ async def _setup_python_app(app: RuntimeApp, username: str) -> dict:
 
     # Ensure app root exists
     try:
-        app_root.mkdir(parents=True, exist_ok=True)
-        await _run(f"chown -R {username}:{username} {app_root}")
+        await _to_thread(app_root.mkdir, parents=True, exist_ok=True)
+        await _run(["chown", "-R", f"{username}:{username}", str(app_root)])
     except Exception as exc:
         warnings.append(f"Could not create app root: {exc}")
 
-    # Create virtualenv
+    # Create virtualenv (direct subprocess, no agent proxy)
     python_bin = f"python{app.runtime_version}"
     venv_path = app_root / "venv"
-    if not venv_path.exists():
-        rc, out, err = await _run(f"sudo -u {username} {python_bin} -m venv {venv_path}")
+    venv_exists = await _to_thread(venv_path.exists)
+    if not venv_exists:
+        rc, out, err = await _run(
+            ["sudo", "-u", username, python_bin, "-m", "venv", str(venv_path)]
+        )
         if rc != 0:
             # Try without minor version
             major = app.runtime_version.split(".")[0]
-            rc, out, err = await _run(f"sudo -u {username} python{major} -m venv {venv_path}")
+            rc, out, err = await _run(
+                ["sudo", "-u", username, f"python{major}", "-m", "venv", str(venv_path)]
+            )
             if rc != 0:
                 warnings.append(f"Failed to create virtualenv: {err or out}")
 
-    # Install gunicorn/uvicorn in venv
+    # Install gunicorn/uvicorn in venv via direct pip subprocess
     pip_bin = venv_path / "bin" / "pip"
-    if pip_bin.exists():
-        rc, out, err = await _run(f"sudo -u {username} {pip_bin} install --quiet gunicorn uvicorn")
+    pip_exists = await _to_thread(pip_bin.exists)
+    if pip_exists:
+        rc, out, err = await _run(
+            ["sudo", "-u", username, str(pip_bin), "install", "--quiet", "gunicorn", "uvicorn"]
+        )
         if rc != 0:
             warnings.append(f"Failed to install gunicorn/uvicorn: {err or out}")
 
@@ -256,9 +333,13 @@ WantedBy=multi-user.target
 """
 
     try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        _service_file_path(app.id).write_text(service_content, encoding="utf-8")
-        await _run("systemctl daemon-reload")
+        await _to_thread(LOG_DIR.mkdir, parents=True, exist_ok=True)
+        await _to_thread(
+            _service_file_path(app.id).write_text,
+            service_content,
+            encoding="utf-8",
+        )
+        await _run(["systemctl", "daemon-reload"])
     except Exception as exc:
         warnings.append(f"Could not create systemd service: {exc}")
 
@@ -291,14 +372,17 @@ async def _configure_reverse_proxy(domain_name: str, port: int) -> dict:
     symlink_path = NGINX_SITES_ENABLED / domain_name
 
     try:
-        vhost_path.write_text(config, encoding="utf-8")
+        await _to_thread(vhost_path.write_text, config, encoding="utf-8")
     except Exception as exc:
         warnings.append(f"Failed to write nginx proxy config: {exc}")
 
-    try:
+    def _make_symlink() -> None:
         if symlink_path.exists() or symlink_path.is_symlink():
             symlink_path.unlink()
         symlink_path.symlink_to(vhost_path)
+
+    try:
+        await _to_thread(_make_symlink)
     except Exception as exc:
         warnings.append(f"Failed to create symlink: {exc}")
 
@@ -314,20 +398,24 @@ async def _remove_service(app: RuntimeApp) -> list[str]:
     warnings: list[str] = []
     svc = _service_name(app.id)
 
-    # Stop via systemd
-    await _run(f"systemctl stop {svc}")
-    await _run(f"systemctl disable {svc}")
+    # Stop via systemd (direct subprocess)
+    await _run(["systemctl", "stop", svc])
+    await _run(["systemctl", "disable", svc])
 
-    # Also try PM2 cleanup for Node apps
+    # Also try PM2 cleanup for Node apps -- ignore errors if not present.
     if app.app_type == "node":
-        await _run(f"pm2 delete {svc} 2>/dev/null || true")
+        await _run(["pm2", "delete", svc])
 
     # Remove service file
     svc_path = _service_file_path(app.id)
+
+    def _unlink_if_exists(path: Path) -> None:
+        if path.exists():
+            path.unlink()
+
     try:
-        if svc_path.exists():
-            svc_path.unlink()
-        await _run("systemctl daemon-reload")
+        await _to_thread(_unlink_if_exists, svc_path)
+        await _run(["systemctl", "daemon-reload"])
     except Exception as exc:
         warnings.append(f"Could not remove service file: {exc}")
 
@@ -335,8 +423,7 @@ async def _remove_service(app: RuntimeApp) -> list[str]:
     for suffix in (".log", ".stdout.log", ".stderr.log"):
         log_file = LOG_DIR / f"{app.id}{suffix}"
         try:
-            if log_file.exists():
-                log_file.unlink()
+            await _to_thread(_unlink_if_exists, log_file)
         except Exception:
             pass
 
@@ -355,36 +442,54 @@ async def list_runtime_versions(
     node_versions: list[str] = []
     python_versions: list[str] = []
 
-    # Detect Node.js versions
-    # Check system node
-    rc, out, _ = await _run("node --version 2>/dev/null")
+    # Detect Node.js versions -- check system node directly via subprocess
+    rc, out, _ = await _run(["node", "--version"])
     if rc == 0 and out:
         ver = out.lstrip("v").split(".")[0]
         if ver not in node_versions:
             node_versions.append(ver)
 
-    # Check nvm-managed versions
-    rc, out, _ = await _run("ls /home/*/\.nvm/versions/node/ 2>/dev/null || ls /usr/local/nvm/versions/node/ 2>/dev/null || echo ''")
-    if rc == 0 and out:
-        for line in out.split("\n"):
-            v = line.strip().lstrip("v").split(".")[0]
-            if v and v.isdigit() and v not in node_versions:
-                node_versions.append(v)
+    # Check nvm-managed versions by scanning known directories on disk
+    def _scan_nvm() -> list[str]:
+        found: list[str] = []
+        candidates: list[Path] = []
+        home = Path("/home")
+        if home.exists():
+            for user_dir in home.iterdir():
+                nvm_versions = user_dir / ".nvm" / "versions" / "node"
+                if nvm_versions.is_dir():
+                    candidates.append(nvm_versions)
+        global_nvm = Path("/usr/local/nvm/versions/node")
+        if global_nvm.is_dir():
+            candidates.append(global_nvm)
+        for c in candidates:
+            try:
+                for entry in c.iterdir():
+                    v = entry.name.lstrip("v").split(".")[0]
+                    if v.isdigit() and v not in found:
+                        found.append(v)
+            except Exception:
+                continue
+        return found
+
+    for v in await _to_thread(_scan_nvm):
+        if v not in node_versions:
+            node_versions.append(v)
 
     # Common Node.js versions as fallback
     if not node_versions:
         node_versions = ["18", "20", "22"]
 
-    # Detect Python versions
+    # Detect Python versions -- direct subprocess per candidate
     for minor in range(8, 14):
         ver = f"3.{minor}"
-        rc, _, _ = await _run(f"python{ver} --version 2>/dev/null")
+        rc, _, _ = await _run([f"python{ver}", "--version"])
         if rc == 0:
             python_versions.append(ver)
 
     # Fallback
     if not python_versions:
-        rc, out, _ = await _run("python3 --version 2>/dev/null")
+        rc, out, _ = await _run(["python3", "--version"])
         if rc == 0 and out:
             parts = out.split()[-1].split(".")
             if len(parts) >= 2:
@@ -559,7 +664,7 @@ async def update_runtime_app(
         # Restart if was running
         if was_running:
             svc = _service_name(app.id)
-            await _run(f"systemctl restart {svc}")
+            await _run(["systemctl", "restart", svc])
     except Exception as exc:
         logger.warning("Failed to update runtime app system config: %s", exc)
 
@@ -616,19 +721,25 @@ async def start_runtime_app(
     svc = _service_name(app.id)
 
     if app.app_type == "node":
-        # Start via PM2 through systemd
-        rc, out, err = await _run(f"systemctl start {svc}")
+        # Start via systemd unit (which wraps PM2)
+        rc, out, err = await _run(["systemctl", "start", svc])
         if rc != 0:
-            # Fallback: try PM2 directly
+            # Fallback: try PM2 directly as the file's owning user
             eco_path = Path(app.app_root) / "ecosystem.config.json"
-            rc2, out2, err2 = await _run(f"sudo -u $(stat -c '%U' {app.app_root}) pm2 start {eco_path}")
+            owner = await _to_thread(_path_owner, Path(app.app_root))
+            if owner:
+                rc2, out2, err2 = await _run(
+                    ["sudo", "-u", owner, "pm2", "start", str(eco_path)]
+                )
+            else:
+                rc2, out2, err2 = await _run(["pm2", "start", str(eco_path)])
             if rc2 != 0:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Failed to start app: {err or err2}",
                 )
     else:
-        rc, out, err = await _run(f"systemctl start {svc}")
+        rc, out, err = await _run(["systemctl", "start", svc])
         if rc != 0:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -636,7 +747,7 @@ async def start_runtime_app(
             )
 
     # Get PID
-    rc, pid_out, _ = await _run(f"systemctl show -p MainPID --value {svc}")
+    rc, pid_out, _ = await _run(["systemctl", "show", "-p", "MainPID", "--value", svc])
     pid = int(pid_out) if pid_out.isdigit() and int(pid_out) > 0 else None
 
     app.is_running = True
@@ -662,11 +773,11 @@ async def stop_runtime_app(
     app = await _get_app_or_404(app_id, db, current_user)
 
     svc = _service_name(app.id)
-    rc, out, err = await _run(f"systemctl stop {svc}")
+    rc, out, err = await _run(["systemctl", "stop", svc])
 
-    # Also stop PM2 process for Node apps
+    # Also stop PM2 process for Node apps -- ignore failures.
     if app.app_type == "node":
-        await _run(f"pm2 stop {svc} 2>/dev/null || true")
+        await _run(["pm2", "stop", svc])
 
     if rc != 0:
         logger.warning("systemctl stop %s returned %d: %s", svc, rc, err)
@@ -696,12 +807,12 @@ async def restart_runtime_app(
     svc = _service_name(app.id)
 
     if app.app_type == "node":
-        rc, out, err = await _run(f"systemctl restart {svc}")
+        rc, out, err = await _run(["systemctl", "restart", svc])
         if rc != 0:
-            # Fallback PM2
-            await _run(f"pm2 restart {svc} 2>/dev/null || true")
+            # Fallback PM2 -- ignore errors if PM2 isn't available.
+            await _run(["pm2", "restart", svc])
     else:
-        rc, out, err = await _run(f"systemctl restart {svc}")
+        rc, out, err = await _run(["systemctl", "restart", svc])
         if rc != 0:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -709,7 +820,7 @@ async def restart_runtime_app(
             )
 
     # Get PID
-    rc, pid_out, _ = await _run(f"systemctl show -p MainPID --value {svc}")
+    rc, pid_out, _ = await _run(["systemctl", "show", "-p", "MainPID", "--value", svc])
     pid = int(pid_out) if pid_out.isdigit() and int(pid_out) > 0 else None
 
     app.is_running = True
@@ -735,23 +846,28 @@ async def get_runtime_app_logs(
 ):
     app = await _get_app_or_404(app_id, db, current_user)
 
+    def _tail_file(path: Path, n: int) -> list[str]:
+        try:
+            if not path.exists():
+                return []
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                # Read all lines then keep the last n. For very large files
+                # this is fine because the API caps `lines` at 10000.
+                content = fh.readlines()
+            tail = content[-n:]
+            return [line.rstrip("\n") for line in tail]
+        except Exception:
+            return []
+
     logs: dict[str, list[str]] = {}
 
     if log_type in ("stdout", "all"):
         stdout_path = LOG_DIR / f"{app.id}.stdout.log"
-        try:
-            rc, out, _ = await _run(f"tail -n {lines} {stdout_path} 2>/dev/null")
-            logs["stdout"] = out.split("\n") if out else []
-        except Exception:
-            logs["stdout"] = []
+        logs["stdout"] = await _to_thread(_tail_file, stdout_path, lines)
 
     if log_type in ("stderr", "all"):
         stderr_path = LOG_DIR / f"{app.id}.stderr.log"
-        try:
-            rc, out, _ = await _run(f"tail -n {lines} {stderr_path} 2>/dev/null")
-            logs["stderr"] = out.split("\n") if out else []
-        except Exception:
-            logs["stderr"] = []
+        logs["stderr"] = await _to_thread(_tail_file, stderr_path, lines)
 
     return {"app_id": str(app_id), "logs": logs}
 
@@ -772,21 +888,24 @@ async def install_runtime_deps(
     app_root = Path(app.app_root)
 
     if app.app_type == "node":
-        # npm install or yarn install
+        # Direct npm / yarn install -- no shell, no agent proxy.
         package_json = app_root / "package.json"
         yarn_lock = app_root / "yarn.lock"
 
-        if yarn_lock.exists():
-            cmd = f"sudo -u {username} bash -lc 'cd {app_root} && yarn install --production'"
-        elif package_json.exists():
-            cmd = f"sudo -u {username} bash -lc 'cd {app_root} && npm install --production'"
+        package_exists = await _to_thread(package_json.exists)
+        yarn_exists = await _to_thread(yarn_lock.exists)
+
+        if yarn_exists:
+            cmd = ["sudo", "-u", username, "yarn", "install", "--production"]
+        elif package_exists:
+            cmd = ["sudo", "-u", username, "npm", "install", "--production"]
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No package.json found in app root.",
             )
 
-        rc, out, err = await _run(cmd)
+        rc, out, err = await _run(cmd, cwd=str(app_root), timeout=900)
         if rc != 0:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -796,19 +915,21 @@ async def install_runtime_deps(
         _log(db, request, current_user.id, "runtime.install_deps", f"Installed Node.js dependencies for app {app_id}")
         return {"ok": True, "output": out, "type": "node"}
 
-    else:  # Python
+    else:  # Python -- direct pip subprocess.
         requirements = app_root / "requirements.txt"
         venv_pip = app_root / "venv" / "bin" / "pip"
 
-        if not requirements.exists():
+        req_exists = await _to_thread(requirements.exists)
+        if not req_exists:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No requirements.txt found in app root.",
             )
 
-        pip = str(venv_pip) if venv_pip.exists() else "pip3"
-        cmd = f"sudo -u {username} {pip} install -r {requirements}"
-        rc, out, err = await _run(cmd)
+        venv_pip_exists = await _to_thread(venv_pip.exists)
+        pip = str(venv_pip) if venv_pip_exists else "pip3"
+        cmd = ["sudo", "-u", username, pip, "install", "-r", str(requirements)]
+        rc, out, err = await _run(cmd, cwd=str(app_root), timeout=900)
         if rc != 0:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

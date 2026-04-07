@@ -1,19 +1,29 @@
 """Log management router -- /api/v1/logs (admin only).
 
 Provides log browsing, searching, rotation, and access log statistics.
-Extends the basic log reading already in server.py with advanced features.
+
+This router reads system log files DIRECTLY from disk using Python's built-in
+file APIs (no agent proxy, no shell calls for reads). Blocking I/O is offloaded
+to a thread pool via ``asyncio.get_running_loop().run_in_executor()`` so the
+event loop stays responsive.
+
+Falls back to ``journalctl`` (subprocess) only when a log file does not exist
+on disk. Log rotation still uses ``logrotate``/``nginx -s reopen`` because
+those are inherently external operations.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gzip
+import io
 import logging
 import os
 import re
 import subprocess
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
@@ -80,6 +90,10 @@ _LOG_DESCRIPTIONS: dict[str, str] = {
     "daemon": "Daemon logs",
 }
 
+# Cap how many bytes we'll scan from the tail of a file for a single request,
+# to keep memory usage bounded even on huge access logs.
+_MAX_TAIL_BYTES = 32 * 1024 * 1024  # 32 MiB
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,13 +104,18 @@ def _log_activity(db: AsyncSession, request: Request, user_id, action: str, deta
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
+async def _run_in_executor(func, *args):
+    """Run a blocking callable in the default executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, func, *args)
+
+
 def _run(cmd: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 async def _run_async(cmd: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: _run(cmd, timeout))
+    return await _run_in_executor(lambda: _run(cmd, timeout))
 
 
 def _resolve_log_path(name: str) -> Optional[str]:
@@ -121,6 +140,108 @@ def _sanitize_log_name(name: str) -> str:
     return cleaned
 
 
+def _open_log(path: str):
+    """Open a log file, transparently handling .gz rotation."""
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return open(path, "r", encoding="utf-8", errors="replace")
+
+
+def _tail_lines_blocking(path: str, num_lines: int) -> tuple[list[str], int]:
+    """Read the last ``num_lines`` lines of ``path`` efficiently.
+
+    Returns ``(lines, total_lines_in_file)``.
+
+    Strategy: seek to end, read backwards in 64 KiB chunks until we have
+    enough newlines or hit the cap. For .gz files we fall back to a
+    streaming deque since random access isn't supported.
+    """
+    if path.endswith(".gz"):
+        with _open_log(path) as fh:
+            buf: deque[str] = deque(maxlen=num_lines)
+            total = 0
+            for line in fh:
+                buf.append(line.rstrip("\n"))
+                total += 1
+            return list(buf), total
+
+    file_size = os.path.getsize(path)
+    if file_size == 0:
+        return [], 0
+
+    block_size = 64 * 1024
+    data = bytearray()
+    bytes_read = 0
+    newlines = 0
+
+    with open(path, "rb") as fh:
+        pos = file_size
+        while pos > 0 and newlines <= num_lines and bytes_read < _MAX_TAIL_BYTES:
+            read_size = min(block_size, pos)
+            pos -= read_size
+            fh.seek(pos)
+            chunk = fh.read(read_size)
+            data[0:0] = chunk
+            bytes_read += read_size
+            newlines = data.count(b"\n")
+
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if len(lines) > num_lines:
+        lines = lines[-num_lines:]
+
+    # Total line count: only counted if we read the entire file. Otherwise
+    # estimate using a separate streaming pass-but cap that too.
+    if bytes_read >= file_size:
+        total = len(lines)
+    else:
+        total = _count_lines_blocking(path)
+
+    return lines, total
+
+
+def _count_lines_blocking(path: str) -> int:
+    """Count newlines in a file in a streaming fashion."""
+    if not os.path.exists(path):
+        return 0
+    total = 0
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += chunk.count(b"\n")
+    except OSError:
+        return 0
+    return total
+
+
+def _read_tail_text_blocking(path: str, max_lines: int) -> str:
+    """Return the last ``max_lines`` of ``path`` as a single text blob."""
+    lines, _ = _tail_lines_blocking(path, max_lines)
+    return "\n".join(lines)
+
+
+def _search_file_blocking(
+    path: str, pattern: re.Pattern, max_lines: int, max_matches: int = 500,
+) -> tuple[list[str], int]:
+    """Search the last ``max_lines`` of a file for a regex pattern.
+
+    Returns ``(matches, total_match_count)``. Each match line is prefixed
+    with ``"<lineno>:"`` to mimic ``grep -n`` output.
+    """
+    lines, _ = _tail_lines_blocking(path, max_lines)
+    matches: list[str] = []
+    total = 0
+    for idx, line in enumerate(lines, start=1):
+        if pattern.search(line):
+            total += 1
+            if len(matches) < max_matches:
+                matches.append(f"{idx}:{line}")
+    return matches, total
+
+
 # ---------------------------------------------------------------------------
 # GET /available -- List available log files
 # ---------------------------------------------------------------------------
@@ -131,54 +252,60 @@ async def list_available_logs(
     admin: User = Depends(_admin),
 ):
     """List all known log files and their availability on the system."""
-    available: list[dict] = []
 
-    for name, pattern in _LOG_PATHS.items():
-        log_path = _resolve_log_path(name)
-        exists = log_path is not None and os.path.exists(log_path)
+    def _gather() -> dict[str, Any]:
+        available: list[dict] = []
+        for name, pattern in _LOG_PATHS.items():
+            log_path = _resolve_log_path(name)
+            exists = log_path is not None and os.path.exists(log_path)
 
-        entry: dict[str, Any] = {
-            "name": name,
-            "description": _LOG_DESCRIPTIONS.get(name, name),
-            "pattern": pattern,
-            "exists": exists,
+            entry: dict[str, Any] = {
+                "name": name,
+                "description": _LOG_DESCRIPTIONS.get(name, name),
+                "pattern": pattern,
+                "exists": exists,
+            }
+
+            if exists and log_path:
+                try:
+                    stat = os.stat(log_path)
+                    entry["path"] = log_path
+                    entry["size_bytes"] = stat.st_size
+                    entry["size_human"] = _human_size(stat.st_size)
+                    entry["modified"] = datetime.fromtimestamp(
+                        stat.st_mtime, tz=timezone.utc,
+                    ).isoformat()
+                except Exception:
+                    pass
+
+            available.append(entry)
+
+        # Discover any rotated log files
+        rotated_count = 0
+        import glob as _glob
+        for name, pattern in _LOG_PATHS.items():
+            base = pattern.replace("*", "")
+            for _ in _glob.glob(f"{base}*.gz") + _glob.glob(f"{base}*.1"):
+                rotated_count += 1
+
+        return {
+            "logs": available,
+            "total": len(available),
+            "available_count": sum(1 for l in available if l["exists"]),
+            "rotated_files": rotated_count,
         }
 
-        if exists and log_path:
-            try:
-                stat = os.stat(log_path)
-                entry["path"] = log_path
-                entry["size_bytes"] = stat.st_size
-                entry["size_human"] = _human_size(stat.st_size)
-                entry["modified"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-            except Exception:
-                pass
-
-        available.append(entry)
-
-    # Also discover any rotated log files
-    rotated_count = 0
-    for name, pattern in _LOG_PATHS.items():
-        import glob as _glob
-        base = pattern.replace("*", "")
-        for rotated in _glob.glob(f"{base}*.gz") + _glob.glob(f"{base}*.1"):
-            rotated_count += 1
-
-    return {
-        "logs": available,
-        "total": len(available),
-        "available_count": sum(1 for l in available if l["exists"]),
-        "rotated_files": rotated_count,
-    }
+    return await _run_in_executor(_gather)
 
 
 def _human_size(size_bytes: int) -> str:
     """Convert bytes to human-readable size."""
+    size: float = float(size_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(size_bytes) < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} PB"
+        if abs(size) < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
 
 
 # ---------------------------------------------------------------------------
@@ -194,52 +321,36 @@ async def read_log(
     request: Request = None,
     admin: User = Depends(_admin),
 ):
-    """Read a log file with pagination support."""
+    """Read a log file with pagination support.
+
+    Reads the file directly from disk via a thread-pool executor. Falls back
+    to ``journalctl`` only if the log file is missing.
+    """
     name = _sanitize_log_name(name)
     log_path = _resolve_log_path(name)
 
     if not log_path or not os.path.exists(log_path):
-        # Try journalctl as fallback
         return await _read_from_journalctl(name, lines, offset, order)
 
     try:
+        # Pull (offset + lines) from the tail, then slice. Cap to a sane limit.
+        fetch = min(offset + lines, 50000)
+        all_lines, total = await _run_in_executor(_tail_lines_blocking, log_path, fetch)
+
+        # Apply offset (skip N lines from the newest end)
         if offset > 0:
-            # Use tail + head for offset: get (offset+lines) from end, then take first 'lines'
-            total_lines = offset + lines
-            result = await _run_async(
-                ["sudo", "tail", "-n", str(total_lines), log_path],
-                timeout=10,
-            )
-            if result.returncode != 0:
-                result = await _run_async(["tail", "-n", str(total_lines), log_path], timeout=10)
-        else:
-            result = await _run_async(
-                ["sudo", "tail", "-n", str(lines), log_path],
-                timeout=10,
-            )
-            if result.returncode != 0:
-                result = await _run_async(["tail", "-n", str(lines), log_path], timeout=10)
+            if offset >= len(all_lines):
+                all_lines = []
+            else:
+                all_lines = all_lines[: len(all_lines) - offset]
 
-        if result.returncode != 0:
-            return await _read_from_journalctl(name, lines, offset, order)
-
-        all_lines = result.stdout.splitlines()
-
-        # Apply offset
-        if offset > 0 and len(all_lines) > lines:
-            all_lines = all_lines[:len(all_lines) - offset]
+        # Keep only the last ``lines`` after offset trimming
+        if len(all_lines) > lines:
             all_lines = all_lines[-lines:]
 
-        # Apply ordering
+        # Apply ordering: file order is asc (oldest first); flip for desc
         if order == "desc":
-            all_lines.reverse()
-
-        # Get total line count for the file
-        try:
-            wc_result = await _run_async(["wc", "-l", log_path], timeout=5)
-            total = int(wc_result.stdout.split()[0]) if wc_result.returncode == 0 else len(all_lines)
-        except Exception:
-            total = len(all_lines)
+            all_lines = list(reversed(all_lines))
 
         return {
             "name": name,
@@ -251,15 +362,18 @@ async def read_log(
             "order": order,
         }
 
-    except Exception as e:
+    except PermissionError:
+        log.warning("Permission denied reading %s", log_path)
+        return await _read_from_journalctl(name, lines, offset, order)
+    except Exception as exc:
+        log.exception("Failed to read log %s: %s", log_path, exc)
         return await _read_from_journalctl(name, lines, offset, order)
 
 
 async def _read_from_journalctl(
     name: str, lines: int, offset: int, order: str,
 ) -> dict[str, Any]:
-    """Fallback: read logs from journalctl."""
-    # Map log names to systemd units
+    """Fallback: read logs from journalctl when the file doesn't exist."""
     unit_map: dict[str, str] = {
         "nginx-access": "nginx",
         "nginx-error": "nginx",
@@ -294,7 +408,6 @@ async def _read_from_journalctl(
 
         all_lines = result.stdout.splitlines()
 
-        # Apply offset
         if offset > 0:
             all_lines = all_lines[offset:]
         all_lines = all_lines[:lines]
@@ -330,70 +443,52 @@ async def search_log(
     request: Request = None,
     admin: User = Depends(_admin),
 ):
-    """Search through a log file using grep."""
+    """Search through a log file using Python's ``re`` module.
+
+    No shell, no grep, no agent. Reads the tail of the file directly and
+    matches against a compiled regex in a thread-pool worker.
+    """
     name = _sanitize_log_name(name)
     log_path = _resolve_log_path(name)
 
-    # Sanitize the search query (escape shell-dangerous chars but allow regex)
-    # We pass the pattern directly to grep, so we need to be careful
-    if any(c in q for c in [";", "|", "&", "`", "$", "(", ")", "{", "}", "<", ">"]):
+    # Compile the user-supplied regex safely. Reject invalid patterns up front.
+    try:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        pattern = re.compile(q, flags)
+    except re.error as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Search query contains disallowed characters.",
+            detail=f"Invalid regex: {exc}",
         )
 
     if not log_path or not os.path.exists(log_path):
-        # Fallback: search journalctl
         return await _search_journalctl(name, q, lines, case_sensitive)
 
-    grep_cmd = ["sudo", "grep"]
-    if not case_sensitive:
-        grep_cmd.append("-i")
-    grep_cmd.extend(["-n", "--color=never", "-E", q])
-
-    # Use tail to limit the search scope, then pipe to grep
     try:
-        # First get the last N lines, then search
-        tail_result = await _run_async(["sudo", "tail", "-n", str(lines), log_path], timeout=10)
-        if tail_result.returncode != 0:
-            tail_result = await _run_async(["tail", "-n", str(lines), log_path], timeout=10)
-
-        if tail_result.returncode != 0:
-            return await _search_journalctl(name, q, lines, case_sensitive)
-
-        # Search through the output
-        loop = asyncio.get_running_loop()
-        grep_result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["grep"] + (["-i"] if not case_sensitive else []) + ["-n", "--color=never", "-E", q],
-                input=tail_result.stdout,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            ),
+        matches, total = await _run_in_executor(
+            _search_file_blocking, log_path, pattern, lines, 500,
         )
-
-        matches = grep_result.stdout.strip().splitlines() if grep_result.stdout else []
-
         return {
             "name": name,
             "file": log_path,
             "query": q,
             "case_sensitive": case_sensitive,
-            "matches": matches[:500],  # Limit returned matches
-            "match_count": len(matches),
+            "matches": matches,
+            "match_count": total,
             "searched_lines": lines,
         }
-
-    except Exception as e:
+    except PermissionError:
+        log.warning("Permission denied searching %s", log_path)
+        return await _search_journalctl(name, q, lines, case_sensitive)
+    except Exception as exc:
+        log.exception("Failed to search log %s: %s", log_path, exc)
         return await _search_journalctl(name, q, lines, case_sensitive)
 
 
 async def _search_journalctl(
     name: str, query: str, lines: int, case_sensitive: bool,
 ) -> dict[str, Any]:
-    """Search journalctl output."""
+    """Fallback: search journalctl output when the file doesn't exist."""
     unit_map: dict[str, str] = {
         "nginx-access": "nginx",
         "nginx-error": "nginx",
@@ -406,10 +501,9 @@ async def _search_journalctl(
 
     try:
         cmd = ["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "short-iso"]
+        cmd += ["--grep", query]
         if not case_sensitive:
-            cmd += ["--grep", query.lower()]
-        else:
-            cmd += ["--grep", query]
+            cmd += ["--case-sensitive=false"]
 
         result = await _run_async(cmd, timeout=15)
         matches = result.stdout.strip().splitlines() if result.returncode == 0 else []
@@ -503,7 +597,11 @@ async def access_log_stats(
     request: Request = None,
     admin: User = Depends(_admin),
 ):
-    """Parse nginx access log and return statistics."""
+    """Parse nginx access log and return statistics.
+
+    Reads the access log directly from disk in a thread-pool worker, then
+    parses it in pure Python.
+    """
     log_path = _resolve_log_path("nginx-access")
     if not log_path or not os.path.exists(log_path):
         raise HTTPException(
@@ -512,18 +610,17 @@ async def access_log_stats(
         )
 
     try:
-        result = await _run_async(["sudo", "tail", "-n", str(lines), log_path], timeout=15)
-        if result.returncode != 0:
-            result = await _run_async(["tail", "-n", str(lines), log_path], timeout=15)
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Cannot read nginx access log.",
-            )
-    except subprocess.TimeoutExpired:
+        tail_text = await _run_in_executor(_read_tail_text_blocking, log_path, lines)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied reading {log_path}.",
+        )
+    except Exception as exc:
+        log.exception("Failed to read nginx access log: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Timeout reading access log.",
+            detail="Cannot read nginx access log.",
         )
 
     # Parse nginx combined log format:
@@ -543,7 +640,7 @@ async def access_log_stats(
     error_count = 0
     parse_errors = 0
 
-    for line in result.stdout.strip().splitlines():
+    for line in tail_text.splitlines():
         match = log_pattern.match(line)
         if not match:
             parse_errors += 1

@@ -198,31 +198,18 @@ async def create_ftp_account(
     db.add(acct)
     await db.flush()
 
-    # Try agent first, fall back to direct ProFTPD management
-    provisioned = False
-    agent = request.app.state.agent
+    # Provision directly via ftpasswd/proftpd (no agent proxy)
     try:
-        await agent.create_ftp_account(
-            username=body.username,
-            password=body.password,
-            home_dir=body.home_dir,
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, _direct_create_ftp_user, body.username, body.password, body.home_dir,
         )
-        provisioned = True
     except Exception as exc:
-        logger.warning("Agent error creating FTP account, falling back to direct: %s", exc)
-
-    if not provisioned:
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, _direct_create_ftp_user, body.username, body.password, body.home_dir,
-            )
-        except Exception as exc:
-            logger.error("Direct FTP user creation also failed: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to provision FTP account: {exc}",
-            )
+        logger.error("Direct FTP user creation failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to provision FTP account: {exc}",
+        )
 
     _log(db, request, current_user.id, "ftp.create", f"Created FTP account {body.username}")
     return FtpAccountResponse.model_validate(acct)
@@ -317,27 +304,18 @@ async def update_ftp_account(
     # Update password on the system if provided
     if password is not None:
         acct.password_hash = hash_password(password)
-        # Try agent first, fall back to direct
-        provisioned = False
-        agent = request.app.state.agent
+        # Update directly via ftpasswd (no agent proxy)
         try:
-            await agent.create_ftp_account(
-                username=acct.username,
-                password=password,
-                home_dir=acct.home_dir,
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, _direct_update_ftp_password, acct.username, password, acct.home_dir,
             )
-            provisioned = True
         except Exception as exc:
-            logger.warning("Agent error updating FTP password, falling back to direct: %s", exc)
-
-        if not provisioned:
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    None, _direct_update_ftp_password, acct.username, password, acct.home_dir,
-                )
-            except Exception as exc:
-                logger.error("Direct FTP password update also failed: %s", exc)
+            logger.error("Direct FTP password update failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update FTP password: {exc}",
+            )
 
     db.add(acct)
     await db.flush()
@@ -358,25 +336,16 @@ async def delete_ftp_account(
 ):
     acct = await _get_ftp_or_404(ftp_id, db, current_user)
 
-    # Try agent first, fall back to direct
-    deleted = False
-    agent = request.app.state.agent
+    # Delete directly from ftpd.passwd (no agent proxy)
     try:
-        await agent.delete_ftp_account(acct.username)
-        deleted = True
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _direct_delete_ftp_user, acct.username)
     except Exception as exc:
-        logger.warning("Agent error deleting FTP account, falling back to direct: %s", exc)
-
-    if not deleted:
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _direct_delete_ftp_user, acct.username)
-        except Exception as exc:
-            logger.error("Direct FTP user deletion also failed: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete FTP account from system: {exc}",
-            )
+        logger.error("Direct FTP user deletion failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete FTP account from system: {exc}",
+        )
 
     _log(db, request, current_user.id, "ftp.delete", f"Deleted FTP account {acct.username}")
     await db.delete(acct)

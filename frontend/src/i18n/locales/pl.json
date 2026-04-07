@@ -61,7 +61,14 @@
     "status_page": "Strona statusu",
     "administration": "Administracja",
     "external": "Zewnetrzne",
-    "translations": "Tlumaczenia"
+    "translations": "Tlumaczenia",
+    "reseller_dashboard": "Panel resellera",
+    "my_users": "Moi uzytkownicy",
+    "my_packages": "Moje pakiety",
+    "branding": "Branding",
+    "bandwidth": "Transfer i zuzycie",
+    "billing": "Rozliczenia",
+    "rate_limits": "Limity zapytan"
   },
   "translations": {
     "title": "Menedzer tlumaczen",

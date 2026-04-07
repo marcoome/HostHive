@@ -4,8 +4,16 @@ Provides ClamAV malware scanning, SSH config analysis and hardening,
 file permission checks, system update management, open port scanning,
 and login history analysis.
 
+IMPORTANT: This router runs ALL operations as direct local subprocess
+calls (sshd config edits, fail2ban-client, ufw, ss/netstat, apt, etc.).
+It does NOT proxy any request to the privileged agent on port 7080.
+Every blocking subprocess invocation is dispatched through
+asyncio.get_running_loop().run_in_executor() so the FastAPI event loop
+stays responsive.
+
 NOTE: Some commands require sudo privileges. Ensure /etc/sudoers.d/hosthive
-contains appropriate NOPASSWD entries for clamscan, apt, ss, etc.
+contains appropriate NOPASSWD entries for clamscan, apt, ss, sshd, ufw,
+fail2ban-client, systemctl, tee, mv, cp, rm, find, cat, stat, etc.
 """
 
 from __future__ import annotations
@@ -42,15 +50,46 @@ def _log_activity(db: AsyncSession, request: Request, user_id, action: str, deta
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
-def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a command via subprocess. Raises on timeout."""
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+def _run(
+    cmd: list[str],
+    timeout: int = 30,
+    input_data: Optional[str] = None,
+) -> subprocess.CompletedProcess:
+    """Run a command via subprocess. Raises on timeout.
+
+    Direct subprocess call -- NEVER proxies to the agent on port 7080.
+    All security operations (sshd config, fail2ban, ufw, ss/netstat) run
+    locally on the panel host.
+    """
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            input=input_data,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        # Synthesize a CompletedProcess with non-zero exit so callers can handle uniformly
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=127, stdout="", stderr=f"command not found: {e}"
+        )
 
 
-async def _run_async(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a blocking subprocess call in the default executor."""
+async def _run_async(
+    cmd: list[str],
+    timeout: int = 30,
+    input_data: Optional[str] = None,
+) -> subprocess.CompletedProcess:
+    """Run a blocking subprocess call in the default executor.
+
+    Uses asyncio.get_running_loop().run_in_executor() so the FastAPI event
+    loop is never blocked. This is the ONLY mechanism this router uses to
+    invoke system commands -- there is no agent HTTP proxy.
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: _run(cmd, timeout))
+    return await loop.run_in_executor(None, lambda: _run(cmd, timeout, input_data))
 
 
 def _sanitize_path(path: str) -> str:
@@ -539,13 +578,18 @@ async def ssh_harden(
             detail="Timeout reading sshd_config",
         )
 
-    # Backup the original config
+    # Backup the original config (best-effort; failure is non-fatal)
+    backup_path: Optional[str] = None
     try:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_path = f"{config_path}.backup_{timestamp}"
-        await _run_async(["sudo", "cp", config_path, backup_path], timeout=5)
-    except Exception:
-        log.warning("Could not create backup of sshd_config")
+        candidate = f"{config_path}.backup_{timestamp}"
+        cp_result = await _run_async(["sudo", "cp", config_path, candidate], timeout=5)
+        if cp_result.returncode == 0:
+            backup_path = candidate
+        else:
+            log.warning("Could not create backup of sshd_config: %s", cp_result.stderr.strip())
+    except Exception as exc:
+        log.warning("Could not create backup of sshd_config: %s", exc)
 
     # Build new config lines
     lines = config_content.splitlines()
@@ -602,25 +646,16 @@ async def ssh_harden(
             new_lines.append(f"{setting} {value}")
             changes_made.append(f"{setting} = {value}")
 
-    # Write the new config
+    # Write the new config atomically: tee -> validate -> mv
     new_content = "\n".join(new_lines) + "\n"
+    ssh_restarted = False
     try:
-        # Write to temp file first, then move (atomic)
+        # Write candidate config to a temp path via `sudo tee` (stdin piped through executor)
         tmp_path = "/tmp/sshd_config_new"
-        write_result = await _run_async(
-            ["sudo", "bash", "-c", f"cat > {tmp_path} << 'SSHEOF'\n{new_content}SSHEOF"],
+        proc = await _run_async(
+            ["sudo", "tee", tmp_path],
             timeout=5,
-        )
-        # Use tee for writing since heredoc in subprocess can be tricky
-        proc = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["sudo", "tee", tmp_path],
-                input=new_content,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ),
+            input_data=new_content,
         )
         if proc.returncode != 0:
             raise HTTPException(
@@ -628,15 +663,17 @@ async def ssh_harden(
                 detail=f"Failed to write temp config: {proc.stderr}",
             )
 
-        # Validate new config
+        # Validate new config with `sshd -t` before installing
         validate = await _run_async(["sudo", "sshd", "-t", "-f", tmp_path], timeout=10)
         if validate.returncode != 0:
+            # Clean up the rejected temp file
+            await _run_async(["sudo", "rm", "-f", tmp_path], timeout=5)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"SSH config validation failed: {validate.stderr.strip()}. No changes applied.",
             )
 
-        # Move validated config into place
+        # Move validated config into place atomically
         mv_result = await _run_async(["sudo", "mv", tmp_path, config_path], timeout=5)
         if mv_result.returncode != 0:
             raise HTTPException(
@@ -644,11 +681,10 @@ async def ssh_harden(
                 detail=f"Failed to install new config: {mv_result.stderr}",
             )
 
-        # Restart SSH
+        # Restart SSH (try both service names commonly seen on Debian/Ubuntu)
         restart = await _run_async(["sudo", "systemctl", "restart", "sshd"], timeout=15)
         ssh_restarted = restart.returncode == 0
         if not ssh_restarted:
-            # Try ssh.service (some systems use this)
             restart = await _run_async(["sudo", "systemctl", "restart", "ssh"], timeout=15)
             ssh_restarted = restart.returncode == 0
 
@@ -670,7 +706,7 @@ async def ssh_harden(
         "status": "applied",
         "changes": changes_made,
         "ssh_restarted": ssh_restarted,
-        "backup": backup_path if 'backup_path' in dir() else None,
+        "backup": backup_path,
         "detail": "SSH hardening applied successfully." + (
             "" if ssh_restarted else " WARNING: SSH service restart failed, manual restart may be required."
         ),

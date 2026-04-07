@@ -1,7 +1,8 @@
 """Monitoring router -- /api/v1/monitoring (admin only).
 
-All endpoints use psutil/subprocess directly for real system data,
-with the agent as an optional fallback.
+All endpoints use psutil and asyncio subprocess directly for real system
+data. This router never proxies to the on-host agent on port 7080 -- the
+panel collects metrics in-process to avoid the agent dependency.
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ import asyncio
 import logging
 import os
 import re
-import subprocess
 import time
 import uuid
 from collections import defaultdict
@@ -159,18 +159,40 @@ def _collect_system_metrics() -> Dict[str, Any]:
     }
 
 
-def _check_service_systemctl(service_name: str) -> Dict[str, Any]:
-    """Check a single systemd service status. Blocking -- run in executor."""
+async def _check_service_systemctl(service_name: str) -> Dict[str, Any]:
+    """Check a single systemd service status using asyncio subprocess.
+
+    Spawns `systemctl is-active <service>` non-blockingly and returns a
+    dict suitable for building a HealthCheckResponse.
+    """
     start = time.monotonic()
     try:
-        result = subprocess.run(
-            ["systemctl", "is-active", service_name],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl",
+            "is-active",
+            service_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        try:
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            elapsed_ms = (time.monotonic() - start) * 1000
+            return {
+                "service_name": service_name,
+                "status": "unhealthy",
+                "is_up": False,
+                "response_time_ms": round(elapsed_ms, 2),
+                "error_message": "Timeout checking service status",
+            }
+
         elapsed_ms = (time.monotonic() - start) * 1000
-        output = result.stdout.strip()
+        output = stdout.decode("utf-8", errors="replace").strip()
         is_active = output == "active"
         return {
             "service_name": service_name,
@@ -187,15 +209,6 @@ def _check_service_systemctl(service_name: str) -> Dict[str, Any]:
             "is_up": False,
             "response_time_ms": round(elapsed_ms, 2),
             "error_message": "systemctl not found (not a systemd system)",
-        }
-    except subprocess.TimeoutExpired:
-        elapsed_ms = (time.monotonic() - start) * 1000
-        return {
-            "service_name": service_name,
-            "status": "unhealthy",
-            "is_up": False,
-            "response_time_ms": round(elapsed_ms, 2),
-            "error_message": "Timeout checking service status",
         }
     except Exception as exc:
         elapsed_ms = (time.monotonic() - start) * 1000
@@ -288,50 +301,18 @@ async def realtime_stats(
     request: Request,
     admin: User = Depends(_admin),
 ):
-    """Return real-time system metrics collected directly via psutil."""
+    """Return real-time system metrics collected directly via psutil.
+
+    Never proxies to the on-host agent -- psutil runs in-process and is
+    the single source of truth for these metrics.
+    """
     loop = asyncio.get_running_loop()
 
-    # Try psutil directly (always preferred)
     try:
         data = await loop.run_in_executor(_executor, _collect_system_metrics)
     except Exception as psutil_err:
-        logger.warning("psutil collection failed, trying agent: %s", psutil_err)
-        # Fallback to agent if psutil fails
-        try:
-            agent = request.app.state.agent
-            agent_data = await agent.get_server_stats()
-            data = {
-                "cpu_percent": _safe_float(agent_data.get("cpu_percent")),
-                "cpu_per_core": agent_data.get("cpu_per_core", []),
-                "memory_percent": _safe_float(agent_data.get("memory_percent")),
-                "memory_used": _safe_int(agent_data.get("memory_used", 0)),
-                "memory_total": _safe_int(agent_data.get("memory_total", 0)),
-                "memory_used_mb": _safe_int(agent_data.get("memory_used_mb")),
-                "memory_total_mb": _safe_int(agent_data.get("memory_total_mb")),
-                "disk_percent": _safe_float(agent_data.get("disk_percent")),
-                "disk_used": _safe_int(agent_data.get("disk_used", 0)),
-                "disk_total": _safe_int(agent_data.get("disk_total", 0)),
-                "disk_used_gb": _safe_float(agent_data.get("disk_used_gb")),
-                "disk_total_gb": _safe_float(agent_data.get("disk_total_gb")),
-                "disk_read_bytes": _safe_int(agent_data.get("disk_read_bytes")),
-                "disk_write_bytes": _safe_int(agent_data.get("disk_write_bytes")),
-                "net_bytes_sent": _safe_int(agent_data.get("net_bytes_sent", agent_data.get("network_tx_bytes"))),
-                "net_bytes_recv": _safe_int(agent_data.get("net_bytes_recv", agent_data.get("network_rx_bytes"))),
-                "network_rx_bytes": _safe_int(agent_data.get("network_rx_bytes")),
-                "network_tx_bytes": _safe_int(agent_data.get("network_tx_bytes")),
-                "load_1": _safe_float(agent_data.get("load_avg_1")),
-                "load_5": _safe_float(agent_data.get("load_avg_5")),
-                "load_15": _safe_float(agent_data.get("load_avg_15")),
-                "load_avg_1": _safe_float(agent_data.get("load_avg_1")),
-                "load_avg_5": _safe_float(agent_data.get("load_avg_5")),
-                "load_avg_15": _safe_float(agent_data.get("load_avg_15")),
-                "uptime_seconds": _safe_float(agent_data.get("uptime_seconds")),
-                "processes": _safe_int(agent_data.get("processes")),
-                "connections": _safe_int(agent_data.get("connections", agent_data.get("active_connections"))),
-                "active_connections": _safe_int(agent_data.get("active_connections")),
-            }
-        except Exception:
-            data = {}
+        logger.warning("psutil collection failed: %s", psutil_err)
+        data = {}
 
     return RealtimeStatsResponse(
         cpu_percent=_safe_float(data.get("cpu_percent")),
@@ -373,37 +354,34 @@ async def health_checks(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    """Check actual service health using systemctl is-active, with fallback
-    to network-probe health checks from MonitoringService."""
-    loop = asyncio.get_running_loop()
+    """Check actual service health using `systemctl is-active` via asyncio
+    subprocess, with a fallback to network-probe health checks from
+    MonitoringService when systemctl is unavailable.
 
+    Never proxies to the on-host agent.
+    """
     services_to_check = [
         "nginx", "postgresql", "redis-server",
         "exim4", "dovecot", "fail2ban", "proftpd",
     ]
 
-    # Run all systemctl checks concurrently in the thread pool
-    tasks = [
-        loop.run_in_executor(_executor, _check_service_systemctl, svc)
-        for svc in services_to_check
-    ]
+    # Run all systemctl checks concurrently as native coroutines
+    raw_results = await asyncio.gather(
+        *(_check_service_systemctl(svc) for svc in services_to_check),
+        return_exceptions=True,
+    )
 
     systemctl_available = True
-    results = []
-    try:
-        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for r in raw_results:
-            if isinstance(r, Exception):
-                logger.warning("Service check failed: %s", r)
-                continue
-            # If systemctl is not found, fall back to network probes
-            if r.get("status") == "unknown" and "systemctl not found" in (r.get("error_message") or ""):
-                systemctl_available = False
-                break
-            results.append(r)
-    except Exception:
-        systemctl_available = False
+    results: List[Dict[str, Any]] = []
+    for r in raw_results:
+        if isinstance(r, Exception):
+            logger.warning("Service check failed: %s", r)
+            continue
+        # If systemctl is not found, fall back to network probes
+        if r.get("status") == "unknown" and "systemctl not found" in (r.get("error_message") or ""):
+            systemctl_available = False
+            break
+        results.append(r)
 
     # Fallback: use network-probe based health checks from MonitoringService
     if not systemctl_available or not results:
@@ -765,7 +743,7 @@ async def domain_bandwidth(
 async def ws_monitoring(websocket: WebSocket):
     """Stream real system metrics via WebSocket every 2 seconds using psutil.
 
-    Falls back to agent if psutil is unavailable.
+    Never proxies to the on-host agent -- psutil is collected in-process.
     """
     token = websocket.query_params.get("token")
     if not token:
@@ -784,27 +762,13 @@ async def ws_monitoring(websocket: WebSocket):
     await websocket.accept()
     loop = asyncio.get_running_loop()
 
-    # Determine if agent is available as fallback
-    agent = getattr(websocket.app.state, "agent", None)
-
     try:
         while True:
             try:
-                # Primary: collect via psutil directly
                 data = await loop.run_in_executor(_executor, _collect_system_metrics)
                 await websocket.send_json(data)
             except Exception as psutil_err:
-                # Fallback: try agent
-                if agent is not None:
-                    try:
-                        data = await agent.get_server_stats()
-                        await websocket.send_json(data)
-                    except Exception as agent_err:
-                        await websocket.send_json({
-                            "error": f"psutil: {psutil_err}; agent: {agent_err}"
-                        })
-                else:
-                    await websocket.send_json({"error": str(psutil_err)})
+                await websocket.send_json({"error": str(psutil_err)})
             await asyncio.sleep(2)
     except WebSocketDisconnect:
         pass

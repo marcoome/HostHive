@@ -487,15 +487,16 @@ async def apply_ssl_to_nginx(
     return {"ok": True, "warnings": warnings}
 
 
-async def install_custom_ssl(
+def _install_custom_ssl_blocking(
     domain: str,
     certificate: str,
     private_key: str,
-    chain: Optional[str] = None,
+    chain: Optional[str],
 ) -> dict:
-    """Save uploaded cert/key to disk.
+    """Synchronous, blocking implementation of install_custom_ssl.
 
-    Returns ``{"cert_path": ..., "key_path": ...}``.
+    Designed to run inside ``loop.run_in_executor()`` so the event loop
+    is never blocked by file-system I/O.
     """
     cert_dir = SSL_BASE_DIR / domain
     cert_dir.mkdir(parents=True, exist_ok=True)
@@ -516,6 +517,58 @@ async def install_custom_ssl(
     os.chmod(key_path, 0o600)
 
     return {"cert_path": str(cert_path), "key_path": str(key_path)}
+
+
+async def install_custom_ssl(
+    domain: str,
+    certificate: str,
+    private_key: str,
+    chain: Optional[str] = None,
+) -> dict:
+    """Save uploaded cert/key to disk.
+
+    Blocking file-system operations are executed in the default thread-pool
+    executor via ``asyncio.get_running_loop().run_in_executor()`` so the
+    FastAPI event loop stays responsive.
+
+    Returns ``{"cert_path": ..., "key_path": ...}``.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        _install_custom_ssl_blocking,
+        domain,
+        certificate,
+        private_key,
+        chain,
+    )
+
+
+async def parse_cert_expiry(cert_path: str) -> Optional["datetime"]:
+    """Return the ``notAfter`` date of an X.509 certificate.
+
+    Uses ``openssl x509 -enddate -noout`` directly (no agent). Returns
+    ``None`` if the file does not exist or openssl cannot parse it.
+    """
+    from datetime import datetime, timezone
+
+    if not Path(cert_path).is_file():
+        return None
+
+    rc, out, err = await _run(f"openssl x509 -enddate -noout -in {cert_path}")
+    if rc != 0 or "notAfter=" not in out:
+        logger.warning("openssl x509 failed for %s: %s", cert_path, err or out)
+        return None
+
+    # Output format: "notAfter=Mar 15 12:00:00 2027 GMT"
+    raw = out.split("notAfter=", 1)[1].strip()
+    try:
+        return datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z").replace(
+            tzinfo=timezone.utc,
+        )
+    except ValueError as exc:
+        logger.warning("Could not parse openssl date %r: %s", raw, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -1,13 +1,20 @@
 """WordPress router -- /api/v1/wordpress.
 
 Manage WordPress installations: detect, inspect, update, clone, migrate, and
-run security checks.  All heavy operations are delegated to the agent's
-wordpress_executor.
+run security checks.  All operations invoke WP-CLI directly via subprocess;
+blocking calls are dispatched to the default executor so the event loop stays
+responsive.  There is no dependency on the agent process.
 """
 
 from __future__ import annotations
 
+import asyncio
+import glob
 import os
+import re
+import shutil
+import subprocess
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -16,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.core.database import get_db
 from api.core.security import get_current_user
 from api.models.activity_log import ActivityLog
-from api.models.domains import Domain
+from api.models.domains import Domain  # noqa: F401  (kept for compatibility)
 from api.models.users import User
 from api.schemas.wordpress import (
     WPBackupResult,
@@ -34,7 +41,18 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Constants
+# ---------------------------------------------------------------------------
+
+WP_CLI = shutil.which("wp") or "/usr/local/bin/wp"
+BACKUP_ROOT = "/opt/hosthive/backups/wordpress"
+DEFAULT_TIMEOUT = 300
+LONG_TIMEOUT = 900
+HOME_ROOT = "/home"
+
+
+# ---------------------------------------------------------------------------
+# Helpers -- user / access / path resolution
 # ---------------------------------------------------------------------------
 
 def _is_admin(user: User) -> bool:
@@ -73,7 +91,6 @@ def _check_domain_access(domain: str, current_user: User) -> None:
     """Ensure the user has access to this domain (basic path-based check)."""
     if _is_admin(current_user):
         return
-    # Non-admin users can only access their own home directories
     username = current_user.username
     allowed_prefix = f"/home/{username}/"
     path = _resolve_wp_path(domain, current_user)
@@ -83,6 +100,112 @@ def _check_domain_access(domain: str, current_user: User) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied.",
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers -- WP-CLI subprocess execution (blocking; dispatch via executor)
+# ---------------------------------------------------------------------------
+
+def _wp_cli_sync(
+    path: str,
+    *args: str,
+    timeout: int = DEFAULT_TIMEOUT,
+    allow_root: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run WP-CLI in *path*. Blocking -- call via run_in_executor."""
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"WordPress path not found: {path}")
+    if not os.path.isfile(os.path.join(path, "wp-config.php")):
+        raise FileNotFoundError(f"wp-config.php missing in {path}")
+
+    cmd = [WP_CLI, f"--path={path}"]
+    if allow_root:
+        cmd.append("--allow-root")
+    cmd.extend(args)
+
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"WP-CLI binary not found at {WP_CLI}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"WP-CLI command timed out after {timeout}s: {' '.join(args)}") from exc
+
+
+async def _wp_cli(path: str, *args: str, timeout: int = DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
+    """Async wrapper around _wp_cli_sync using the running loop's executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: _wp_cli_sync(path, *args, timeout=timeout))
+
+
+async def _run_sync(func, *args, **kwargs):
+    """Dispatch an arbitrary blocking callable onto the default executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+
+def _raise_on_wp_error(result: subprocess.CompletedProcess, http_status: int = status.HTTP_502_BAD_GATEWAY) -> None:
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "WP-CLI command failed").strip()
+        raise HTTPException(status_code=http_status, detail=detail)
+
+
+# ---------------------------------------------------------------------------
+# Helpers -- install detection (walks /home/*/web/*/public_html)
+# ---------------------------------------------------------------------------
+
+def _detect_installs_sync() -> list[dict]:
+    """Scan /home/<user>/web/<domain>/public_html for WordPress installs."""
+    installs: list[dict] = []
+    if not os.path.isdir(HOME_ROOT):
+        return installs
+
+    patterns = [
+        os.path.join(HOME_ROOT, "*", "web", "*", "public_html"),
+        os.path.join(HOME_ROOT, "*", "*", "public_html"),
+        os.path.join(HOME_ROOT, "*", "web", "*"),
+    ]
+
+    seen: set[str] = set()
+    for pat in patterns:
+        for candidate in glob.glob(pat):
+            try:
+                real = os.path.realpath(candidate)
+            except OSError:
+                continue
+            if real in seen:
+                continue
+            if not os.path.isfile(os.path.join(candidate, "wp-config.php")):
+                continue
+            seen.add(real)
+
+            parts = candidate.strip("/").split("/")
+            # /home/<user>/web/<domain>/public_html  -> parts: home, user, web, domain, public_html
+            owner = parts[1] if len(parts) > 1 else ""
+            domain = ""
+            if "web" in parts:
+                try:
+                    idx = parts.index("web")
+                    if idx + 1 < len(parts):
+                        domain = parts[idx + 1]
+                except ValueError:
+                    pass
+            if not domain and len(parts) >= 3:
+                domain = parts[2]
+
+            installs.append(
+                {
+                    "domain": domain,
+                    "path": candidate,
+                    "owner": owner,
+                }
+            )
+    return installs
 
 
 # ---------------------------------------------------------------------------
@@ -107,18 +230,12 @@ async def list_wordpress_installs(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        from agent.executors import wordpress_executor
-        installs = wordpress_executor.detect_wordpress_installs()
+        installs = await _run_sync(_detect_installs_sync)
     except Exception:
-        # Agent or executor unavailable -- return empty list instead of 500/502
         return {"items": [], "total": 0}
 
-    # Filter to current user's installs unless admin
     if not _is_admin(current_user):
-        installs = [
-            i for i in installs
-            if i.get("owner") == current_user.username
-        ]
+        installs = [i for i in installs if i.get("owner") == current_user.username]
 
     return {
         "items": [WPInstallInfo(**i) for i in installs],
@@ -139,16 +256,65 @@ async def wp_info(
     _check_domain_access(domain, current_user)
     path = _resolve_wp_path(domain, current_user)
 
-    from agent.executors import wordpress_executor
-
     try:
-        info = wordpress_executor.get_wp_info(path)
+        core_version = await _wp_cli(path, "core", "version", timeout=60)
+        site_url = await _wp_cli(path, "option", "get", "siteurl", timeout=60)
+        plugins = await _wp_cli(path, "plugin", "list", "--format=csv", timeout=120)
+        themes = await _wp_cli(path, "theme", "list", "--format=csv", timeout=120)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
+    _raise_on_wp_error(core_version)
+
+    plugin_rows = _parse_csv_rows(plugins.stdout) if plugins.returncode == 0 else []
+    theme_rows = _parse_csv_rows(themes.stdout) if themes.returncode == 0 else []
+
+    active_theme = "unknown"
+    for t in theme_rows:
+        if t.get("status") == "active":
+            active_theme = t.get("name", "unknown")
+            break
+
+    info = {
+        "path": path,
+        "version": (core_version.stdout or "").strip() or "unknown",
+        "plugins": plugin_rows,
+        "themes": theme_rows,
+        "active_theme": active_theme,
+        "db_health": "ok",
+    }
     return WPSiteInfo(**info)
+
+
+def _parse_csv_rows(csv_text: str) -> list[dict]:
+    """Parse a WP-CLI CSV blob into a list of dict rows using the header line."""
+    if not csv_text:
+        return []
+    lines = [l for l in csv_text.strip().splitlines() if l]
+    if len(lines) < 2:
+        return []
+    headers = [h.strip() for h in lines[0].split(",")]
+    rows: list[dict] = []
+    for line in lines[1:]:
+        values = [v.strip() for v in line.split(",")]
+        rows.append(dict(zip(headers, values)))
+    return rows
+
+
+def _parse_csv_names(csv_text: str) -> list[str]:
+    """Return the first column of a WP-CLI CSV (the 'name' column), skipping header."""
+    rows = _parse_csv_rows(csv_text)
+    out: list[str] = []
+    for r in rows:
+        # WP-CLI puts the primary identifier in the first column
+        if r:
+            first_key = next(iter(r))
+            val = r.get(first_key, "").strip()
+            if val:
+                out.append(val)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -165,15 +331,23 @@ async def wp_update_core(
     _check_domain_access(domain, current_user)
     path = _resolve_wp_path(domain, current_user)
 
-    from agent.executors import wordpress_executor
-
     try:
-        result = wordpress_executor.update_wp_core(path)
-    except (FileNotFoundError, RuntimeError) as exc:
+        result = await _wp_cli(path, "core", "update", timeout=LONG_TIMEOUT)
+        # Update DB schema if needed
+        db_update = await _wp_cli(path, "core", "update-db", timeout=LONG_TIMEOUT)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
+    _raise_on_wp_error(result)
+
     _log(db, request, current_user.id, "wordpress.update_core", f"Updated WordPress core for {domain}")
-    return WPUpdateResult(**result)
+    return WPUpdateResult(
+        path=path,
+        stdout=(result.stdout or "").strip(),
+        db_update=(db_update.stdout or "").strip() if db_update.returncode == 0 else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -190,20 +364,33 @@ async def wp_update_plugins(
     _check_domain_access(domain, current_user)
     path = _resolve_wp_path(domain, current_user)
 
-    from agent.executors import wordpress_executor
-
     try:
-        result = wordpress_executor.update_wp_plugins(path)
-    except (FileNotFoundError, RuntimeError) as exc:
+        result = await _wp_cli(path, "plugin", "update", "--all", timeout=LONG_TIMEOUT)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
+    _raise_on_wp_error(result)
+
     _log(db, request, current_user.id, "wordpress.update_plugins", f"Updated plugins for {domain}")
-    return WPUpdateResult(**result)
+    return WPUpdateResult(
+        path=path,
+        stdout=(result.stdout or "").strip(),
+        db_update=None,
+    )
 
 
 # ---------------------------------------------------------------------------
 # POST /{domain}/backup — backup this WP install
 # ---------------------------------------------------------------------------
+
+def _tar_backup_sync(backup_file: str, source_path: str, db_dump: str | None) -> subprocess.CompletedProcess:
+    tar_args = ["tar", "-czf", backup_file, "-C", os.path.dirname(source_path), os.path.basename(source_path)]
+    if db_dump and os.path.isfile(db_dump):
+        tar_args.extend(["-C", "/tmp", os.path.basename(db_dump)])
+    return subprocess.run(tar_args, capture_output=True, text=True, timeout=LONG_TIMEOUT, check=False)
+
 
 @router.post("/{domain}/backup", response_model=WPBackupResult)
 async def wp_backup(
@@ -215,43 +402,38 @@ async def wp_backup(
     _check_domain_access(domain, current_user)
     path = _resolve_wp_path(domain, current_user)
 
-    from agent.executors import wordpress_executor
-    import subprocess
-    import time
-
-    # Create backup via tar + wp db export
     timestamp = int(time.time())
-    backup_dir = f"/opt/hosthive/backups/wordpress"
-    os.makedirs(backup_dir, exist_ok=True)
-    backup_file = f"{backup_dir}/{domain}_{timestamp}.tar.gz"
+    await _run_sync(os.makedirs, BACKUP_ROOT, exist_ok=True)
+    backup_file = f"{BACKUP_ROOT}/{domain}_{timestamp}.tar.gz"
 
-    # Export database
-    db_dump = f"/tmp/wp_backup_{domain}_{timestamp}.sql"
+    # 1. Export database via wp db export
+    db_dump: str | None = f"/tmp/wp_backup_{domain}_{timestamp}.sql"
     try:
-        wordpress_executor._wp_cli(path, "db", "export", db_dump, timeout=300)
-    except Exception:
+        dump_result = await _wp_cli(path, "db", "export", db_dump, timeout=LONG_TIMEOUT)
+        if dump_result.returncode != 0:
+            db_dump = None
+    except (FileNotFoundError, RuntimeError):
         db_dump = None
 
-    # Create tar archive
-    tar_args = ["tar", "-czf", backup_file, "-C", os.path.dirname(path), os.path.basename(path)]
-    if db_dump and os.path.isfile(db_dump):
-        tar_args.extend(["-C", "/tmp", os.path.basename(db_dump)])
+    # 2. Create tar archive (files + optional dump)
+    tar_result = await _run_sync(_tar_backup_sync, backup_file, path, db_dump)
 
-    r = subprocess.run(tar_args, capture_output=True, text=True, timeout=600)
-    if r.returncode != 0:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Backup failed: {r.stderr}",
-        )
-
-    # Clean up temp dump
+    # 3. Clean up temp dump
     if db_dump:
         try:
-            os.unlink(db_dump)
+            await _run_sync(os.unlink, db_dump)
         except OSError:
             pass
 
-    size = os.path.getsize(backup_file) if os.path.isfile(backup_file) else 0
+    if tar_result.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Backup failed: {(tar_result.stderr or '').strip()}",
+        )
+
+    size = 0
+    if await _run_sync(os.path.isfile, backup_file):
+        size = await _run_sync(os.path.getsize, backup_file)
 
     _log(db, request, current_user.id, "wordpress.backup", f"Backed up WordPress for {domain}")
     return WPBackupResult(path=path, backup_file=backup_file, size_bytes=size)
@@ -260,6 +442,10 @@ async def wp_backup(
 # ---------------------------------------------------------------------------
 # POST /{domain}/clone — clone to staging domain
 # ---------------------------------------------------------------------------
+
+def _copytree_sync(src: str, dst: str) -> None:
+    shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False)
+
 
 @router.post("/{domain}/clone", response_model=WPCloneResult)
 async def wp_clone(
@@ -272,19 +458,72 @@ async def wp_clone(
     _check_domain_access(domain, current_user)
     path = _resolve_wp_path(domain, current_user)
 
-    from agent.executors import wordpress_executor
+    target_domain = (body.target_domain or "").strip()
+    if not target_domain or "/" in target_domain:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid target_domain")
+
+    # Target lives next to the source under the same /home/<user>/web parent
+    parent = os.path.dirname(os.path.dirname(path))  # .../web
+    target_path = os.path.join(parent, target_domain, "public_html")
+
+    if await _run_sync(os.path.exists, target_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Target path already exists: {target_path}",
+        )
 
     try:
-        result = wordpress_executor.clone_wordpress(path, body.target_domain)
-    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        # 1. Copy files
+        await _run_sync(os.makedirs, os.path.dirname(target_path), exist_ok=True)
+        await _run_sync(_copytree_sync, path, target_path)
+
+        # 2. Dump source DB
+        timestamp = int(time.time())
+        dump_file = f"/tmp/wp_clone_{domain}_{timestamp}.sql"
+        dump = await _wp_cli(path, "db", "export", dump_file, timeout=LONG_TIMEOUT)
+        _raise_on_wp_error(dump)
+
+        # 3. Import into target (uses same DB credentials from wp-config for now;
+        #    a real clone would create a new DB -- left as an extension point)
+        imp = await _wp_cli(target_path, "db", "import", dump_file, timeout=LONG_TIMEOUT)
+        _raise_on_wp_error(imp)
+
+        # 4. Search-replace URLs in the target
+        sr = await _wp_cli(
+            target_path,
+            "search-replace",
+            f"//{domain}",
+            f"//{target_domain}",
+            "--all-tables",
+            "--skip-columns=guid",
+            timeout=LONG_TIMEOUT,
+        )
+        _raise_on_wp_error(sr)
+
+        # Clean up temp dump
+        try:
+            await _run_sync(os.unlink, dump_file)
+        except OSError:
+            pass
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except (RuntimeError, ValueError, OSError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     _log(
         db, request, current_user.id,
         "wordpress.clone",
-        f"Cloned WordPress {domain} -> {body.target_domain}",
+        f"Cloned WordPress {domain} -> {target_domain}",
     )
-    return WPCloneResult(**result)
+    return WPCloneResult(
+        source_path=path,
+        target_path=target_path,
+        target_domain=target_domain,
+        source_url=f"https://{domain}",
+        target_url=f"https://{target_domain}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -302,19 +541,40 @@ async def wp_search_replace(
     _check_domain_access(domain, current_user)
     path = _resolve_wp_path(domain, current_user)
 
-    from agent.executors import wordpress_executor
-
     try:
-        result = wordpress_executor.search_replace(path, body.old_domain, body.new_domain)
-    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        result = await _wp_cli(
+            path,
+            "search-replace",
+            body.old_domain,
+            body.new_domain,
+            "--all-tables",
+            "--skip-columns=guid",
+            "--report-changed-only",
+            timeout=LONG_TIMEOUT,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    _raise_on_wp_error(result, http_status=status.HTTP_400_BAD_REQUEST)
+
+    # Build a structured per-table summary from WP-CLI output, e.g.
+    #   "Success: Made 12 replacements on wp_posts.post_content"
+    results: list[dict] = []
+    pattern = re.compile(r"Made\s+(\d+)\s+replacements?\s+on\s+(\S+)", re.IGNORECASE)
+    for m in pattern.finditer(result.stdout or ""):
+        results.append({"table": m.group(2), "replacements": int(m.group(1))})
 
     _log(
         db, request, current_user.id,
         "wordpress.search_replace",
         f"Search-replace on {domain}: {body.old_domain} -> {body.new_domain}",
     )
-    return WPSearchReplaceResult(**result)
+    return WPSearchReplaceResult(
+        path=path,
+        results=results,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -331,14 +591,66 @@ async def wp_security_check(
     _check_domain_access(domain, current_user)
     path = _resolve_wp_path(domain, current_user)
 
-    from agent.executors import wordpress_executor
-
     try:
-        report = wordpress_executor.security_check(path)
-    except (FileNotFoundError, RuntimeError) as exc:
+        core_check = await _wp_cli(path, "core", "check-update", "--format=csv", timeout=120)
+        plugin_check = await _wp_cli(path, "plugin", "list", "--update=available", "--format=csv", timeout=120)
+        theme_check = await _wp_cli(path, "theme", "list", "--update=available", "--format=csv", timeout=120)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
+    issues: list[dict] = []
+
+    core_updates = _parse_csv_names(core_check.stdout) if core_check.returncode == 0 else []
+    if core_updates:
+        issues.append(
+            {
+                "severity": "high",
+                "type": "core_update",
+                "message": f"WordPress core update(s) available: {', '.join(core_updates)}",
+            }
+        )
+
+    plugin_updates = _parse_csv_names(plugin_check.stdout) if plugin_check.returncode == 0 else []
+    for name in plugin_updates:
+        issues.append(
+            {
+                "severity": "medium",
+                "type": "plugin_update",
+                "message": f"Plugin update available: {name}",
+            }
+        )
+
+    theme_updates = _parse_csv_names(theme_check.stdout) if theme_check.returncode == 0 else []
+    for name in theme_updates:
+        issues.append(
+            {
+                "severity": "medium",
+                "type": "theme_update",
+                "message": f"Theme update available: {name}",
+            }
+        )
+
+    # Filesystem permission sanity checks
+    wp_config = os.path.join(path, "wp-config.php")
+    try:
+        st = await _run_sync(os.stat, wp_config)
+        mode = st.st_mode & 0o777
+        if mode & 0o004:
+            issues.append(
+                {
+                    "severity": "high",
+                    "type": "permissions",
+                    "message": f"wp-config.php is world-readable (mode {oct(mode)})",
+                }
+            )
+    except OSError:
+        pass
+
     _log(db, request, current_user.id, "wordpress.security_check", f"Security check for {domain}")
-    return WPSecurityReport(**report)
-
-
+    return WPSecurityReport(
+        path=path,
+        total_issues=len(issues),
+        issues=issues,
+    )

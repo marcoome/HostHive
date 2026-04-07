@@ -135,9 +135,8 @@ def _direct_run_command(username: str, command: str) -> str:
 async def _sync_crontab(
     db: AsyncSession,
     user: User,
-    agent,
 ):
-    """Push the full crontab for a user. Tries agent first, falls back to direct."""
+    """Push the full crontab for a user using direct subprocess calls."""
     jobs = (await db.execute(
         select(CronJob).where(CronJob.user_id == user.id, CronJob.is_active.is_(True))
     )).scalars().all()
@@ -147,14 +146,6 @@ async def _sync_crontab(
         for j in jobs
     ]
 
-    # Try agent first
-    try:
-        await agent.set_crontab(user.username, entries)
-        return
-    except Exception as exc:
-        logger.warning("Agent error syncing crontab, falling back to direct: %s", exc)
-
-    # Direct fallback
     loop = asyncio.get_running_loop()
     if entries:
         await loop.run_in_executor(None, _direct_write_crontab, user.username, entries)
@@ -205,12 +196,11 @@ async def create_cron_job(
     db.add(job)
     await db.flush()
 
-    agent = request.app.state.agent
     try:
-        await _sync_crontab(db, current_user, agent)
+        await _sync_crontab(db, current_user)
     except Exception as exc:
-        # Non-fatal: job is saved in DB; agent sync will be retried on next change.
-        logger.warning("Agent error syncing crontab after create: %s", exc)
+        # Non-fatal: job is saved in DB; sync will be retried on next change.
+        logger.warning("Error syncing crontab after create: %s", exc)
 
     _log(db, request, current_user.id, "cron.create", f"Created cron job: {body.schedule} {body.command[:80]}")
     return CronJobResponse.model_validate(job)
@@ -246,11 +236,10 @@ async def update_cron_job(
     db.add(job)
     await db.flush()
 
-    agent = request.app.state.agent
     try:
-        await _sync_crontab(db, current_user, agent)
-    except Exception:
-        pass  # non-fatal; DB is source of truth
+        await _sync_crontab(db, current_user)
+    except Exception as exc:
+        logger.warning("Error syncing crontab after update: %s", exc)
 
     _log(db, request, current_user.id, "cron.update", f"Updated cron job {cron_id}")
     return CronJobResponse.model_validate(job)
@@ -272,11 +261,10 @@ async def delete_cron_job(
     await db.delete(job)
     await db.flush()
 
-    agent = request.app.state.agent
     try:
-        await _sync_crontab(db, current_user, agent)
-    except Exception:
-        pass
+        await _sync_crontab(db, current_user)
+    except Exception as exc:
+        logger.warning("Error syncing crontab after delete: %s", exc)
 
 
 # --------------------------------------------------------------------------
@@ -291,31 +279,19 @@ async def run_cron_now(
 ):
     job = await _get_cron_or_404(cron_id, db, current_user)
 
-    # Try agent first, fall back to direct execution
-    result = None
-    agent = request.app.state.agent
+    # Direct execution -- no agent proxy
     try:
-        result = await agent._request(
-            "POST",
-            "/cron/run",
-            json_body={"username": current_user.username, "command": job.command},
+        loop = asyncio.get_running_loop()
+        output = await loop.run_in_executor(
+            None, _direct_run_command, current_user.username, job.command,
         )
+        result = {"output": output}
     except Exception as exc:
-        logger.warning("Agent error running cron job, falling back to direct: %s", exc)
-
-    if result is None:
-        try:
-            loop = asyncio.get_running_loop()
-            output = await loop.run_in_executor(
-                None, _direct_run_command, current_user.username, job.command,
-            )
-            result = {"output": output}
-        except Exception as exc:
-            logger.error("Direct cron execution also failed: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to run cron job: {exc}",
-            )
+        logger.error("Direct cron execution failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to run cron job: {exc}",
+        )
 
     # Update last_run timestamp
     job.last_run = datetime.now(timezone.utc)
@@ -690,11 +666,10 @@ async def create_predefined_task(
     db.add(job)
     await db.flush()
 
-    agent = request.app.state.agent
     try:
-        await _sync_crontab(db, current_user, agent)
+        await _sync_crontab(db, current_user)
     except Exception as exc:
-        logger.warning("Agent error syncing crontab after predefined task create: %s", exc)
+        logger.warning("Error syncing crontab after predefined task create: %s", exc)
 
     _log(
         db, request, current_user.id, "cron.create_predefined",

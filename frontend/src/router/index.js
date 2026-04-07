@@ -233,6 +233,30 @@ const routes = [
         name: 'reseller-branding',
         component: () => import('@/views/ResellerBrandingView.vue'),
         meta: { reseller: true }
+      },
+      {
+        path: 'reseller/packages',
+        name: 'reseller-packages',
+        component: () => import('@/views/ResellerPackagesView.vue'),
+        meta: { reseller: true }
+      },
+      {
+        path: 'reseller/bandwidth',
+        name: 'reseller-bandwidth',
+        component: () => import('@/views/ResellerBandwidthView.vue'),
+        meta: { reseller: true }
+      },
+      {
+        path: 'reseller/billing',
+        name: 'reseller-billing',
+        component: () => import('@/views/ResellerBillingView.vue'),
+        meta: { reseller: true }
+      },
+      {
+        path: 'reseller/rate-limits',
+        name: 'reseller-rate-limits',
+        component: () => import('@/views/ResellerRateLimitsView.vue'),
+        meta: { reseller: true }
       }
     ]
   },

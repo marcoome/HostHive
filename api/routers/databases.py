@@ -1,9 +1,9 @@
 """Databases router -- /api/v1/databases.
 
 Supports MySQL/MariaDB and PostgreSQL.  Every mutating endpoint persists to the
-app database first, then tries the agent.  If the agent is unreachable or
-errors out, a *direct* subprocess fallback is attempted so the panel keeps
-working without a running agent.
+app database and then runs the operation directly via subprocess (sudo mysql /
+sudo -u postgres psql).  The agent on port 7080 is intentionally NOT used --
+the panel runs the commands itself so it works without a running agent.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import secrets
 import subprocess
 import uuid
 from functools import partial
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
@@ -93,7 +92,7 @@ def _validate_permissions(perms_str: str) -> str:
 
 
 # =====================================================================
-# Direct subprocess helpers (fallback when agent is unavailable)
+# Direct subprocess helpers (used by every mutating endpoint)
 # =====================================================================
 
 def _run_cmd(cmd: list[str], *, stdin_data: str | None = None, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -499,7 +498,7 @@ async def list_databases(
 
 
 # --------------------------------------------------------------------------
-# POST / -- create database (agent -> direct fallback)
+# POST / -- create database (direct subprocess, no agent)
 # --------------------------------------------------------------------------
 @router.post("", response_model=DatabaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_database(
@@ -525,46 +524,24 @@ async def create_database(
     db.add(record)
     await db.flush()
 
-    # 2. Try agent
-    agent = getattr(request.app.state, "agent", None)
-    provisioned = False
-    provision_error: Optional[str] = None
-
-    if agent is not None:
-        try:
-            await agent.create_database(
-                db_name=body.db_name,
-                db_user=body.db_user,
-                db_password=body.db_password,
-                db_type=body.db_type.value,
-            )
-            provisioned = True
-            logger.info("Database %s created via agent", body.db_name)
-        except Exception as exc:
-            provision_error = str(exc)
-            logger.warning("Agent failed to create database %s: %s", body.db_name, exc)
-
-    # 3. Fallback to direct subprocess
-    if not provisioned:
-        try:
-            await _direct_create(
-                db_name=body.db_name,
-                db_user=body.db_user,
-                db_password=body.db_password,
-                db_type=body.db_type.value,
-            )
-            provisioned = True
-            logger.info("Database %s created via direct command (fallback)", body.db_name)
-        except Exception as exc:
-            logger.error("Direct fallback also failed for %s: %s", body.db_name, exc)
-            # Roll back the app DB record since we could not provision
-            await db.delete(record)
-            await db.flush()
-            detail = f"Agent error: {provision_error}; Direct error: {exc}" if provision_error else str(exc)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to create database: {detail}",
-            )
+    # 2. Provision directly via subprocess (no agent proxy)
+    try:
+        await _direct_create(
+            db_name=body.db_name,
+            db_user=body.db_user,
+            db_password=body.db_password,
+            db_type=body.db_type.value,
+        )
+        logger.info("Database %s created via direct command", body.db_name)
+    except Exception as exc:
+        logger.error("Failed to create database %s: %s", body.db_name, exc)
+        # Roll back the app DB record since we could not provision
+        await db.delete(record)
+        await db.flush()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to create database: {exc}",
+        )
 
     _log(db, request, current_user.id, "databases.create", f"Created {body.db_type.value} database {body.db_name}")
     return DatabaseResponse.model_validate(record)
@@ -586,7 +563,7 @@ async def get_database(
 
 
 # --------------------------------------------------------------------------
-# DELETE /{id} -- delete database (agent -> direct fallback)
+# DELETE /{id} -- delete database (direct subprocess, no agent)
 # --------------------------------------------------------------------------
 @router.delete("/{db_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_database(
@@ -600,33 +577,16 @@ async def delete_database(
     db_user = record.db_user
     db_type = record.db_type.value
 
-    # Try agent first
-    agent = getattr(request.app.state, "agent", None)
-    deleted = False
-    delete_error: Optional[str] = None
-
-    if agent is not None:
-        try:
-            await agent.delete_database(db_name, db_user, db_type)
-            deleted = True
-            logger.info("Database %s deleted via agent", db_name)
-        except Exception as exc:
-            delete_error = str(exc)
-            logger.warning("Agent failed to delete database %s: %s", db_name, exc)
-
-    # Fallback to direct subprocess
-    if not deleted:
-        try:
-            await _direct_delete(db_name, db_user, db_type)
-            deleted = True
-            logger.info("Database %s deleted via direct command (fallback)", db_name)
-        except Exception as exc:
-            logger.error("Direct fallback also failed for %s: %s", db_name, exc)
-            detail = f"Agent error: {delete_error}; Direct error: {exc}" if delete_error else str(exc)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to delete database: {detail}",
-            )
+    # Drop directly via subprocess (no agent proxy)
+    try:
+        await _direct_delete(db_name, db_user, db_type)
+        logger.info("Database %s deleted via direct command", db_name)
+    except Exception as exc:
+        logger.error("Failed to delete database %s: %s", db_name, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to delete database: {exc}",
+        )
 
     _log(db, request, current_user.id, "databases.delete", f"Deleted database {db_name}")
     await db.delete(record)
@@ -634,7 +594,7 @@ async def delete_database(
 
 
 # --------------------------------------------------------------------------
-# POST /{id}/reset-password -- generate new password (agent -> direct fallback)
+# POST /{id}/reset-password -- generate new password (direct subprocess, no agent)
 # --------------------------------------------------------------------------
 @router.post("/{db_id}/reset-password", status_code=status.HTTP_200_OK)
 async def reset_database_password(
@@ -646,46 +606,20 @@ async def reset_database_password(
     record = await _get_db_or_404(db_id, db, current_user)
     new_password = secrets.token_urlsafe(24)
 
-    # Try agent first
-    agent = getattr(request.app.state, "agent", None)
-    reset_done = False
-    reset_error: Optional[str] = None
-
-    if agent is not None:
-        try:
-            await agent._request(
-                "POST",
-                "/database/reset-password",
-                json_body={
-                    "db_name": record.db_name,
-                    "db_user": record.db_user,
-                    "db_password": new_password,
-                    "db_type": record.db_type.value,
-                },
-            )
-            reset_done = True
-            logger.info("Password reset for %s via agent", record.db_name)
-        except Exception as exc:
-            reset_error = str(exc)
-            logger.warning("Agent failed to reset password for %s: %s", record.db_name, exc)
-
-    # Fallback to direct subprocess
-    if not reset_done:
-        try:
-            await _direct_reset_password(
-                db_user=record.db_user,
-                new_password=new_password,
-                db_type=record.db_type.value,
-            )
-            reset_done = True
-            logger.info("Password reset for %s via direct command (fallback)", record.db_name)
-        except Exception as exc:
-            logger.error("Direct fallback also failed for %s: %s", record.db_name, exc)
-            detail = f"Agent error: {reset_error}; Direct error: {exc}" if reset_error else str(exc)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to reset password: {detail}",
-            )
+    # Reset directly via subprocess (no agent proxy)
+    try:
+        await _direct_reset_password(
+            db_user=record.db_user,
+            new_password=new_password,
+            db_type=record.db_type.value,
+        )
+        logger.info("Password reset for %s via direct command", record.db_name)
+    except Exception as exc:
+        logger.error("Failed to reset password for %s: %s", record.db_name, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to reset password: {exc}",
+        )
 
     from api.core.config import settings
     record.db_password_encrypted = encrypt_value(new_password, settings.SECRET_KEY)

@@ -17,7 +17,10 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => !!tokens.value.access)
   const isAdmin = computed(() => user.value?.role === 'admin' && !impersonating.value)
+  // True for resellers AND admins (admins inherit reseller capabilities)
   const isReseller = computed(() => user.value?.role === 'reseller' || user.value?.role === 'admin')
+  // True ONLY for resellers (NOT admins). Use this to render reseller-exclusive UI.
+  const isResellerOnly = computed(() => user.value?.role === 'reseller')
 
   async function login(username, password) {
     const { data } = await client.post('/auth/login', { username, password })
@@ -164,6 +167,7 @@ export const useAuthStore = defineStore('auth', () => {
     isAuthenticated,
     isAdmin,
     isReseller,
+    isResellerOnly,
     impersonating,
     impersonatedUser,
     partialToken,

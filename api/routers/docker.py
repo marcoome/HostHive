@@ -4,6 +4,11 @@ Container management: deploy, start/stop/restart, remove, logs, stats.
 Docker Compose: deploy and validate.
 WebSocket: live container log streaming.
 
+This router talks to Docker DIRECTLY via the local `docker` CLI through
+``subprocess`` calls executed in a thread-pool (via
+``asyncio.run_in_executor``). It does NOT proxy through any agent on
+port 7080.
+
 Only available if Docker is installed on the server.
 """
 
@@ -11,9 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
 import uuid
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
+import yaml
 from fastapi import (
     APIRouter,
     Depends,
@@ -47,7 +58,61 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Subprocess helpers (run docker CLI in a thread-pool executor)
+# ---------------------------------------------------------------------------
+
+# Disallow shell metacharacters in identifiers we hand to ``docker``.
+_SAFE_IMAGE_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-:/@"
+)
+_SAFE_NAME_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+
+
+def _validate_image(image: str) -> None:
+    if not image or any(c not in _SAFE_IMAGE_CHARS for c in image):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid image reference: {image!r}",
+        )
+
+
+def _validate_name(name: str) -> None:
+    if not name or any(c not in _SAFE_NAME_CHARS for c in name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid container name: {name!r}",
+        )
+
+
+def _validate_container_id(cid: str) -> None:
+    # Docker container IDs are hex; names follow same rules as _SAFE_NAME_CHARS.
+    if not cid or any(c not in _SAFE_NAME_CHARS for c in cid):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid container id: {cid!r}",
+        )
+
+
+def _run_sync(cmd: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    """Synchronous subprocess wrapper. Always called via run_in_executor."""
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+async def _run_docker(cmd: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run a docker CLI command in a thread-pool executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: _run_sync(cmd, timeout))
+
+
+# ---------------------------------------------------------------------------
+# Misc helpers
 # ---------------------------------------------------------------------------
 
 def _is_admin(user: User) -> bool:
@@ -75,23 +140,29 @@ def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, de
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
 
 
-def _check_docker_available():
+async def _check_docker_available():
     """Raise 503 if Docker is not installed / accessible."""
-    import subprocess
-    try:
-        r = subprocess.run(
-            ["docker", "info"],
-            capture_output=True, text=True, timeout=10,
+    if shutil.which("docker") is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Docker is not installed on this server.",
         )
-        if r.returncode != 0:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Docker is not available on this server.",
-            )
+    try:
+        r = await _run_docker(["docker", "info"], timeout=10)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Docker did not respond in time.",
+        )
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Docker is not installed on this server.",
+        )
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Docker is not available on this server.",
         )
 
 
@@ -107,7 +178,7 @@ async def list_containers(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        _check_docker_available()
+        await _check_docker_available()
     except HTTPException:
         return {"items": [], "total": 0, "docker_available": False}
 
@@ -142,28 +213,65 @@ async def deploy_container(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
 
-    from agent.executors import docker_executor
+    _validate_image(body.image)
+    _validate_name(body.name)
 
-    try:
-        result = docker_executor.deploy_container(
-            image=body.image,
-            name=body.name,
-            ports=body.ports,
-            env=body.env,
-            volumes=body.volumes,
-            user=str(current_user.id),
+    cmd: List[str] = ["docker", "run", "-d", "--name", body.name, "--restart", "unless-stopped"]
+
+    # Port mappings: {host_port: container_port}
+    if body.ports:
+        for host_port, container_port in body.ports.items():
+            host_port_s = str(host_port).strip()
+            container_port_s = str(container_port).strip()
+            if not host_port_s.isdigit() or not container_port_s.replace("/tcp", "").replace("/udp", "").isdigit():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid port mapping {host_port_s}:{container_port_s}",
+                )
+            cmd.extend(["-p", f"{host_port_s}:{container_port_s}"])
+
+    # Environment variables: {KEY: VALUE}
+    if body.env:
+        for key, value in body.env.items():
+            if not key or "=" in key or "\n" in key:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid env var name: {key!r}",
+                )
+            cmd.extend(["-e", f"{key}={value}"])
+
+    # Volume mounts: {host_path: container_path}
+    if body.volumes:
+        for host_path, container_path in body.volumes.items():
+            if not host_path or not container_path or "\n" in host_path or "\n" in container_path:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid volume mount.",
+                )
+            cmd.extend(["-v", f"{host_path}:{container_path}"])
+
+    cmd.append(body.image)
+
+    r = await _run_docker(cmd, timeout=180)
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker run failed: {r.stderr.strip() or r.stdout.strip()}",
         )
-    except (ValueError, PermissionError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    container_cli_id = r.stdout.strip()
+    if not container_cli_id:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="docker run did not return a container id.",
+        )
 
     # Store in DB
     container = DockerContainer(
         user_id=current_user.id,
-        container_id=result["container_id"],
+        container_id=container_cli_id,
         name=body.name,
         image=body.image,
         ports_json=json.dumps(body.ports) if body.ports else None,
@@ -174,14 +282,6 @@ async def deploy_container(
     )
     db.add(container)
     await db.flush()
-
-    # Setup reverse proxy if domain is specified
-    if body.domain and body.ports:
-        try:
-            host_port = list(body.ports.keys())[0]
-            docker_executor.setup_nginx_proxy(body.domain, host_port)
-        except Exception:
-            pass  # non-fatal
 
     _log(db, request, current_user.id, "docker.deploy", f"Deployed container {body.name} ({body.image})")
     return ContainerResponse.model_validate(container)
@@ -212,15 +312,16 @@ async def start_container(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
     container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
 
-    from agent.executors import docker_executor
-
-    try:
-        docker_executor.start_container(container.container_id, user=str(current_user.id))
-    except (PermissionError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    r = await _run_docker(["docker", "start", container.container_id], timeout=60)
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker start failed: {r.stderr.strip() or r.stdout.strip()}",
+        )
 
     container.status = "running"
     db.add(container)
@@ -237,15 +338,16 @@ async def stop_container(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
     container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
 
-    from agent.executors import docker_executor
-
-    try:
-        docker_executor.stop_container(container.container_id, user=str(current_user.id))
-    except (PermissionError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    r = await _run_docker(["docker", "stop", container.container_id], timeout=60)
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker stop failed: {r.stderr.strip() or r.stdout.strip()}",
+        )
 
     container.status = "stopped"
     db.add(container)
@@ -262,15 +364,16 @@ async def restart_container(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
     container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
 
-    from agent.executors import docker_executor
-
-    try:
-        docker_executor.restart_container(container.container_id, user=str(current_user.id))
-    except (PermissionError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    r = await _run_docker(["docker", "restart", container.container_id], timeout=120)
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker restart failed: {r.stderr.strip() or r.stdout.strip()}",
+        )
 
     container.status = "running"
     db.add(container)
@@ -291,15 +394,17 @@ async def remove_container(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
     container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
 
-    from agent.executors import docker_executor
-
-    try:
-        docker_executor.remove_container(container.container_id, user=str(current_user.id))
-    except (PermissionError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    # Force remove (stops the container if running).
+    r = await _run_docker(["docker", "rm", "-f", container.container_id], timeout=60)
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker rm failed: {r.stderr.strip() or r.stdout.strip()}",
+        )
 
     _log(db, request, current_user.id, "docker.remove", f"Removed container {container.name}")
     await db.delete(container)
@@ -317,18 +422,22 @@ async def container_logs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
     container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
 
-    from agent.executors import docker_executor
-
-    try:
-        logs = docker_executor.get_container_logs(
-            container.container_id, lines=lines, user=str(current_user.id),
+    r = await _run_docker(
+        ["docker", "logs", "--tail", str(lines), container.container_id],
+        timeout=30,
+    )
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker logs failed: {r.stderr.strip()}",
         )
-    except (PermissionError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
+    # Combine stdout and stderr (docker writes container logs to both).
+    logs = (r.stdout or "") + (r.stderr or "")
     return ContainerLogsResponse(container_id=container.container_id, logs=logs)
 
 
@@ -342,17 +451,32 @@ async def container_stats(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
     container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
 
-    from agent.executors import docker_executor
-
-    try:
-        stats = docker_executor.get_container_stats(
-            container.container_id, user=str(current_user.id),
+    # --no-stream avoids the long-running streaming mode.
+    r = await _run_docker(
+        [
+            "docker", "stats", "--no-stream", "--format",
+            "{{json .}}",
+            container.container_id,
+        ],
+        timeout=30,
+    )
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker stats failed: {r.stderr.strip() or r.stdout.strip()}",
         )
-    except (PermissionError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    raw = (r.stdout or "").strip().splitlines()
+    stats: Dict[str, Any] = {}
+    if raw:
+        try:
+            stats = json.loads(raw[0])
+        except json.JSONDecodeError:
+            stats = {}
 
     return ContainerStatsResponse(
         container_id=container.container_id,
@@ -362,6 +486,23 @@ async def container_stats(
         memory_percent=stats.get("MemPerc"),
         network_io=stats.get("NetIO"),
         block_io=stats.get("BlockIO"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compose helpers
+# ---------------------------------------------------------------------------
+
+async def _compose_command_prefix() -> List[str]:
+    """Return ``docker compose`` if available, falling back to ``docker-compose``."""
+    r = await _run_docker(["docker", "compose", "version"], timeout=10)
+    if r.returncode == 0:
+        return ["docker", "compose"]
+    if shutil.which("docker-compose") is not None:
+        return ["docker-compose"]
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Docker Compose is not installed on this server.",
     )
 
 
@@ -376,18 +517,55 @@ async def compose_deploy(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _check_docker_available()
+    await _check_docker_available()
 
-    from agent.executors import docker_executor
-
+    # Validate YAML up front so we get a clean 400 instead of opaque CLI errors.
     try:
-        containers = docker_executor.deploy_compose(
-            compose_yaml=body.compose_yaml,
-            project_name=body.project_name,
-            user=str(current_user.id),
+        yaml.safe_load(body.compose_yaml)
+    except yaml.YAMLError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid compose YAML: {exc}",
         )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    compose_prefix = await _compose_command_prefix()
+
+    # Write compose YAML to a temp file owned by this process.
+    tmpdir = tempfile.mkdtemp(prefix=f"compose-{body.project_name}-")
+    compose_path = os.path.join(tmpdir, "docker-compose.yml")
+    try:
+        with open(compose_path, "w", encoding="utf-8") as f:
+            f.write(body.compose_yaml)
+
+        cmd = compose_prefix + [
+            "-f", compose_path,
+            "-p", body.project_name,
+            "up", "-d",
+        ]
+        r = await _run_docker(cmd, timeout=600)
+        if r.returncode != 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"docker compose up failed: {r.stderr.strip() or r.stdout.strip()}",
+            )
+
+        # List the containers that compose created so we can return them.
+        ps = await _run_docker(
+            compose_prefix + ["-f", compose_path, "-p", body.project_name, "ps", "--format", "{{json .}}"],
+            timeout=30,
+        )
+        containers: List[Dict[str, Any]] = []
+        if ps.returncode == 0:
+            for line in (ps.stdout or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    containers.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     _log(
         db, request, current_user.id,
@@ -411,7 +589,7 @@ async def compose_deploy_alias(
 ):
     # Check Docker availability with graceful fallback
     try:
-        _check_docker_available()
+        await _check_docker_available()
     except HTTPException:
         return {"detail": "Docker not available", "project_name": None, "containers": []}
 
@@ -428,11 +606,41 @@ async def compose_deploy_alias(
 
 @router.post("/compose/validate", response_model=ComposeValidateResponse)
 async def compose_validate(body: ComposeValidate):
-    _check_docker_available()
+    await _check_docker_available()
 
-    from agent.executors import docker_executor
+    errors: List[str] = []
 
-    errors = docker_executor.validate_compose(body.compose_yaml)
+    # Quick local syntax check.
+    try:
+        parsed = yaml.safe_load(body.compose_yaml)
+    except yaml.YAMLError as exc:
+        return ComposeValidateResponse(valid=False, errors=[f"YAML parse error: {exc}"])
+
+    if not isinstance(parsed, dict) or "services" not in parsed:
+        errors.append("compose file must define a top-level 'services' key")
+
+    # Use ``docker compose config`` for the authoritative check.
+    try:
+        compose_prefix = await _compose_command_prefix()
+    except HTTPException:
+        # No compose CLI -- fall back to local-only validation.
+        return ComposeValidateResponse(valid=len(errors) == 0, errors=errors)
+
+    tmpdir = tempfile.mkdtemp(prefix="compose-validate-")
+    compose_path = os.path.join(tmpdir, "docker-compose.yml")
+    try:
+        with open(compose_path, "w", encoding="utf-8") as f:
+            f.write(body.compose_yaml)
+
+        r = await _run_docker(
+            compose_prefix + ["-f", compose_path, "config", "--quiet"],
+            timeout=30,
+        )
+        if r.returncode != 0:
+            errors.append((r.stderr.strip() or r.stdout.strip() or "compose validation failed"))
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
     return ComposeValidateResponse(valid=len(errors) == 0, errors=errors)
 
 
@@ -489,8 +697,13 @@ async def ws_container_logs(
 
         docker_container_id = container.container_id
 
+    try:
+        _validate_container_id(docker_container_id)
+    except HTTPException:
+        await websocket.close(code=4000, reason="Invalid container id")
+        return
+
     # Stream logs using docker logs --follow via subprocess
-    import subprocess
     process = subprocess.Popen(
         ["docker", "logs", "--follow", "--tail", "50", docker_container_id],
         stdout=subprocess.PIPE,

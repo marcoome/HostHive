@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import logging
 import os
 import subprocess
@@ -424,7 +422,7 @@ async def get_backup_schedule(
 
 
 # --------------------------------------------------------------------------
-# POST /create -- trigger backup (agent -> direct fallback)
+# POST /create -- trigger backup (direct, no agent)
 # --------------------------------------------------------------------------
 @router.post("/create", status_code=status.HTTP_202_ACCEPTED)
 async def create_backup(
@@ -489,70 +487,49 @@ async def create_backup(
     db.add(backup)
     await db.flush()
 
-    # Try Celery/agent first
-    dispatched_via_agent = False
+    # Direct backup (no agent proxy)
     try:
-        from api.tasks.backup_tasks import create_user_backup
-        task = create_user_backup.delay(
-            str(current_user.id),
-            body.backup_type.value,
-            parent_path=parent_path,
-            backup_id=str(backup.id),
+        import functools
+        loop = asyncio.get_running_loop()
+        result_data = await loop.run_in_executor(
+            None,
+            functools.partial(
+                _direct_create_backup,
+                str(current_user.id),
+                current_user.username,
+                body.backup_type.value,
+                parent_path=parent_path,
+            ),
         )
-        dispatched_via_agent = True
-        _log(db, request, current_user.id, "backups.create", f"Triggered {body.backup_type.value} backup via agent")
+
+        # Incremental returns a 3-tuple (path, size, metadata)
+        if len(result_data) == 3:
+            file_path, size_bytes, meta = result_data
+            backup.backup_metadata = meta
+        else:
+            file_path, size_bytes = result_data
+
+        backup.status = BackupStatus.COMPLETED
+        backup.file_path = file_path
+        backup.size_bytes = size_bytes
+        db.add(backup)
+        await db.flush()
+
+        _log(db, request, current_user.id, "backups.create", f"Created {body.backup_type.value} backup directly")
         return {
-            "detail": "Backup task queued.",
-            "task_id": task.id,
+            "detail": "Backup created successfully.",
             "backup": BackupResponse.model_validate(backup),
         }
     except Exception as exc:
-        logger.warning("Celery/agent backup dispatch failed, falling back to direct: %s", exc)
-
-    # Direct backup fallback
-    if not dispatched_via_agent:
-        try:
-            import functools
-            loop = asyncio.get_running_loop()
-            result_data = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    _direct_create_backup,
-                    str(current_user.id),
-                    current_user.username,
-                    body.backup_type.value,
-                    parent_path=parent_path,
-                ),
-            )
-
-            # Incremental returns a 3-tuple (path, size, metadata)
-            if len(result_data) == 3:
-                file_path, size_bytes, meta = result_data
-                backup.backup_metadata = meta
-            else:
-                file_path, size_bytes = result_data
-
-            backup.status = BackupStatus.COMPLETED
-            backup.file_path = file_path
-            backup.size_bytes = size_bytes
-            db.add(backup)
-            await db.flush()
-
-            _log(db, request, current_user.id, "backups.create", f"Created {body.backup_type.value} backup directly")
-            return {
-                "detail": "Backup created successfully.",
-                "backup": BackupResponse.model_validate(backup),
-            }
-        except Exception as exc:
-            backup.status = BackupStatus.FAILED
-            backup.error_message = str(exc)[:1024]
-            db.add(backup)
-            await db.flush()
-            logger.error("Direct backup also failed for user %s: %s", current_user.id, exc)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Backup failed: {exc}",
-            )
+        backup.status = BackupStatus.FAILED
+        backup.error_message = str(exc)[:1024]
+        db.add(backup)
+        await db.flush()
+        logger.error("Direct backup failed for user %s: %s", current_user.id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Backup failed: {exc}",
+        )
 
 
 # --------------------------------------------------------------------------
@@ -569,7 +546,7 @@ async def create_backup_alias(
 
 
 # --------------------------------------------------------------------------
-# POST /{id}/restore -- restore backup via agent
+# POST /{id}/restore -- restore backup (direct, no agent)
 # --------------------------------------------------------------------------
 @router.post("/{backup_id}/restore", status_code=status.HTTP_200_OK)
 async def restore_backup(
@@ -594,36 +571,25 @@ async def restore_backup(
 
     options_dict = body.model_dump() if body else {}
 
-    # Try agent first, fall back to direct
-    restored = False
-    agent = request.app.state.agent
+    # Direct restore (no agent proxy)
     try:
-        result = await agent.restore_backup(
-            current_user.username, backup.file_path, restore_options=options_dict,
+        import functools
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            functools.partial(
+                _direct_restore_backup,
+                backup.file_path,
+                current_user.username,
+                restore_options=options_dict,
+            ),
         )
-        restored = True
     except Exception as exc:
-        logger.warning("Agent error restoring backup, falling back to direct: %s", exc)
-
-    if not restored:
-        try:
-            import functools
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                functools.partial(
-                    _direct_restore_backup,
-                    backup.file_path,
-                    current_user.username,
-                    restore_options=options_dict,
-                ),
-            )
-        except Exception as exc:
-            logger.error("Direct backup restore also failed: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to restore backup: {exc}",
-            )
+        logger.error("Direct backup restore failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to restore backup: {exc}",
+        )
 
     selected = [k.replace("restore_", "") for k, v in options_dict.items() if k.startswith("restore_") and v]
     _log(db, request, current_user.id, "backups.restore", f"Restored backup {backup_id} (components: {', '.join(selected) or 'all'})")
@@ -631,7 +597,7 @@ async def restore_backup(
 
 
 # --------------------------------------------------------------------------
-# DELETE /{id} -- delete backup file via agent
+# DELETE /{id} -- delete backup file (direct, no agent)
 # --------------------------------------------------------------------------
 @router.delete("/{backup_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_backup(
@@ -643,25 +609,12 @@ async def delete_backup(
     backup = await _get_backup_or_404(backup_id, db, current_user)
 
     if backup.file_path:
-        # Try agent first, fall back to direct file deletion
-        deleted_via_agent = False
-        agent = request.app.state.agent
+        # Direct file deletion (no agent proxy)
         try:
-            await agent._request(
-                "DELETE",
-                "/backup/file",
-                json_body={"file_path": backup.file_path},
-            )
-            deleted_via_agent = True
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _direct_delete_backup_file, backup.file_path)
         except Exception as exc:
-            logger.warning("Agent error deleting backup file, falling back to direct: %s", exc)
-
-        if not deleted_via_agent:
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, _direct_delete_backup_file, backup.file_path)
-            except Exception as exc:
-                logger.warning("Direct backup file deletion also failed: %s", exc)
+            logger.warning("Direct backup file deletion failed: %s", exc)
 
     _log(db, request, current_user.id, "backups.delete", f"Deleted backup {backup_id}")
     await db.delete(backup)
@@ -674,7 +627,7 @@ async def delete_backup(
 @router.get("/{backup_id}/download", status_code=status.HTTP_200_OK)
 async def download_backup(
     backup_id: uuid.UUID,
-    direct: bool = Query(False, description="Serve the file directly instead of a signed URL"),
+    direct: bool = Query(True, description="Serve the file directly (agent-based download is no longer supported)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -686,40 +639,18 @@ async def download_backup(
             detail="Backup is not available for download.",
         )
 
-    # Direct file serving (no agent needed)
-    if direct or not settings.AGENT_URL:
-        if not os.path.isfile(backup.file_path):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Backup file not found on disk.",
-            )
-        filename = os.path.basename(backup.file_path)
-        return FileResponse(
-            path=backup.file_path,
-            filename=filename,
-            media_type="application/gzip",
+    # Direct file serving only (no agent proxy)
+    if not os.path.isfile(backup.file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Backup file not found on disk.",
         )
-
-    # Generate a time-limited signed URL (agent-based download)
-    expires = int(time.time()) + 3600  # 1 hour
-    payload = f"{backup.file_path}:{expires}"
-    signature = hmac.new(
-        settings.SECRET_KEY.encode(),
-        payload.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-
-    download_url = (
-        f"{settings.AGENT_URL}/backup/download"
-        f"?path={backup.file_path}&expires={expires}&sig={signature}"
+    filename = os.path.basename(backup.file_path)
+    return FileResponse(
+        path=backup.file_path,
+        filename=filename,
+        media_type="application/gzip",
     )
-
-    return {
-        "download_url": download_url,
-        "expires_in": 3600,
-        "file_path": backup.file_path,
-        "size_bytes": backup.size_bytes,
-    }
 
 
 # --------------------------------------------------------------------------

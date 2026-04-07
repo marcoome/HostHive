@@ -65,7 +65,14 @@
     "external": "External",
     "translations": "Translations",
     "waf": "WAF",
-    "ip_manager": "IP Manager"
+    "ip_manager": "IP Manager",
+    "reseller_dashboard": "Reseller Dashboard",
+    "my_users": "My Users",
+    "my_packages": "My Packages",
+    "branding": "Branding",
+    "bandwidth": "Bandwidth & Usage",
+    "billing": "Billing",
+    "rate_limits": "Rate Limits"
   },
   "translations": {
     "title": "Translation Manager",

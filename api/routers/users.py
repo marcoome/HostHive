@@ -1,7 +1,18 @@
-"""Users router -- /api/v1/users (admin only)."""
+"""Users router -- /api/v1/users (admin only).
+
+System-user lifecycle (useradd / userdel / usermod / passwd) is performed
+directly via subprocess on the local host -- this router does NOT proxy to
+the privileged agent on port 7080. Blocking subprocess calls are dispatched
+to the default executor via ``asyncio.get_running_loop().run_in_executor``
+so the FastAPI event loop is never blocked.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import shutil
+import subprocess
 import uuid
 from typing import Optional
 
@@ -17,15 +28,155 @@ from api.models.databases import Database
 from api.models.domains import Domain
 from api.models.email_accounts import EmailAccount
 from api.models.ftp_accounts import FtpAccount
-from api.models.packages import Package
+from api.models.packages import Package, PackageType
 from api.models.users import User, UserRole
 from api.schemas.databases import DatabaseResponse
 from api.schemas.domains import DomainResponse
 from api.schemas.users import UserCreate, UserListResponse, UserResponse, UserUpdate
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 _admin = require_role("admin")
+
+
+# --------------------------------------------------------------------------
+# Subprocess helpers (no agent -- run locally, off the event loop)
+# --------------------------------------------------------------------------
+
+def _run_cmd_sync(
+    argv: list[str],
+    *,
+    input_text: Optional[str] = None,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess:
+    """Blocking subprocess.run wrapper. Always invoked from a thread."""
+    return subprocess.run(  # noqa: S603 -- argv is constructed, never shell=True
+        argv,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+async def _run_cmd(
+    argv: list[str],
+    *,
+    input_text: Optional[str] = None,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess:
+    """Run a system command in the default thread executor.
+
+    The whole point of this router refactor: every privileged user-management
+    operation goes through this helper instead of being proxied to the agent.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: _run_cmd_sync(argv, input_text=input_text, timeout=timeout),
+    )
+
+
+def _which(binary: str) -> Optional[str]:
+    return shutil.which(binary)
+
+
+async def _system_user_exists(username: str) -> bool:
+    """Return True if the given system account exists in /etc/passwd."""
+    proc = await _run_cmd(["id", "-u", username], timeout=5)
+    return proc.returncode == 0
+
+
+async def _useradd(username: str, password: str) -> None:
+    """Create a Linux account with /home/<user> and set its password.
+
+    Idempotent: if the account already exists we still (re)set the password.
+    """
+    if not _which("useradd"):
+        # Dev environments (macOS, containers without shadow-utils) -- skip
+        # silently so the API row is still created.
+        logger.warning(
+            "useradd not available on this host; skipping system account "
+            "creation for user %s",
+            username,
+        )
+        return
+
+    if not await _system_user_exists(username):
+        proc = await _run_cmd(
+            [
+                "useradd",
+                "-m",
+                "-d", f"/home/{username}",
+                "-s", "/usr/sbin/nologin",
+                username,
+            ],
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"useradd failed: {proc.stderr.strip() or proc.stdout.strip()}",
+            )
+
+    # Set the password via chpasswd (reads "user:pass" on stdin)
+    if _which("chpasswd"):
+        proc = await _run_cmd(
+            ["chpasswd"],
+            input_text=f"{username}:{password}\n",
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "chpasswd failed for %s: %s",
+                username,
+                proc.stderr.strip() or proc.stdout.strip(),
+            )
+    elif _which("passwd"):
+        # Fallback: passwd --stdin (RHEL-family) or interactive form.
+        proc = await _run_cmd(
+            ["passwd", "--stdin", username],
+            input_text=f"{password}\n",
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "passwd failed for %s: %s",
+                username,
+                proc.stderr.strip() or proc.stdout.strip(),
+            )
+
+
+async def _userdel(username: str) -> None:
+    """Remove a Linux account along with its home directory and mail spool.
+
+    Best-effort: failures are logged but not raised so the DB row is always
+    cleaned up alongside the system user.
+    """
+    if not _which("userdel"):
+        logger.warning(
+            "userdel not available on this host; skipping system account "
+            "removal for user %s",
+            username,
+        )
+        return
+
+    if not await _system_user_exists(username):
+        return
+
+    proc = await _run_cmd(
+        ["userdel", "-r", "-f", username],
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        logger.warning(
+            "userdel failed for %s: %s",
+            username,
+            proc.stderr.strip() or proc.stdout.strip(),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -55,6 +206,73 @@ def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, de
         details=details,
         ip_address=client_ip,
     ))
+
+
+# --------------------------------------------------------------------------
+# Package <-> role compatibility
+# --------------------------------------------------------------------------
+
+def _expected_package_type(role: UserRole) -> Optional[PackageType]:
+    """Return which PackageType is allowed for the given role.
+
+    - reseller -> reseller-type package required
+    - user     -> user-type package required
+    - admin    -> no package needed; None means "no constraint"
+    """
+    if role == UserRole.RESELLER:
+        return PackageType.RESELLER
+    if role == UserRole.USER:
+        return PackageType.USER
+    return None
+
+
+async def _resolve_and_validate_package(
+    db: AsyncSession,
+    package_id: Optional[uuid.UUID],
+    role: UserRole,
+) -> Optional[Package]:
+    """Look up the package and ensure its type matches the user role.
+
+    - For ``reseller`` and ``user`` roles a package_id is REQUIRED.
+    - For ``admin`` the package_id is optional and unconstrained.
+    - Raises HTTP 400 / 404 on mismatch.
+    """
+    expected = _expected_package_type(role)
+
+    if expected is None:
+        # admin: optional, no constraint
+        if package_id is None:
+            return None
+        result = await db.execute(select(Package).where(Package.id == package_id))
+        return result.scalar_one_or_none()
+
+    if package_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"A {expected.value}-type package is required when creating "
+                f"a {role.value} account."
+            ),
+        )
+
+    result = await db.execute(select(Package).where(Package.id == package_id))
+    pkg = result.scalar_one_or_none()
+    if pkg is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package not found.",
+        )
+
+    if pkg.package_type != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Package '{pkg.name}' is a {pkg.package_type.value}-type package "
+                f"and cannot be assigned to a {role.value} account "
+                f"(expected {expected.value}-type)."
+            ),
+        )
+    return pkg
 
 
 # --------------------------------------------------------------------------
@@ -116,6 +334,9 @@ async def create_user(
             detail="Username or email already exists.",
         )
 
+    # Validate package_type matches role and resolve the package row.
+    pkg = await _resolve_and_validate_package(db, body.package_id, body.role)
+
     user = User(
         username=body.username,
         email=body.email,
@@ -126,7 +347,16 @@ async def create_user(
     db.add(user)
     await db.flush()
 
-    # Create user home directory structure
+    # If this is a reseller, materialize / sync ResellerLimit from the
+    # reseller-type package's allocation fields.
+    if body.role == UserRole.RESELLER and pkg is not None:
+        from api.routers.packages import sync_reseller_limit_from_package
+        await sync_reseller_limit_from_package(db, user.id, pkg)
+
+    # Create the matching Linux account locally (no agent proxy)
+    await _useradd(body.username, body.password)
+
+    # Create user home directory structure (useradd already made /home/<user>)
     import os
     home_dir = f"/home/{body.username}"
     for subdir in ["", "web", "logs", "tmp", "backups"]:
@@ -137,14 +367,18 @@ async def create_user(
             pass
 
     # Apply shell settings from the assigned package
-    if body.package_id:
-        pkg_result = await db.execute(select(Package).where(Package.id == body.package_id))
-        pkg = pkg_result.scalar_one_or_none()
-        if pkg:
-            from api.routers.packages import _apply_shell_for_user
-            await _apply_shell_for_user(body.username, pkg.shell_access, pkg.shell_type)
+    if pkg is not None:
+        from api.routers.packages import _apply_shell_for_user
+        await _apply_shell_for_user(body.username, pkg.shell_access, pkg.shell_type)
 
-    _log(db, request, admin.id, "users.create", f"Created user {body.username}")
+    _log(
+        db,
+        request,
+        admin.id,
+        "users.create",
+        f"Created {body.role.value} {body.username}"
+        + (f" on package {pkg.name}" if pkg else ""),
+    )
     return UserResponse.model_validate(user)
 
 
@@ -255,46 +489,37 @@ async def delete_user(
     admin: User = Depends(_admin),
 ):
     user = await _get_user_or_404(user_id, db)
-    agent = request.app.state.agent
 
-    # Clean up remote resources via agent
-    domains = (await db.execute(
-        select(Domain).where(Domain.user_id == user_id)
-    )).scalars().all()
-    for domain in domains:
-        try:
-            await agent.delete_vhost(domain.domain_name)
-        except Exception:
-            pass  # best-effort cleanup
+    # Snapshot related resource counts purely for the audit log -- the
+    # actual on-disk cleanup happens via `userdel -r` which removes the
+    # entire /home/<user> tree (web roots, mail dirs, ftp roots, etc.).
+    domain_count = (await db.execute(
+        select(func.count()).select_from(Domain).where(Domain.user_id == user_id)
+    )).scalar() or 0
+    db_count = (await db.execute(
+        select(func.count()).select_from(Database).where(Database.user_id == user_id)
+    )).scalar() or 0
+    email_count = (await db.execute(
+        select(func.count()).select_from(EmailAccount).where(EmailAccount.user_id == user_id)
+    )).scalar() or 0
+    ftp_count = (await db.execute(
+        select(func.count()).select_from(FtpAccount).where(FtpAccount.user_id == user_id)
+    )).scalar() or 0
 
-    databases = (await db.execute(
-        select(Database).where(Database.user_id == user_id)
-    )).scalars().all()
-    for database in databases:
-        try:
-            await agent.delete_database(database.db_name, database.db_user, database.db_type.value)
-        except Exception:
-            pass
+    # Remove the Linux account + home directory locally (no agent proxy)
+    await _userdel(user.username)
 
-    emails = (await db.execute(
-        select(EmailAccount).where(EmailAccount.user_id == user_id)
-    )).scalars().all()
-    for email_acct in emails:
-        try:
-            await agent.delete_mailbox(email_acct.address)
-        except Exception:
-            pass
-
-    ftp_accounts = (await db.execute(
-        select(FtpAccount).where(FtpAccount.user_id == user_id)
-    )).scalars().all()
-    for ftp in ftp_accounts:
-        try:
-            await agent.delete_ftp_account(ftp.username)
-        except Exception:
-            pass
-
-    _log(db, request, admin.id, "users.delete", f"Deleted user {user.username} and all resources")
+    _log(
+        db,
+        request,
+        admin.id,
+        "users.delete",
+        (
+            f"Deleted user {user.username} "
+            f"(domains={domain_count}, databases={db_count}, "
+            f"emails={email_count}, ftp={ftp_count})"
+        ),
+    )
 
     await db.delete(user)
     await db.flush()

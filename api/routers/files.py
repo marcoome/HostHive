@@ -3,23 +3,28 @@
 SECURITY: All paths are sandboxed within /home/{username}/ to prevent
 path traversal attacks. Every path is resolved and validated before use.
 
-LOCAL FALLBACK: Every file operation first attempts to use the agent
-(port 7080). If the agent is unreachable or returns an error, the
-endpoint falls back to direct filesystem operations using Python's
-os / shutil / stat modules. This ensures the File Manager remains
-functional even when the agent process is down.
+LOCAL EXECUTION: All file operations run directly against the local
+filesystem using Python's os / pathlib / shutil / tarfile / zipfile /
+subprocess modules. Blocking I/O is offloaded to a thread executor via
+asyncio.get_running_loop().run_in_executor() so the event loop is not
+blocked.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime
 import os
+import pathlib
 import posixpath
 import pwd
 import shutil
 import stat
+import subprocess
+import tarfile
 import uuid
+import zipfile
 
 from fastapi import (
     APIRouter,
@@ -41,6 +46,19 @@ from api.models.users import User
 from api.schemas.files import FileItem, FileListResponse, FileWriteRequest
 
 router = APIRouter()
+
+
+# --------------------------------------------------------------------------
+# Async helper -- run blocking calls in the default thread executor
+# --------------------------------------------------------------------------
+
+async def _run_blocking(func, *args, **kwargs):
+    """Run a blocking callable in the default thread executor."""
+    loop = asyncio.get_running_loop()
+    if kwargs:
+        from functools import partial
+        return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+    return await loop.run_in_executor(None, func, *args)
 
 
 # --------------------------------------------------------------------------
@@ -187,6 +205,231 @@ def _local_write_file(filepath: str, content: str, encoding: str = "utf-8") -> N
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Permission denied: {filepath}")
 
 
+def _local_mkdir(path: str) -> None:
+    try:
+        os.makedirs(path, exist_ok=True)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied creating directory: {path}",
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating directory: {exc}",
+        )
+
+
+def _local_rename(old: str, new: str) -> None:
+    if not os.path.exists(old):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source path not found: {old}",
+        )
+    try:
+        os.rename(old, new)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied renaming {old}",
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error renaming: {exc}",
+        )
+
+
+def _local_delete(path: str) -> None:
+    if not os.path.exists(path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Path not found: {path}",
+        )
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+    except PermissionError:
+        # Try with sudo as a last resort
+        try:
+            subprocess.run(["sudo", "rm", "-rf", path], check=True, timeout=10)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied deleting {path}",
+            )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting: {exc}",
+        )
+
+
+def _local_chmod(path: str, permissions: str) -> None:
+    if not os.path.exists(path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Path not found: {path}",
+        )
+    try:
+        mode = int(permissions, 8)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid permission string: {exc}",
+        )
+    try:
+        os.chmod(path, mode)
+    except PermissionError:
+        # Try sudo chmod as a fallback for files outside the user's writable area
+        try:
+            subprocess.run(
+                ["sudo", "chmod", permissions, path],
+                check=True,
+                timeout=10,
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied changing permissions on {path}",
+            )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error changing permissions: {exc}",
+        )
+
+
+def _local_compress(paths: list[str], destination: str) -> None:
+    """Compress *paths* into *destination*. Format inferred from extension."""
+    dest = pathlib.Path(destination)
+    parent = dest.parent
+    if not parent.exists():
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied creating parent dir: {parent}",
+            )
+
+    suffix = "".join(dest.suffixes).lower()
+    try:
+        if suffix.endswith(".zip"):
+            with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
+                for src in paths:
+                    src_path = pathlib.Path(src)
+                    if not src_path.exists():
+                        continue
+                    if src_path.is_dir():
+                        for sub in src_path.rglob("*"):
+                            arcname = sub.relative_to(src_path.parent)
+                            zf.write(sub, arcname)
+                    else:
+                        zf.write(src_path, src_path.name)
+        elif suffix.endswith((".tar.gz", ".tgz")):
+            with tarfile.open(destination, "w:gz") as tf:
+                for src in paths:
+                    src_path = pathlib.Path(src)
+                    if src_path.exists():
+                        tf.add(src_path, arcname=src_path.name)
+        elif suffix.endswith((".tar.bz2", ".tbz2")):
+            with tarfile.open(destination, "w:bz2") as tf:
+                for src in paths:
+                    src_path = pathlib.Path(src)
+                    if src_path.exists():
+                        tf.add(src_path, arcname=src_path.name)
+        elif suffix.endswith(".tar"):
+            with tarfile.open(destination, "w") as tf:
+                for src in paths:
+                    src_path = pathlib.Path(src)
+                    if src_path.exists():
+                        tf.add(src_path, arcname=src_path.name)
+        else:
+            # Default to zip
+            with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
+                for src in paths:
+                    src_path = pathlib.Path(src)
+                    if not src_path.exists():
+                        continue
+                    if src_path.is_dir():
+                        for sub in src_path.rglob("*"):
+                            arcname = sub.relative_to(src_path.parent)
+                            zf.write(sub, arcname)
+                    else:
+                        zf.write(src_path, src_path.name)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied writing archive: {destination}",
+        )
+    except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error compressing: {exc}",
+        )
+
+
+def _local_extract(archive_path: str, destination: str) -> None:
+    """Extract an archive to *destination* using zipfile / tarfile."""
+    if not os.path.exists(archive_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Archive not found: {archive_path}",
+        )
+    dest = pathlib.Path(destination)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied creating destination: {destination}",
+        )
+
+    lower = archive_path.lower()
+    try:
+        if zipfile.is_zipfile(archive_path):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                # Guard against path traversal in archive members
+                for member in zf.namelist():
+                    member_path = (dest / member).resolve()
+                    if not str(member_path).startswith(str(dest.resolve())):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Unsafe path in archive: {member}",
+                        )
+                zf.extractall(destination)
+        elif tarfile.is_tarfile(archive_path):
+            with tarfile.open(archive_path, "r:*") as tf:
+                for member in tf.getmembers():
+                    member_path = (dest / member.name).resolve()
+                    if not str(member_path).startswith(str(dest.resolve())):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Unsafe path in archive: {member.name}",
+                        )
+                tf.extractall(destination)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported archive format: {lower}",
+            )
+    except HTTPException:
+        raise
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied extracting to {destination}",
+        )
+    except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error extracting: {exc}",
+        )
+
+
 # --------------------------------------------------------------------------
 # Request body models
 # --------------------------------------------------------------------------
@@ -234,19 +477,24 @@ async def get_file_tree(
     elif path == "/" and _is_admin(current_user):
         path = "/home"
     safe = _resolve_path(current_user, path)
-    tree: list[dict] = []
-    try:
-        for entry in os.scandir(safe):
-            node: dict = {
-                "name": entry.name,
-                "path": os.path.join(safe, entry.name),
-                "is_dir": entry.is_dir(),
-            }
-            if entry.is_dir():
-                node["children"] = []  # Lazy load
-            tree.append(node)
-    except Exception:
-        pass
+
+    def _scan() -> list[dict]:
+        out: list[dict] = []
+        try:
+            for entry in os.scandir(safe):
+                node: dict = {
+                    "name": entry.name,
+                    "path": os.path.join(safe, entry.name),
+                    "is_dir": entry.is_dir(),
+                }
+                if entry.is_dir():
+                    node["children"] = []  # Lazy load
+                out.append(node)
+        except Exception:
+            pass
+        return out
+
+    tree = await _run_blocking(_scan)
     return {"path": safe, "children": tree}
 
 
@@ -260,29 +508,19 @@ async def list_files(
     current_user: User = Depends(get_current_user),
 ):
     safe = _resolve_path(current_user, path)
-    agent = request.app.state.agent
 
-    # --- Try agent first ---
-    try:
-        result = await agent.list_files(safe)
-        return FileListResponse(
-            path=safe,
-            items=result.get("items", []),
-            total=len(result.get("items", [])),
-        )
-    except Exception:
-        pass
+    def _do() -> list[dict]:
+        # Create user home directory if it doesn't exist
+        if not os.path.exists(safe):
+            try:
+                os.makedirs(safe, mode=0o755, exist_ok=True)
+            except OSError:
+                pass
+        if not os.path.exists(safe):
+            return []
+        return _local_list_files(safe)
 
-    # --- Fallback: local filesystem ---
-    # Create user home directory if it doesn't exist
-    if not os.path.exists(safe):
-        try:
-            os.makedirs(safe, mode=0o755, exist_ok=True)
-        except OSError:
-            pass
-    if not os.path.exists(safe):
-        return FileListResponse(path=safe, items=[], total=0)
-    items = _local_list_files(safe)
+    items = await _run_blocking(_do)
     return FileListResponse(path=safe, items=items, total=len(items))
 
 
@@ -305,17 +543,7 @@ async def upload_file(
 
     content = await file.read()
 
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        # Try UTF-8 for text files, fall back to base64 for binary
-        try:
-            text_content = content.decode("utf-8")
-        except UnicodeDecodeError:
-            text_content = base64.b64encode(content).decode("ascii")
-        await agent.write_file(safe_dest, text_content)
-    except Exception:
-        # --- Fallback: local filesystem ---
+    def _write() -> None:
         try:
             os.makedirs(safe_dir, exist_ok=True)
             with open(safe_dest, "wb") as fh:
@@ -331,6 +559,8 @@ async def upload_file(
                 detail=f"Error uploading file: {exc}",
             )
 
+    await _run_blocking(_write)
+
     _log(db, request, current_user.id, "files.upload", f"Uploaded {file.filename} to {safe_dir}")
     return {"detail": "File uploaded.", "path": safe_dest}
 
@@ -345,21 +575,7 @@ async def download_file(
     current_user: User = Depends(get_current_user),
 ):
     safe = _resolve_path(current_user, path)
-
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        result = await agent.read_file(safe)
-        return {
-            "path": safe,
-            "content": result.get("content", ""),
-            "encoding": result.get("encoding", "utf-8"),
-        }
-    except Exception:
-        pass
-
-    # --- Fallback: local filesystem ---
-    result = _local_read_file(safe)
+    result = await _run_blocking(_local_read_file, safe)
     return {
         "path": safe,
         "content": result["content"],
@@ -378,26 +594,7 @@ async def create_directory(
     current_user: User = Depends(get_current_user),
 ):
     safe = _resolve_path(current_user, body.path)
-
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        await agent._request("POST", "/files/mkdir", json_body={"path": safe})
-    except Exception:
-        # --- Fallback: local filesystem ---
-        try:
-            os.makedirs(safe, exist_ok=True)
-        except PermissionError:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Permission denied creating directory: {safe}",
-            )
-        except OSError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error creating directory: {exc}",
-            )
-
+    await _run_blocking(_local_mkdir, safe)
     _log(db, request, current_user.id, "files.create_dir", f"Created directory {safe}")
     return {"detail": "Directory created.", "path": safe}
 
@@ -414,35 +611,7 @@ async def rename_file(
 ):
     safe_old = _resolve_path(current_user, body.old_path)
     safe_new = _resolve_path(current_user, body.new_path)
-
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        await agent._request(
-            "POST",
-            "/files/rename",
-            json_body={"old_path": safe_old, "new_path": safe_new},
-        )
-    except Exception:
-        # --- Fallback: local filesystem ---
-        if not os.path.exists(safe_old):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Source path not found: {safe_old}",
-            )
-        try:
-            os.rename(safe_old, safe_new)
-        except PermissionError:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Permission denied renaming {safe_old}",
-            )
-        except OSError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error renaming: {exc}",
-            )
-
+    await _run_blocking(_local_rename, safe_old, safe_new)
     _log(db, request, current_user.id, "files.rename", f"Renamed {safe_old} -> {safe_new}")
     return {"detail": "Renamed.", "old_path": safe_old, "new_path": safe_new}
 
@@ -458,39 +627,7 @@ async def delete_file(
     current_user: User = Depends(get_current_user),
 ):
     safe = _resolve_path(current_user, body.path)
-
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        await agent._request("DELETE", "/files", json_body={"path": safe})
-    except Exception:
-        # --- Fallback: local filesystem ---
-        if not os.path.exists(safe):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Path not found: {safe}",
-            )
-        try:
-            if os.path.isdir(safe):
-                shutil.rmtree(safe)
-            else:
-                os.remove(safe)
-        except PermissionError:
-            # Try with sudo
-            import subprocess
-            try:
-                subprocess.run(["sudo", "rm", "-rf", safe], check=True, timeout=10)
-            except Exception:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Permission denied deleting {safe}",
-                )
-        except OSError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error deleting: {exc}",
-            )
-
+    await _run_blocking(_local_delete, safe)
     _log(db, request, current_user.id, "files.delete", f"Deleted {safe}")
 
 
@@ -504,17 +641,7 @@ async def read_file(
     current_user: User = Depends(get_current_user),
 ):
     safe = _resolve_path(current_user, path)
-
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        result = await agent.read_file(safe)
-        return {"path": safe, "content": result.get("content", "")}
-    except Exception:
-        pass
-
-    # --- Fallback: local filesystem ---
-    result = _local_read_file(safe)
+    result = await _run_blocking(_local_read_file, safe)
     return {"path": safe, "content": result["content"]}
 
 
@@ -529,15 +656,8 @@ async def write_file(
     current_user: User = Depends(get_current_user),
 ):
     safe = _resolve_path(current_user, body.path)
-
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        await agent.write_file(safe, body.content)
-    except Exception:
-        # --- Fallback: local filesystem ---
-        _local_write_file(safe, body.content, body.encoding)
-
+    encoding = getattr(body, "encoding", "utf-8") or "utf-8"
+    await _run_blocking(_local_write_file, safe, body.content, encoding)
     _log(db, request, current_user.id, "files.write", f"Wrote to {safe}")
     return {"detail": "File written.", "path": safe}
 
@@ -553,42 +673,13 @@ async def chmod_file(
     current_user: User = Depends(get_current_user),
 ):
     safe = _resolve_path(current_user, body.path)
-
-    # --- Try agent first ---
-    try:
-        agent = request.app.state.agent
-        await agent._request(
-            "POST",
-            "/files/chmod",
-            json_body={"path": safe, "permissions": body.permissions},
-        )
-    except Exception:
-        # --- Fallback: local filesystem ---
-        if not os.path.exists(safe):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Path not found: {safe}",
-            )
-        try:
-            mode = int(body.permissions, 8)
-            os.chmod(safe, mode)
-        except PermissionError:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Permission denied changing permissions on {safe}",
-            )
-        except (ValueError, OSError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error changing permissions: {exc}",
-            )
-
+    await _run_blocking(_local_chmod, safe, body.permissions)
     _log(db, request, current_user.id, "files.chmod", f"chmod {body.permissions} {safe}")
     return {"detail": "Permissions updated.", "path": safe, "permissions": body.permissions}
 
 
 # --------------------------------------------------------------------------
-# POST /compress -- zip files
+# POST /compress -- archive files (zip / tar.gz / tar.bz2 / tar)
 # --------------------------------------------------------------------------
 @router.post("/compress", status_code=status.HTTP_200_OK)
 async def compress_files(
@@ -599,20 +690,7 @@ async def compress_files(
 ):
     safe_paths = [_resolve_path(current_user, p) for p in body.paths]
     safe_dest = _resolve_path(current_user, body.destination)
-    agent = request.app.state.agent
-
-    try:
-        await agent._request(
-            "POST",
-            "/files/compress",
-            json_body={"paths": safe_paths, "destination": safe_dest},
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error compressing: {exc}",
-        )
-
+    await _run_blocking(_local_compress, safe_paths, safe_dest)
     _log(db, request, current_user.id, "files.compress", f"Compressed {len(safe_paths)} items to {safe_dest}")
     return {"detail": "Files compressed.", "destination": safe_dest}
 
@@ -629,19 +707,6 @@ async def extract_archive(
 ):
     safe_archive = _resolve_path(current_user, body.archive_path)
     safe_dest = _resolve_path(current_user, body.destination)
-    agent = request.app.state.agent
-
-    try:
-        await agent._request(
-            "POST",
-            "/files/extract",
-            json_body={"archive_path": safe_archive, "destination": safe_dest},
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Agent error extracting: {exc}",
-        )
-
+    await _run_blocking(_local_extract, safe_archive, safe_dest)
     _log(db, request, current_user.id, "files.extract", f"Extracted {safe_archive} to {safe_dest}")
     return {"detail": "Archive extracted.", "destination": safe_dest}

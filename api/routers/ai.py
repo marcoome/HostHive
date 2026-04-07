@@ -469,7 +469,7 @@ async def resolve_insight(
 
 
 # --------------------------------------------------------------------------
-# POST /insights/{id}/autofix — execute auto-fix
+# POST /insights/{id}/autofix — generate AI-validated fix plan
 # --------------------------------------------------------------------------
 @router.post("/insights/{insight_id}/autofix", status_code=status.HTTP_200_OK)
 async def autofix_insight(
@@ -492,22 +492,61 @@ async def autofix_insight(
             detail="No auto-fix available for this insight.",
         )
 
-    agent = request.app.state.agent
+    await _check_ai_rate_limit(request, current_user.id)
+    ai_client = await _get_ai_client(db, request)
+
+    # Ask the AI provider directly (OpenAI/Anthropic/Ollama) to validate the
+    # proposed fix and return a structured plan. We do NOT proxy the action
+    # to the agent on port 7080 — execution is handled separately by the
+    # operator after reviewing the AI-generated plan.
+    prompt = (
+        "A HostHive server insight has been detected and an auto-fix action "
+        "has been proposed. Validate the proposed action, explain what it "
+        "does, list any risks, and respond as JSON with the following keys: "
+        "'safe' (bool), 'explanation' (string), 'risks' (array of strings), "
+        "'steps' (array of strings).\n\n"
+        f"Issue type: {insight.issue_type}\n"
+        f"Severity: {insight.severity.value}\n"
+        f"Description: {insight.description}\n"
+        f"Recommendation: {insight.recommendation}\n"
+        f"Proposed action: {insight.auto_fix_action}"
+    )
+
     try:
-        await agent._request("POST", "/exec", json_body={"command": insight.auto_fix_action})
-        insight.is_resolved = True
-        insight.resolved_at = datetime.now(timezone.utc)
-        db.add(insight)
-        _log(
-            db, request, current_user.id, "ai.autofix",
-            f"Auto-fixed insight {insight_id}: {insight.issue_type}",
-        )
-        return {"status": "fixed", "insight": AiInsightResponse.model_validate(insight)}
+        plan = await ai_client.analyze(prompt)
     except Exception as exc:
+        logger.error("AI autofix analysis failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Auto-fix failed: {exc}",
+            detail=f"AI service error: {exc}",
         )
+
+    # Track token usage for the analysis call
+    tokens_in = AIClient.count_tokens(prompt)
+    tokens_out = AIClient.count_tokens(json.dumps(plan))
+    db.add(AiTokenUsage(
+        user_id=current_user.id,
+        provider=ai_client.provider,
+        model=ai_client.model,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cost_usd=ai_client.estimate_cost(tokens_in, tokens_out),
+    ))
+
+    insight.is_resolved = True
+    insight.resolved_at = datetime.now(timezone.utc)
+    db.add(insight)
+    _log(
+        db, request, current_user.id, "ai.autofix",
+        f"AI-validated autofix for insight {insight_id}: {insight.issue_type}",
+    )
+    await db.commit()
+
+    return {
+        "status": "validated",
+        "plan": plan,
+        "insight": AiInsightResponse.model_validate(insight),
+    }
 
 
 # --------------------------------------------------------------------------

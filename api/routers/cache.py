@@ -1,17 +1,24 @@
 """Cache management router -- /api/v1/cache.
 
-Manages Redis, Memcached, Varnish, and PHP OPcache services.
+Manages Redis, Memcached, Varnish, and PHP OPcache services directly on the
+local host. This router does NOT proxy to the HostHive agent on port 7080 --
+all operations use direct shell/subprocess calls (redis-cli, varnishadm,
+varnishstat, php CLI, nc) and direct filesystem access. Any blocking
+filesystem work is offloaded to the default executor via
+``asyncio.get_running_loop().run_in_executor()`` to keep the event loop
+responsive.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.core.security import get_current_user
 from api.models.users import User
@@ -50,6 +57,37 @@ async def _service_is_active(name: str) -> bool:
     """Check whether a systemd service is active."""
     rc, out, _ = await _run(f"systemctl is-active {name}")
     return out.strip() == "active"
+
+
+async def _to_thread(func, *args, **kwargs):
+    """Run a blocking callable in the default executor."""
+    loop = asyncio.get_running_loop()
+    if kwargs:
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+    return await loop.run_in_executor(None, func, *args)
+
+
+def _write_temp_php(script: str, prefix: str) -> str:
+    """Synchronously write a PHP script to a temp file and return its path."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".php", prefix=prefix, delete=False
+    ) as tmp:
+        tmp.write(script)
+        return tmp.name
+
+
+def _unlink_quiet(path: str) -> None:
+    """Synchronously delete a file, ignoring missing-file errors."""
+    Path(path).unlink(missing_ok=True)
+
+
+def _write_text_quiet(path: str, content: str) -> bool:
+    """Synchronously write a text file. Returns True on success."""
+    try:
+        Path(path).write_text(content, encoding="utf-8")
+        return True
+    except OSError:
+        return False
 
 
 def _parse_redis_info(raw: str) -> dict[str, Any]:
@@ -204,20 +242,15 @@ echo json_encode([
     "interned_strings_mb" => round(($config["directives"]["opcache.interned_strings_buffer"] ?? 0), 2),
 ]);
 """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".php", prefix="hosthive_opcache_", delete=False
-    ) as tmp:
-        tmp.write(php_script)
-        tmp_path = tmp.name
+    tmp_path = await _to_thread(_write_temp_php, php_script, "hosthive_opcache_")
 
     try:
         rc, out, err = await _run(f"php {tmp_path}")
         if rc != 0:
             raise HTTPException(status_code=500, detail=f"OPcache status failed: {err or out}")
 
-        import json
         try:
-            data = json.loads(out)
+            data = await _to_thread(json.loads, out)
         except json.JSONDecodeError:
             raise HTTPException(status_code=500, detail=f"Invalid JSON from PHP: {out[:500]}")
 
@@ -226,7 +259,7 @@ echo json_encode([
 
         return data
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        await _to_thread(_unlink_quiet, tmp_path)
 
 
 @router.post("/opcache/reset")
@@ -249,27 +282,32 @@ if (function_exists('opcache_reset')) {
     exit(1);
 }
 """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".php", prefix="hosthive_opcache_reset_", delete=False
-    ) as tmp:
-        tmp.write(php_script)
-        tmp_path = tmp.name
+    tmp_path = await _to_thread(
+        _write_temp_php, php_script, "hosthive_opcache_reset_"
+    )
 
     try:
         rc, out, err = await _run(f"php {tmp_path}")
 
-        # Also attempt to reset via web-accessible path (for FPM context)
-        web_reset_path = Path("/var/www/html/_hosthive_opcache_reset.php")
-        try:
-            web_reset_path.write_text(
-                '<?php opcache_reset(); echo "ok"; unlink(__FILE__);',
-                encoding="utf-8",
-            )
-            await _run("curl -s -m 5 http://127.0.0.1/_hosthive_opcache_reset.php")
-        except Exception:
-            pass  # Best effort for FPM context reset
-        finally:
-            web_reset_path.unlink(missing_ok=True)
+        # Also attempt to reset via a web-accessible path so that the FPM
+        # worker pool (which has its own opcache) is refreshed. This is a
+        # best-effort operation against the local web server only -- it is
+        # NOT a call to the HostHive agent on :7080.
+        web_reset_path = "/var/www/html/_hosthive_opcache_reset.php"
+        wrote_web = await _to_thread(
+            _write_text_quiet,
+            web_reset_path,
+            '<?php opcache_reset(); echo "ok"; unlink(__FILE__);',
+        )
+        if wrote_web:
+            try:
+                await _run(
+                    "curl -s -m 5 http://127.0.0.1/_hosthive_opcache_reset.php"
+                )
+            except Exception:
+                pass  # Best effort for FPM context reset
+            finally:
+                await _to_thread(_unlink_quiet, web_reset_path)
 
         if rc != 0:
             raise HTTPException(status_code=500, detail=f"OPcache reset failed: {err or out}")
@@ -277,7 +315,7 @@ if (function_exists('opcache_reset')) {
         logger.info("OPcache reset executed by %s", current_user.username)
         return {"detail": "OPcache reset successfully (CLI). FPM reset attempted."}
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        await _to_thread(_unlink_quiet, tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -305,9 +343,8 @@ async def varnish_status(
                 stats[parts[0]] = parts[1]
         return {"active": True, "stats": stats}
 
-    import json
     try:
-        data = json.loads(out)
+        data = await _to_thread(json.loads, out)
     except json.JSONDecodeError:
         return {"active": True, "stats": {}, "raw": out[:2000]}
 

@@ -61,7 +61,14 @@
     "status_page": "Сторінка статусу",
     "administration": "Адміністрування",
     "external": "Зовнішні",
-    "translations": "Переклади"
+    "translations": "Переклади",
+    "reseller_dashboard": "Панель реселера",
+    "my_users": "Мої користувачі",
+    "my_packages": "Мої пакети",
+    "branding": "Брендинг",
+    "bandwidth": "Трафік та використання",
+    "billing": "Рахунки",
+    "rate_limits": "Ліміти запитів"
   },
   "translations": {
     "title": "Менеджер перекладів",

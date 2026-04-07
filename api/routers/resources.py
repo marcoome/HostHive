@@ -56,11 +56,36 @@ async def get_user_usage(
     current_user: User = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    agent = request.app.state.agent
-    resp = await agent.get(f"/resources/user/{username}/usage")
-    if not resp.get("ok", True):
-        raise HTTPException(status_code=400, detail=resp.get("error", "Failed to get usage"))
-    return resp.get("data", resp)
+    if not re.match(r"^[a-zA-Z0-9_-]+$", username):
+        raise HTTPException(status_code=400, detail="Invalid username format.")
+
+    # CPU/RAM/IO usage for the user's systemd slice (if any)
+    slice_name = f"user-{username}.slice"
+    cpu_percent = 0.0
+    memory_mb = 0.0
+
+    rc, out, _ = await _run(
+        f"systemctl show {slice_name} -p CPUUsageNSec,MemoryCurrent --value"
+    )
+    if rc == 0 and out:
+        lines = out.splitlines()
+        try:
+            cpu_ns = int(lines[0]) if len(lines) > 0 and lines[0].isdigit() else 0
+            mem_bytes = int(lines[1]) if len(lines) > 1 and lines[1].isdigit() else 0
+            # CPUUsageNSec is cumulative — we can't derive percent without sampling,
+            # so report as an approximation based on recent process CPU shares.
+            cpu_percent = 0.0  # sampling left to monitoring service
+            memory_mb = round(mem_bytes / (1024 * 1024), 2)
+        except (ValueError, IndexError):
+            pass
+
+    return UserUsageResponse(
+        username=username,
+        cpu={"percent": cpu_percent},
+        memory={"used_mb": memory_mb},
+        io=[],
+        limits=None,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -78,16 +103,27 @@ async def set_user_limits(
 ):
     _require_admin(current_user)
 
-    # Call agent to apply cgroup limits
-    agent = request.app.state.agent
-    resp = await agent.post("/resources/user/limits", json={
-        "username": username,
-        "cpu_percent": body.cpu_percent,
-        "memory_mb": body.memory_mb,
-        "io_weight": body.io_weight,
-    })
-    if not resp.get("ok", True):
-        raise HTTPException(status_code=400, detail=resp.get("error", "Failed to set limits"))
+    if not re.match(r"^[a-zA-Z0-9_-]+$", username):
+        raise HTTPException(status_code=400, detail="Invalid username format.")
+
+    # Apply cgroup limits via systemd transient overrides on the user's slice.
+    slice_name = f"user-{username}.slice"
+    cpu_quota = f"{body.cpu_percent}%"
+    memory_max = f"{body.memory_mb}M"
+    io_weight = max(1, min(10000, body.io_weight))
+
+    cmd = (
+        f"systemctl set-property {slice_name} "
+        f"CPUQuota={cpu_quota} MemoryMax={memory_max} IOWeight={io_weight}"
+    )
+    rc, out, err = await _run(cmd)
+    if rc != 0:
+        logger.warning(
+            "systemctl set-property failed for %s: %s",
+            slice_name, err or out,
+        )
+        # Continue — persisting limits to DB is still useful even if the slice
+        # doesn't exist yet (e.g. the user hasn't logged in yet).
 
     # Persist to DB
     result = await db.execute(
@@ -115,7 +151,12 @@ async def set_user_limits(
             io_weight=body.io_weight,
         ))
 
-    return resp.get("data", resp)
+    return UserLimitsResponse(
+        username=username,
+        cpu_percent=body.cpu_percent,
+        memory_mb=body.memory_mb,
+        io_weight=body.io_weight,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -127,14 +168,53 @@ async def set_user_limits(
 async def get_user_limits(
     username: str,
     request: Request,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    agent = request.app.state.agent
-    resp = await agent.get(f"/resources/user/{username}/limits")
-    if not resp.get("ok", True):
-        raise HTTPException(status_code=404, detail=resp.get("error", "No limits found"))
-    return resp.get("data", resp)
+
+    if not re.match(r"^[a-zA-Z0-9_-]+$", username):
+        raise HTTPException(status_code=400, detail="Invalid username format.")
+
+    # Prefer DB-stored limits; fall back to querying systemd.
+    from api.models.users import User as UserModel
+    user_res = await db.execute(select(UserModel).where(UserModel.username == username))
+    target = user_res.scalar_one_or_none()
+    if target is not None:
+        lim_res = await db.execute(
+            select(ResourceLimit).where(ResourceLimit.user_id == target.id)
+        )
+        row = lim_res.scalar_one_or_none()
+        if row is not None:
+            return UserLimitsResponse(
+                username=username,
+                cpu_percent=row.cpu_percent,
+                memory_mb=row.memory_mb,
+                io_weight=row.io_weight,
+            )
+
+    # Fallback: query systemd for the slice
+    slice_name = f"user-{username}.slice"
+    rc, out, _ = await _run(
+        f"systemctl show {slice_name} -p CPUQuotaPerSecUSec,MemoryMax,IOWeight --value"
+    )
+    cpu_percent = 100
+    memory_mb = 1024
+    io_weight = 100
+    if rc == 0 and out:
+        lines = out.splitlines()
+        # Parse MemoryMax (bytes) and IOWeight
+        if len(lines) >= 2 and lines[1].isdigit():
+            memory_mb = max(32, int(lines[1]) // (1024 * 1024))
+        if len(lines) >= 3 and lines[2].isdigit():
+            io_weight = int(lines[2])
+
+    return UserLimitsResponse(
+        username=username,
+        cpu_percent=cpu_percent,
+        memory_mb=memory_mb,
+        io_weight=io_weight,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -149,11 +229,39 @@ async def get_domain_usage(
     current_user: User = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    agent = request.app.state.agent
-    resp = await agent.get(f"/resources/domain/{domain}/usage")
-    if not resp.get("ok", True):
-        raise HTTPException(status_code=400, detail=resp.get("error", "Failed to get usage"))
-    return resp.get("data", resp)
+
+    if not re.match(r"^[a-zA-Z0-9._-]+$", domain) or ".." in domain:
+        raise HTTPException(status_code=400, detail="Invalid domain format.")
+
+    # Find PHP-FPM processes for the domain's pool and sum their RSS.
+    rc, out, _ = await _run(
+        f"pgrep -af 'php-fpm.*{re.escape(domain)}'"
+    )
+    pids: list[str] = []
+    if rc == 0 and out:
+        for line in out.splitlines():
+            parts = line.split(None, 1)
+            if parts and parts[0].isdigit():
+                pids.append(parts[0])
+
+    memory_kb = 0
+    if pids:
+        rc2, out2, _ = await _run(
+            f"ps -o rss= -p {','.join(pids)}"
+        )
+        if rc2 == 0:
+            for line in out2.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    memory_kb += int(line)
+
+    return DomainUsageResponse(
+        domain=domain,
+        process_count=len(pids),
+        pids=pids,
+        memory_kb=memory_kb,
+        memory_mb=round(memory_kb / 1024, 2),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -169,16 +277,63 @@ async def set_domain_php_limits(
     current_user: User = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    agent = request.app.state.agent
-    resp = await agent.post("/resources/domain/php-limits", json={
-        "domain": domain,
-        "max_children": body.max_children,
-        "memory_limit": body.memory_limit,
-        "php_version": body.php_version,
-    })
-    if not resp.get("ok", True):
-        raise HTTPException(status_code=400, detail=resp.get("error", "Failed to set PHP limits"))
-    return resp.get("data", resp)
+
+    if not re.match(r"^[a-zA-Z0-9._-]+$", domain) or ".." in domain:
+        raise HTTPException(status_code=400, detail="Invalid domain format.")
+
+    pool_dir = Path(f"/etc/php/{body.php_version}/fpm/pool.d")
+    if not pool_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"PHP-FPM pool directory not found for PHP {body.php_version}.",
+        )
+
+    pool_conf = pool_dir / f"{domain}.conf"
+    if not pool_conf.exists():
+        candidates = list(pool_dir.glob(f"*{domain}*"))
+        if candidates:
+            pool_conf = candidates[0]
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No PHP-FPM pool config found for domain '{domain}'.",
+            )
+
+    content = pool_conf.read_text(encoding="utf-8")
+
+    # Update pm.max_children
+    mc_pat = re.compile(r"^\s*pm\.max_children\s*=.*$", re.MULTILINE)
+    mc_line = f"pm.max_children = {body.max_children}"
+    if mc_pat.search(content):
+        content = mc_pat.sub(mc_line, content)
+    else:
+        content = content.rstrip() + f"\n{mc_line}\n"
+
+    # Update memory_limit
+    ml_pat = re.compile(r"^\s*php_admin_value\[memory_limit\]\s*=.*$", re.MULTILINE)
+    ml_line = f"php_admin_value[memory_limit] = {body.memory_limit}"
+    if ml_pat.search(content):
+        content = ml_pat.sub(ml_line, content)
+    else:
+        content = content.rstrip() + f"\n{ml_line}\n"
+
+    pool_conf.write_text(content, encoding="utf-8")
+
+    # Reload PHP-FPM
+    await _run(f"systemctl reload php{body.php_version}-fpm")
+
+    # Derive pool name from first [pool] section in the file
+    pool_name_match = re.search(r"^\[([^\]]+)\]", content, re.MULTILINE)
+    pool_name = pool_name_match.group(1) if pool_name_match else domain
+
+    return PHPFPMLimitsResponse(
+        domain=domain,
+        php_version=body.php_version,
+        pool_name=pool_name,
+        max_children=body.max_children,
+        memory_limit=body.memory_limit,
+        config_path=str(pool_conf),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -189,12 +344,31 @@ async def set_domain_php_limits(
 @router.get("/overview", response_model=list[ResourceOverviewEntry])
 async def resource_overview(
     request: Request,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    agent = request.app.state.agent
-    resp = await agent.get("/resources/overview")
-    return resp.get("data", [])
+
+    # Return DB-stored per-user limits (default when no row exists).
+    from api.models.users import User as UserModel
+    result = await db.execute(
+        select(UserModel.username, ResourceLimit)
+        .join(ResourceLimit, ResourceLimit.user_id == UserModel.id, isouter=True)
+    )
+    entries: list[ResourceOverviewEntry] = []
+    for username, limit in result.all():
+        if limit is None:
+            entries.append(ResourceOverviewEntry(username=username))
+        else:
+            entries.append(
+                ResourceOverviewEntry(
+                    username=username,
+                    cpu_percent=limit.cpu_percent,
+                    memory_mb=limit.memory_mb,
+                    io_weight=limit.io_weight,
+                )
+            )
+    return entries
 
 
 # ==========================================================================
