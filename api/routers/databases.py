@@ -544,6 +544,8 @@ async def create_database(
         )
 
     _log(db, request, current_user.id, "databases.create", f"Created {body.db_type.value} database {body.db_name}")
+    # Reload with extra_users eagerly loaded to avoid greenlet error
+    await db.refresh(record, attribute_names=["extra_users"])
     return DatabaseResponse.model_validate(record)
 
 
