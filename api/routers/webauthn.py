@@ -130,11 +130,12 @@ async def registration_options(
 
     # Store challenge in Redis keyed by user ID
     challenge_key = f"reg:{current_user.id}"
+    device_name = body.device_name if body else None
     await _store_challenge(
         request.app.state.redis,
         challenge_key,
         options.challenge,
-        extra={"device_name": body.device_name},
+        extra={"device_name": device_name},
     )
 
     return RegistrationOptionsResponse(options=_options_to_dict(options))
