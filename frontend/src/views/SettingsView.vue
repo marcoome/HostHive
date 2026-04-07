@@ -320,40 +320,6 @@
             </template>
           </Modal>
 
-          <!-- Active Sessions -->
-          <div class="border-t border-[var(--border)] pt-8">
-            <h3 class="text-base font-semibold text-[var(--text-primary)] mb-4">Active Sessions</h3>
-            <div class="space-y-3">
-              <div
-                v-for="session in sessions"
-                :key="session.id"
-                class="flex items-center justify-between p-4 bg-[var(--surface)] rounded-xl border border-[var(--border)]"
-              >
-                <div class="flex items-center gap-3">
-                  <span class="text-lg">{{ session.device === 'desktop' ? '&#128187;' : '&#128241;' }}</span>
-                  <div>
-                    <p class="text-sm font-medium text-[var(--text-primary)]">
-                      {{ session.browser }} on {{ session.os }}
-                      <span v-if="session.current" class="badge badge-success ml-2">Current</span>
-                    </p>
-                    <p class="text-xs text-[var(--text-muted)]">
-                      {{ session.ip }} &middot; Last active {{ session.last_active }}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  v-if="!session.current"
-                  class="btn-ghost text-xs px-2 py-1 text-error hover:text-error"
-                  @click="revokeSession(session.id)"
-                >
-                  Revoke
-                </button>
-              </div>
-              <div v-if="sessions.length === 0" class="text-center py-4">
-                <p class="text-sm text-[var(--text-muted)]">No active sessions.</p>
-              </div>
-            </div>
-          </div>
         </div>
 
         <!-- API Keys Tab -->

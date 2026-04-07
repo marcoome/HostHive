@@ -85,11 +85,16 @@ class Settings(BaseSettings):
         # Support legacy ADMIN_USER env var from older installers
         if self.ADMIN_USER and self.admin_username == "admin":
             self.admin_username = self.ADMIN_USER
-        # WebAuthn defaults derived from PANEL_DOMAIN
+        # WebAuthn defaults derived from PANEL_DOMAIN or server IP
+        # If PANEL_DOMAIN is the placeholder, use server_ip instead
+        domain = self.PANEL_DOMAIN
+        if not domain or domain == "panel.example.com":
+            domain = self.server_ip or "localhost"
         if not self.WEBAUTHN_RP_ID:
-            self.WEBAUTHN_RP_ID = self.PANEL_DOMAIN.split(":")[0]
+            self.WEBAUTHN_RP_ID = domain.split(":")[0]
         if not self.WEBAUTHN_ORIGIN:
-            self.WEBAUTHN_ORIGIN = f"https://{self.PANEL_DOMAIN}"
+            # Always use https on port 8443 for the panel
+            self.WEBAUTHN_ORIGIN = f"https://{domain}:8443"
         return self
 
     # ── Agent connection ────────────────────────────────────────────────

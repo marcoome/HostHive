@@ -115,18 +115,26 @@ async def registration_options(
         for c in existing
     ]
 
-    options = generate_registration_options(
-        rp_id=settings.WEBAUTHN_RP_ID,
-        rp_name=settings.WEBAUTHN_RP_NAME,
-        user_id=str(current_user.id).encode(),
-        user_name=current_user.username,
-        user_display_name=current_user.username,
-        exclude_credentials=exclude_credentials,
-        authenticator_selection=AuthenticatorSelectionCriteria(
-            resident_key=ResidentKeyRequirement.PREFERRED,
-            user_verification=UserVerificationRequirement.PREFERRED,
-        ),
-    )
+    try:
+        options = generate_registration_options(
+            rp_id=settings.WEBAUTHN_RP_ID,
+            rp_name=settings.WEBAUTHN_RP_NAME,
+            user_id=str(current_user.id).encode(),
+            user_name=current_user.username,
+            user_display_name=current_user.username,
+            exclude_credentials=exclude_credentials,
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                resident_key=ResidentKeyRequirement.PREFERRED,
+                user_verification=UserVerificationRequirement.PREFERRED,
+            ),
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger("hosthive.webauthn").exception("Failed to generate WebAuthn options")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"WebAuthn options generation failed. RP_ID={settings.WEBAUTHN_RP_ID}, Origin={settings.WEBAUTHN_ORIGIN}. Error: {exc}",
+        )
 
     # Store challenge in Redis keyed by user ID
     challenge_key = f"reg:{current_user.id}"
