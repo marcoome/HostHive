@@ -1580,10 +1580,10 @@ function validateSubdomainForm() {
   const prefix = subdomainForm.value.subdomain_prefix.trim()
   if (!prefix) {
     errors.subdomain_prefix = 'Subdomain prefix is required.'
-  } else if (!/^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(prefix)) {
-    errors.subdomain_prefix = 'Only letters, numbers, and hyphens allowed. Must start and end with a letter or number.'
-  } else if (prefix.length > 63) {
-    errors.subdomain_prefix = 'Prefix must be 63 characters or fewer.'
+  } else if (!/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(prefix)) {
+    errors.subdomain_prefix = 'Only letters, numbers, dots and hyphens allowed.'
+  } else if (prefix.length > 253) {
+    errors.subdomain_prefix = 'Prefix must be 253 characters or fewer.'
   }
   subdomainFormErrors.value = errors
   return Object.keys(errors).length === 0

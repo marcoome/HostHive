@@ -740,13 +740,7 @@ async def create_subdomain(
     """
     parent = await _get_domain_or_404(domain_id, db, current_user)
 
-    # Prevent creating subdomains of subdomains
-    if parent.is_subdomain:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot create a subdomain of a subdomain.",
-        )
-
+    # Allow nested subdomains (sub.sub.example.com etc.)
     fqdn = f"{body.subdomain_prefix}.{parent.domain_name}"
 
     # Check uniqueness

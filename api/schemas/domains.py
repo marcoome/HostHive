@@ -110,9 +110,9 @@ class ErrorPagesUpdate(BaseModel):
 class SubdomainCreate(BaseModel):
     """Create a subdomain under an existing domain."""
     subdomain_prefix: str = Field(
-        ..., min_length=1, max_length=63,
-        pattern=r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$",
-        description="Subdomain prefix (e.g. 'blog' for blog.example.com)",
+        ..., min_length=1, max_length=253,
+        pattern=r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$",
+        description="Subdomain prefix (e.g. 'blog' or 'a.b.c' for nested)",
     )
     document_root: Optional[str] = Field(
         default=None,
