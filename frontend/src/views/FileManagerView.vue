@@ -728,9 +728,9 @@ async function uploadFiles(fileList) {
     uploads.value.push(uploadEntry)
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('path', currentPath.value)
     try {
       await client.post('/files/upload', formData, {
+        params: { path: currentPath.value },
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (e) => {
           uploadEntry.progress = Math.round((e.loaded / (e.total || 1)) * 100)

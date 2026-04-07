@@ -565,7 +565,7 @@ onMounted(async () => {
   await Promise.all([
     store.fetchApps(),
     store.fetchVersions(),
-    domainsStore.fetch()
+    domainsStore.fetchAll()
   ])
   domains.value = domainsStore.domains
 })

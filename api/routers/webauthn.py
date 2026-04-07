@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -94,8 +95,8 @@ def _options_to_dict(options) -> dict:
 # ---------------------------------------------------------------------------
 @router.post("/register/options", response_model=RegistrationOptionsResponse)
 async def registration_options(
-    body: RegistrationOptionsRequest,
     request: Request,
+    body: Optional[RegistrationOptionsRequest] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
