@@ -1,5 +1,18 @@
 """HTTP client for communicating with the HostHive system agent.
 
+.. deprecated::
+    No router under ``api/routers/`` uses this client anymore. All
+    router endpoints now perform privileged work directly via
+    ``subprocess`` and the in-process ``agent.executors`` modules. The
+    legacy HostHive agent on port 7080 is no longer required for any
+    router endpoint to function.
+
+    This module is kept solely for legacy callers in ``api/services/``,
+    ``api/tasks/`` and ``api/mcp/`` and MUST NOT be re-introduced into
+    any router. New code should call the relevant ``agent.executors.*``
+    function directly (which runs in-process via ``run_in_executor``)
+    or shell out via ``subprocess`` / ``asyncio.create_subprocess_exec``.
+
 Every request is authenticated with HMAC-SHA256 (timestamp + nonce + body hash)
 and protected against replay via a unique nonce per request.
 """

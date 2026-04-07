@@ -171,11 +171,15 @@ async def provision_account(
     db.add(user)
     await db.flush()
 
-    # Optionally set up domain via agent
+    # Optionally set up domain via direct nginx_service (no agent proxy)
     if body.domain:
         try:
-            agent = request.app.state.agent
-            await agent.create_vhost(body.domain, f"/home/{body.username}/public_html")
+            from api.services.nginx_service import create_vhost as _create_vhost
+            await _create_vhost(
+                domain=body.domain,
+                username=body.username,
+                document_root=f"/home/{body.username}/public_html",
+            )
         except Exception as exc:
             logger.warning("Failed to create vhost for %s: %s", body.domain, exc)
 

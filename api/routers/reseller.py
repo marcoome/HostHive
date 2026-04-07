@@ -20,7 +20,7 @@ from sqlalchemy.orm import selectinload
 from api.core.database import get_db
 from api.core.security import get_current_user, hash_password, require_role
 from api.models.activity_log import ActivityLog
-from api.models.packages import Package
+from api.models.packages import Package, PackageType
 from api.models.reseller import ResellerBranding, ResellerLimit
 from api.models.users import User, UserRole
 from api.schemas.reseller import (
@@ -143,6 +143,34 @@ async def create_reseller_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username or email already exists.",
         )
+
+    # Validate the assigned package is a user-type package. Resellers
+    # cannot assign reseller-type (wholesale) packages to their sub-users.
+    if body.package_id is not None:
+        pkg_result = await db.execute(
+            select(Package).where(Package.id == body.package_id)
+        )
+        pkg = pkg_result.scalar_one_or_none()
+        if pkg is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Package not found.",
+            )
+        if pkg.package_type != PackageType.USER:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Package '{pkg.name}' is a {pkg.package_type.value}-type "
+                    f"package and cannot be assigned to a user account "
+                    f"(expected user-type)."
+                ),
+            )
+        # Resellers may only assign packages they own OR global packages.
+        if pkg.created_by is not None and pkg.created_by != reseller.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only assign global packages or packages you own.",
+            )
 
     user = User(
         username=body.username,
@@ -332,6 +360,15 @@ async def get_limits(
 @router.get("/packages", status_code=status.HTTP_200_OK)
 async def list_packages(
     scope: str = Query("all", description="all | reseller | global"),
+    type: PackageType | None = Query(
+        None,
+        description=(
+            "Filter by package_type. Defaults to 'user' (packages the "
+            "reseller can assign to their sub-users). Pass 'reseller' to "
+            "see wholesale allocation packages (e.g. the reseller's own "
+            "admin-assigned package)."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     reseller: User = Depends(_reseller),
 ):
@@ -340,6 +377,12 @@ async def list_packages(
     scope=all     -- global + reseller's own (default)
     scope=reseller -- only packages created by this reseller
     scope=global  -- only admin/global packages (created_by IS NULL)
+
+    By default only ``package_type='user'`` rows are returned, because a
+    reseller's primary use of this endpoint is to pick a package to
+    assign to a sub-user. Pass ``?type=reseller`` to list wholesale
+    allocation packages instead (e.g. to show the reseller which
+    reseller-type package the admin assigned them).
     """
     from sqlalchemy import or_
 
@@ -353,6 +396,12 @@ async def list_packages(
             or_(Package.created_by.is_(None), Package.created_by == reseller.id)
         )
 
+    # Default to user-type packages; this endpoint is used by resellers
+    # to pick a plan for their sub-users, and reseller-type rows would
+    # be meaningless there.
+    effective_type = type if type is not None else PackageType.USER
+    q = q.where(Package.package_type == effective_type)
+
     result = await db.execute(q.order_by(Package.name.asc()))
     packages = result.scalars().all()
     return {
@@ -360,6 +409,7 @@ async def list_packages(
             {
                 "id": str(p.id),
                 "name": p.name,
+                "package_type": p.package_type.value,
                 "disk_quota_mb": p.disk_quota_mb,
                 "bandwidth_gb": p.bandwidth_gb,
                 "max_domains": p.max_domains,
@@ -400,6 +450,11 @@ async def create_reseller_package(
             detail="No reseller limits configured. Contact admin.",
         )
 
+    # Resellers may only create user-type packages (for their sub-users).
+    # Strip any incoming package_type from the body and force it to USER.
+    body = dict(body)
+    body["package_type"] = PackageType.USER.value
+
     # Validate the body via PackageCreate schema (ignore created_by from body)
     try:
         pkg_data = PackageCreate(**body)
@@ -407,6 +462,12 @@ async def create_reseller_package(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
+        )
+
+    if pkg_data.package_type != PackageType.USER:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Resellers can only create user-type packages.",
         )
 
     # Enforce: package resource limits must not exceed reseller allocation
@@ -439,6 +500,7 @@ async def create_reseller_package(
     return {
         "id": str(pkg.id),
         "name": pkg.name,
+        "package_type": pkg.package_type.value,
         "disk_quota_mb": pkg.disk_quota_mb,
         "bandwidth_gb": pkg.bandwidth_gb,
         "max_domains": pkg.max_domains,
@@ -506,6 +568,7 @@ async def update_reseller_package(
     return {
         "id": str(pkg.id),
         "name": pkg.name,
+        "package_type": pkg.package_type.value,
         "disk_quota_mb": pkg.disk_quota_mb,
         "bandwidth_gb": pkg.bandwidth_gb,
         "max_domains": pkg.max_domains,

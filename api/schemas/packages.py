@@ -70,8 +70,13 @@ class PackageCreate(BaseModel):
 
 class PackageUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=128)
-    # package_type is intentionally NOT updatable -- changing the type would
-    # silently invalidate every user already assigned to it.
+    # package_type may be changed ONLY by admin, and only when no users are
+    # currently assigned to the package (see routers/packages.py::update_package).
+    # Changing the type with live assignments would invalidate them silently.
+    package_type: Optional[PackageType] = Field(
+        default=None,
+        description="Admin-only. Can only be changed when the package has zero assignees.",
+    )
     disk_quota_mb: Optional[int] = Field(default=None, ge=100)
     bandwidth_gb: Optional[int] = Field(default=None, ge=1)
     max_domains: Optional[int] = Field(default=None, ge=1)

@@ -190,14 +190,40 @@ async def update_package(
     pkg = await _get_package_or_404(pkg_id, db)
     update_data = body.model_dump(exclude_unset=True)
 
+    # --------------------------------------------------------------
+    # package_type change -- admin only, and only when no users are
+    # currently assigned to this package. Changing the type while
+    # users are attached would silently break the role/type invariant
+    # enforced in routers/users.py::_resolve_and_validate_package.
+    # --------------------------------------------------------------
+    new_type = update_data.pop("package_type", None)
+    if new_type is not None and new_type != pkg.package_type:
+        assignee_count = (await db.execute(
+            select(func.count()).select_from(User).where(User.package_id == pkg_id)
+        )).scalar() or 0
+        if assignee_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Cannot change package_type: {assignee_count} user(s) are "
+                    f"currently assigned to '{pkg.name}'. Reassign or remove "
+                    f"them first."
+                ),
+            )
+        pkg.package_type = new_type
+
+    # After a possible type switch, re-evaluate "effective" type for the
+    # field-stripping pass below.
+    effective_type = pkg.package_type
+
     # Strip out reseller-only fields when this is a user-type package, and
     # vice versa, to keep the two domains cleanly separated.
-    if pkg.package_type == PackageType.USER:
+    if effective_type == PackageType.USER:
         for f in ("max_users", "max_total_disk_gb", "max_total_bandwidth_gb", "max_total_domains"):
             update_data.pop(f, None)
 
     shell_changed = "shell_access" in update_data or "shell_type" in update_data
-    reseller_alloc_changed = pkg.package_type == PackageType.RESELLER and any(
+    reseller_alloc_changed = effective_type == PackageType.RESELLER and any(
         k in update_data
         for k in ("max_users", "max_total_disk_gb", "max_total_bandwidth_gb", "max_total_domains")
     )

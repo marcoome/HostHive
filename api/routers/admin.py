@@ -1,11 +1,20 @@
-"""Admin router -- /api/v1/admin (admin only)."""
+"""Admin router -- /api/v1/admin (admin only).
+
+All system-level operations are performed directly via subprocess
+(systemctl, etc.) and psutil. This module never proxies to the HostHive
+agent on port 7080 and must not import or reference
+``request.app.state.agent``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import platform
 import secrets
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -42,6 +51,104 @@ def _log(db: AsyncSession, request: Request, user_id, action: str, details: str)
         details=details,
         ip_address=client_ip,
     ))
+
+
+# ---------------------------------------------------------------------------
+# Direct system helpers (no agent proxy)
+# ---------------------------------------------------------------------------
+
+async def _direct_systemctl_restart(service: str, timeout: float = 15.0) -> bool:
+    """Restart a systemd service via direct sudo systemctl. Returns success bool."""
+    if not shutil.which("systemctl"):
+        return False
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["sudo", "-n", "systemctl", "restart", service],
+                capture_output=True, text=True, timeout=timeout,
+            ),
+        )
+        return result.returncode == 0
+    except Exception as exc:
+        logger.warning("systemctl restart %s failed: %s", service, exc)
+        return False
+
+
+async def _direct_systemctl_active(service: str, timeout: float = 5.0) -> bool:
+    """Return True iff ``systemctl is-active`` reports the service active."""
+    if not shutil.which("systemctl"):
+        return False
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["systemctl", "is-active", service],
+                capture_output=True, text=True, timeout=timeout,
+            ),
+        )
+        return result.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+async def _direct_server_stats() -> dict:
+    """Collect server stats via psutil/os in a worker thread.
+
+    Mirrors the historic AgentClient.get_server_stats() shape so existing
+    consumers continue to work without modification.
+    """
+    try:
+        import psutil  # local import — psutil is the canonical source
+    except ImportError:
+        return {}
+
+    loop = asyncio.get_running_loop()
+
+    def _gather() -> dict:
+        cpu = psutil.cpu_percent(interval=0.5)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+        try:
+            la1, la5, la15 = os.getloadavg()
+        except (OSError, AttributeError):
+            la1 = la5 = la15 = 0.0
+        uptime = time.time() - psutil.boot_time()
+
+        net_counters: dict[str, dict[str, int]] = {}
+        try:
+            for iface, counters in psutil.net_io_counters(pernic=True).items():
+                net_counters[iface] = {
+                    "rx_bytes": counters.bytes_recv,
+                    "tx_bytes": counters.bytes_sent,
+                }
+        except Exception:
+            pass
+
+        return {
+            "cpu_percent": cpu,
+            "memory": {
+                "total_kb": mem.total // 1024,
+                "used_kb": mem.used // 1024,
+                "percent": mem.percent,
+            },
+            "disk": {
+                "total_bytes": disk.total,
+                "used_bytes": disk.used,
+                "percent": f"{int(disk.percent)}%",
+            },
+            "load_average": {"1m": la1, "5m": la5, "15m": la15},
+            "network": net_counters,
+            "uptime_seconds": int(uptime),
+        }
+
+    try:
+        return await loop.run_in_executor(None, _gather)
+    except Exception as exc:
+        logger.warning("psutil server stats collection failed: %s", exc)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +246,9 @@ async def rotate_secrets(
     except Exception as exc:
         logger.warning("Failed to flush Redis sessions: %s", exc)
 
-    # Request service restart via agent
-    try:
-        agent = request.app.state.agent
-        await agent.service_action("hosthive-api", "restart")
-    except Exception as exc:
-        logger.warning("Failed to restart API service: %s", exc)
+    # Request service restart via direct systemctl (best effort)
+    if not await _direct_systemctl_restart("hosthive-api"):
+        logger.warning("Failed to restart hosthive-api via systemctl")
 
     _log(db, request, admin.id, "admin.rotate_secrets", "Rotated JWT and agent secrets, invalidated all sessions")
 
@@ -164,24 +268,19 @@ async def system_info(
 ):
     uptime = time.time() - _BOOT_TIME
 
-    # Detect installed services by probing the agent
+    # Detect installed services by probing systemctl directly
     installed: list[str] = []
     service_names = [
         "nginx", "mariadb", "postgresql", "postfix", "dovecot",
         "proftpd", "named", "pdns", "redis", "fail2ban",
         "wireguard", "certbot",
     ]
-    try:
-        agent = request.app.state.agent
-        for svc in service_names:
-            try:
-                result = await agent.service_action(svc, "status")
-                if result.get("active"):
-                    installed.append(svc)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    for svc in service_names:
+        try:
+            if await _direct_systemctl_active(svc):
+                installed.append(svc)
+        except Exception:
+            pass
 
     return SystemInfoResponse(
         os_version=platform.platform(),
@@ -231,7 +330,6 @@ async def system_update(
     request: Request,
     admin: User = Depends(_admin),
 ):
-    import subprocess
     results = []
 
     # Git pull
@@ -268,7 +366,7 @@ async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(_admin),
 ):
-    """Real dashboard stats from database + agent (if available)."""
+    """Real dashboard stats from database + direct psutil collection."""
     from datetime import datetime, timedelta, timezone
     from api.models.domains import Domain
     from api.models.databases import Database
@@ -283,15 +381,15 @@ async def dashboard_stats(
     ftp_count = (await db.execute(select(func.count()).select_from(FtpAccount))).scalar() or 0
     user_count = (await db.execute(select(func.count()).select_from(User))).scalar() or 0
 
-    # Server stats from agent (graceful fallback)
+    # Server stats via direct psutil (graceful fallback)
     server = {}
     try:
-        agent = request.app.state.agent
-        server = await agent.get_server_stats()
-    except Exception:
-        pass
+        server = await _direct_server_stats()
+    except Exception as exc:
+        logger.warning("Direct server stats collection failed: %s", exc)
+        server = {}
 
-    # Parse agent stats into frontend-friendly format
+    # Parse stats into frontend-friendly format
     cpu_percent = server.get("cpu_percent", 0) or 0
     mem = server.get("memory", {}) or {}
     disk = server.get("disk", {}) or {}

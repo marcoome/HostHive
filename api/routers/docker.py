@@ -17,12 +17,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import yaml
 from fastapi import (
@@ -490,6 +489,120 @@ async def container_stats(
 
 
 # ---------------------------------------------------------------------------
+# GET /containers/{id}/inspect — full docker inspect output
+# ---------------------------------------------------------------------------
+
+@router.get("/containers/{container_id}/inspect")
+async def container_inspect(
+    container_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await _check_docker_available()
+    container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
+
+    r = await _run_docker(
+        ["docker", "inspect", container.container_id],
+        timeout=30,
+    )
+    if r.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"docker inspect failed: {r.stderr.strip() or r.stdout.strip()}",
+        )
+
+    try:
+        data = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"docker inspect returned invalid JSON: {exc}",
+        )
+
+    inspect_obj = data[0] if isinstance(data, list) and data else {}
+    return {"container_id": container.container_id, "inspect": inspect_obj}
+
+
+# ---------------------------------------------------------------------------
+# POST /containers/{id}/exec — run a one-shot command inside the container
+# ---------------------------------------------------------------------------
+
+@router.post("/containers/{container_id}/exec")
+async def container_exec(
+    container_id: uuid.UUID,
+    body: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await _check_docker_available()
+    container = await _get_container_or_404(container_id, db, current_user)
+    _validate_container_id(container.container_id)
+
+    # Accept either {"cmd": ["sh", "-c", "..."]} or {"cmd": "ls -la"}.
+    raw_cmd = body.get("cmd")
+    if raw_cmd is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing 'cmd' in request body.",
+        )
+
+    if isinstance(raw_cmd, str):
+        # Wrap a string command in /bin/sh -c so we can still use argv form
+        # without ever passing shell=True to subprocess.
+        if "\n" in raw_cmd or "\x00" in raw_cmd:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid characters in 'cmd'.",
+            )
+        argv_cmd = ["/bin/sh", "-c", raw_cmd]
+    elif isinstance(raw_cmd, list):
+        if not raw_cmd or not all(isinstance(x, str) for x in raw_cmd):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="'cmd' must be a non-empty list of strings.",
+            )
+        for token in raw_cmd:
+            if "\x00" in token:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid characters in 'cmd'.",
+                )
+        argv_cmd = list(raw_cmd)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="'cmd' must be a string or list of strings.",
+        )
+
+    timeout = int(body.get("timeout") or 60)
+    timeout = max(1, min(timeout, 600))
+
+    full_cmd = ["docker", "exec", container.container_id] + argv_cmd
+    try:
+        r = await _run_docker(full_cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"docker exec timed out after {timeout}s",
+        )
+
+    _log(
+        db, request, current_user.id,
+        "docker.exec",
+        f"Exec in {container.name}: {' '.join(argv_cmd)[:200]}",
+    )
+
+    return {
+        "container_id": container.container_id,
+        "exit_code": r.returncode,
+        "stdout": r.stdout or "",
+        "stderr": r.stderr or "",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Compose helpers
 # ---------------------------------------------------------------------------
 
@@ -598,6 +711,75 @@ async def compose_deploy_alias(
     project_name = body.get("project_name") or "compose-project"
     normalised = ComposeDeploy(compose_yaml=compose_yaml, project_name=project_name)
     return await compose_deploy(body=normalised, request=request, db=db, current_user=current_user)
+
+
+# ---------------------------------------------------------------------------
+# POST /compose/down — tear down a compose project
+# ---------------------------------------------------------------------------
+
+@router.post("/compose/down", status_code=status.HTTP_200_OK)
+async def compose_down(
+    body: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await _check_docker_available()
+
+    project_name = (body or {}).get("project_name")
+    if not project_name or not isinstance(project_name, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing or invalid 'project_name'.",
+        )
+    if any(c not in _SAFE_NAME_CHARS for c in project_name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid project name: {project_name!r}",
+        )
+
+    compose_yaml = (body or {}).get("compose_yaml") or (body or {}).get("yaml")
+    remove_volumes = bool((body or {}).get("volumes"))
+
+    compose_prefix = await _compose_command_prefix()
+
+    tmpdir: str | None = None
+    compose_file_args: List[str] = []
+    try:
+        if compose_yaml:
+            try:
+                yaml.safe_load(compose_yaml)
+            except yaml.YAMLError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid compose YAML: {exc}",
+                )
+            tmpdir = tempfile.mkdtemp(prefix=f"compose-down-{project_name}-")
+            compose_path = os.path.join(tmpdir, "docker-compose.yml")
+            with open(compose_path, "w", encoding="utf-8") as f:
+                f.write(compose_yaml)
+            compose_file_args = ["-f", compose_path]
+
+        cmd = compose_prefix + compose_file_args + ["-p", project_name, "down"]
+        if remove_volumes:
+            cmd.append("--volumes")
+
+        r = await _run_docker(cmd, timeout=600)
+        if r.returncode != 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"docker compose down failed: {r.stderr.strip() or r.stdout.strip()}",
+            )
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    _log(
+        db, request, current_user.id,
+        "docker.compose_down",
+        f"Tore down compose project {project_name}",
+    )
+    return {"project_name": project_name, "status": "down"}
 
 
 # ---------------------------------------------------------------------------

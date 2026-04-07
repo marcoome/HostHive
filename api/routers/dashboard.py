@@ -1,13 +1,19 @@
-"""Dashboard router -- /api/v1/dashboard (all authenticated users)."""
+"""Dashboard router -- /api/v1/dashboard (all authenticated users).
+
+Server stats are gathered directly from psutil / os in the API process.
+This module never proxies to the HostHive agent on port 7080 and must not
+import or reference ``request.app.state.agent``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,12 +28,69 @@ router = APIRouter()
 _BOOT_TIME = time.time()
 
 
+async def _direct_server_stats() -> dict:
+    """Collect server stats via psutil/os in a worker thread.
+
+    Returns a dict shaped like the historical agent ``get_server_stats``
+    payload so the rest of the dashboard handler can stay unchanged.
+    """
+    try:
+        import psutil  # local import — psutil is the canonical source
+    except ImportError:
+        return {}
+
+    loop = asyncio.get_running_loop()
+
+    def _gather() -> dict:
+        cpu = psutil.cpu_percent(interval=0.5)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+        try:
+            la1, la5, la15 = os.getloadavg()
+        except (OSError, AttributeError):
+            la1 = la5 = la15 = 0.0
+        uptime = time.time() - psutil.boot_time()
+
+        # Build the same shape the old AgentClient.get_server_stats() returned.
+        net_counters = {}
+        try:
+            for iface, counters in psutil.net_io_counters(pernic=True).items():
+                net_counters[iface] = {
+                    "rx_bytes": counters.bytes_recv,
+                    "tx_bytes": counters.bytes_sent,
+                }
+        except Exception:
+            pass
+
+        return {
+            "cpu_percent": cpu,
+            "memory": {
+                "total_kb": mem.total // 1024,
+                "used_kb": mem.used // 1024,
+                "percent": mem.percent,
+            },
+            "disk": {
+                "total_bytes": disk.total,
+                "used_bytes": disk.used,
+                "percent": f"{int(disk.percent)}%",
+            },
+            "load_average": {"1m": la1, "5m": la5, "15m": la15},
+            "network": net_counters,
+            "uptime_seconds": int(uptime),
+        }
+
+    try:
+        return await loop.run_in_executor(None, _gather)
+    except Exception as exc:
+        logger.warning("psutil server stats collection failed: %s", exc)
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # GET / -- dashboard stats for any authenticated user
 # ---------------------------------------------------------------------------
 @router.get("", status_code=status.HTTP_200_OK)
 async def dashboard_stats(
-    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -63,14 +126,14 @@ async def dashboard_stats(
         )).scalar() or 0
         user_count = 0  # non-admins don't need this
 
-    # --- Server stats from agent (admins get real data, users get zeros) ---
+    # --- Server stats via direct psutil (admins get real data, users get zeros) ---
     server = {}
     if is_admin:
         try:
-            agent = request.app.state.agent
-            server = await agent.get_server_stats()
-        except Exception:
-            pass
+            server = await _direct_server_stats()
+        except Exception as exc:
+            logger.warning("Direct server stats collection failed: %s", exc)
+            server = {}
 
     cpu_percent = server.get("cpu_percent", 0) or 0
     mem = server.get("memory", {}) or {}

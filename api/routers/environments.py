@@ -3,15 +3,24 @@
 Manages Docker-based user isolation: create/destroy environments,
 switch webservers, switch DB versions, manage PHP versions, toggle
 Redis/Memcached, update resource limits, and view usage.
+
+All Docker operations are performed directly via the in-process
+``agent.executors.docker_isolation`` module (which uses
+``asyncio.subprocess`` for ``docker`` CLI calls). This module never
+proxies to the HostHive agent on port 7080 and must not import or
+reference ``request.app.state.agent``.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger("hosthive.environments")
 
 from api.core.database import get_db
 from api.core.security import get_current_user, require_role
@@ -70,11 +79,6 @@ async def _get_user_or_404(user_id: uuid.UUID, db: AsyncSession) -> User:
 def _log(db: AsyncSession, request: Request, user_id: uuid.UUID, action: str, details: str):
     client_ip = request.client.host if request.client else "unknown"
     db.add(ActivityLog(user_id=user_id, action=action, details=details, ip_address=client_ip))
-
-
-def _get_agent(request: Request):
-    """Return the agent client from app state."""
-    return request.app.state.agent
 
 
 # ---------------------------------------------------------------------------
@@ -173,20 +177,17 @@ async def create_environment(
         plan["redis_enabled"] = body.redis_enabled or getattr(pkg, "redis_enabled", False)
         plan["memcached_enabled"] = body.memcached_enabled or getattr(pkg, "memcached_enabled", False)
 
-    # Call the agent to create the Docker environment
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/create", json={
-        "username": user.username,
-        "plan": plan,
-    })
+    # Call docker_isolation directly (no agent proxy)
+    from agent.executors.docker_isolation import create_user_environment
 
-    if not result.get("ok"):
+    try:
+        env_data = await create_user_environment(user.username, plan)
+    except Exception as exc:
+        logger.error("Failed to create environment for %s: %s", user.username, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("error", "Failed to create environment"),
+            detail=f"Failed to create environment: {exc}",
         )
-
-    env_data = result.get("data", {})
 
     # Persist to database
     env = UserEnvironment(
@@ -224,10 +225,16 @@ async def destroy_environment(
     user = await _get_user_or_404(user_id, db)
     env = await _get_env_or_404(user_id, db)
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/destroy", json={
-        "username": user.username,
-    })
+    from agent.executors.docker_isolation import destroy_user_environment
+
+    try:
+        result = await destroy_user_environment(user.username)
+    except Exception as exc:
+        logger.error("Failed to destroy environment for %s: %s", user.username, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to destroy environment: {exc}",
+        )
 
     env.status = "destroyed"
     await db.delete(env)
@@ -235,7 +242,7 @@ async def destroy_environment(
 
     _log(db, request, admin.id, "environment.destroy", f"Destroyed environment for user {user.username}")
 
-    return OperationResponse(ok=True, detail="Environment destroyed", data=result.get("data"))
+    return OperationResponse(ok=True, detail="Environment destroyed", data=result)
 
 
 # ---------------------------------------------------------------------------
@@ -253,17 +260,15 @@ async def switch_webserver(
     user = await _get_user_or_404(user_id, db)
     env = await _get_env_or_404(user_id, db)
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/switch-webserver", json={
-        "username": user.username,
-        "webserver": body.webserver,
-    })
+    from agent.executors.docker_isolation import switch_webserver as _switch_ws
 
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Switch failed"))
+    try:
+        data = await _switch_ws(user.username, body.webserver)
+    except Exception as exc:
+        logger.error("switch_webserver failed for %s: %s", user.username, exc)
+        raise HTTPException(status_code=500, detail=f"Switch failed: {exc}")
 
     env.webserver = body.webserver
-    data = result.get("data", {})
     if "container_id" in data:
         env.container_ids = {**env.container_ids, "web": data["container_id"]}
     await db.flush()
@@ -289,17 +294,15 @@ async def switch_db(
     user = await _get_user_or_404(user_id, db)
     env = await _get_env_or_404(user_id, db)
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/switch-db", json={
-        "username": user.username,
-        "version": body.db_version,
-    })
+    from agent.executors.docker_isolation import switch_db_version
 
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Switch failed"))
+    try:
+        data = await switch_db_version(user.username, body.db_version)
+    except Exception as exc:
+        logger.error("switch_db_version failed for %s: %s", user.username, exc)
+        raise HTTPException(status_code=500, detail=f"Switch failed: {exc}")
 
     env.db_version = body.db_version
-    data = result.get("data", {})
     if "container_id" in data:
         env.container_ids = {**env.container_ids, "db": data["container_id"]}
     await db.flush()
@@ -325,21 +328,21 @@ async def add_php(
     user = await _get_user_or_404(user_id, db)
     env = await _get_env_or_404(user_id, db)
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/add-php", json={
-        "username": user.username,
-        "version": body.version,
-    })
+    from agent.executors.docker_isolation import add_php_version
 
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Add PHP failed"))
+    try:
+        data = await add_php_version(user.username, body.version)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("add_php_version failed for %s: %s", user.username, exc)
+        raise HTTPException(status_code=500, detail=f"Add PHP failed: {exc}")
 
     # Update php_versions list
     versions = list(env.php_versions or [])
     if body.version not in versions:
         versions.append(body.version)
         env.php_versions = versions
-    data = result.get("data", {})
     if "container_id" in data:
         key = f"php{body.version.replace('.', '')}"
         env.container_ids = {**env.container_ids, key: data["container_id"]}
@@ -372,14 +375,13 @@ async def remove_php(
     if len(versions) <= 1:
         raise HTTPException(status_code=400, detail="Cannot remove the last PHP version")
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/remove-php", json={
-        "username": user.username,
-        "version": body.version,
-    })
+    from agent.executors.docker_isolation import remove_php_version
 
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Remove PHP failed"))
+    try:
+        result = await remove_php_version(user.username, body.version)
+    except Exception as exc:
+        logger.error("remove_php_version failed for %s: %s", user.username, exc)
+        raise HTTPException(status_code=500, detail=f"Remove PHP failed: {exc}")
 
     versions.remove(body.version)
     env.php_versions = versions
@@ -392,7 +394,7 @@ async def remove_php(
     _log(db, request, admin.id, "environment.remove_php",
          f"Removed PHP {body.version} for {user.username}")
 
-    return OperationResponse(ok=True, detail=f"PHP {body.version} removed", data=result.get("data"))
+    return OperationResponse(ok=True, detail=f"PHP {body.version} removed", data=result)
 
 
 # ---------------------------------------------------------------------------
@@ -410,18 +412,15 @@ async def toggle_redis(
     user = await _get_user_or_404(user_id, db)
     env = await _get_env_or_404(user_id, db)
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/toggle-redis", json={
-        "username": user.username,
-        "enable": body.enable,
-        "memory_mb": body.memory_mb,
-    })
+    from agent.executors.docker_isolation import toggle_redis as _toggle_redis
 
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Toggle failed"))
+    try:
+        data = await _toggle_redis(user.username, body.enable, body.memory_mb or 64)
+    except Exception as exc:
+        logger.error("toggle_redis failed for %s: %s", user.username, exc)
+        raise HTTPException(status_code=500, detail=f"Toggle failed: {exc}")
 
     env.redis_enabled = body.enable
-    data = result.get("data", {})
     container_ids = dict(env.container_ids or {})
     if body.enable and "container_id" in data:
         container_ids["redis"] = data["container_id"]
@@ -452,18 +451,15 @@ async def toggle_memcached(
     user = await _get_user_or_404(user_id, db)
     env = await _get_env_or_404(user_id, db)
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/toggle-memcached", json={
-        "username": user.username,
-        "enable": body.enable,
-        "memory_mb": body.memory_mb,
-    })
+    from agent.executors.docker_isolation import toggle_memcached as _toggle_memcached
 
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Toggle failed"))
+    try:
+        data = await _toggle_memcached(user.username, body.enable, body.memory_mb or 64)
+    except Exception as exc:
+        logger.error("toggle_memcached failed for %s: %s", user.username, exc)
+        raise HTTPException(status_code=500, detail=f"Toggle failed: {exc}")
 
     env.memcached_enabled = body.enable
-    data = result.get("data", {})
     container_ids = dict(env.container_ids or {})
     if body.enable and "container_id" in data:
         container_ids["memcached"] = data["container_id"]
@@ -494,13 +490,18 @@ async def update_resources(
     user = await _get_user_or_404(user_id, db)
     env = await _get_env_or_404(user_id, db)
 
-    agent = _get_agent(request)
-    result = await agent.post("/docker-isolation/update-resources", json={
-        "username": user.username,
-        "cpu": body.cpu_cores,
-        "memory_mb": body.ram_mb,
-        "io_bps": body.io_bandwidth_mbps * 1024 * 1024,
-    })
+    from agent.executors.docker_isolation import update_resource_limits
+
+    try:
+        result = await update_resource_limits(
+            username=user.username,
+            cpu=body.cpu_cores,
+            memory_mb=body.ram_mb,
+            io_bps=body.io_bandwidth_mbps * 1024 * 1024,
+        )
+    except Exception as exc:
+        logger.error("update_resource_limits failed for %s: %s", user.username, exc)
+        raise HTTPException(status_code=500, detail=f"Resource update failed: {exc}")
 
     env.cpu_limit = body.cpu_cores
     env.memory_limit_mb = body.ram_mb
@@ -509,7 +510,7 @@ async def update_resources(
     _log(db, request, admin.id, "environment.update_resources",
          f"Updated resources for {user.username}: cpu={body.cpu_cores}, ram={body.ram_mb}MB")
 
-    return OperationResponse(ok=True, detail="Resource limits updated", data=result.get("data"))
+    return OperationResponse(ok=True, detail="Resource limits updated", data=result)
 
 
 # ---------------------------------------------------------------------------
@@ -527,9 +528,14 @@ async def get_usage(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
 
     user = await _get_user_or_404(user_id, db)
-    agent = _get_agent(request)
-    result = await agent.get(f"/docker-isolation/usage/{user.username}")
-    data = result.get("data", {})
+
+    from agent.executors.docker_isolation import get_user_resource_usage
+
+    try:
+        data = await get_user_resource_usage(user.username)
+    except Exception as exc:
+        logger.error("get_user_resource_usage failed for %s: %s", user.username, exc)
+        data = {}
 
     return ResourceUsageResponse(
         username=user.username,
@@ -554,9 +560,14 @@ async def get_containers(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
 
     user = await _get_user_or_404(user_id, db)
-    agent = _get_agent(request)
-    result = await agent.get(f"/docker-isolation/containers/{user.username}")
-    containers = result.get("data", [])
+
+    from agent.executors.docker_isolation import get_user_containers
+
+    try:
+        containers = await get_user_containers(user.username)
+    except Exception as exc:
+        logger.error("get_user_containers failed for %s: %s", user.username, exc)
+        containers = []
 
     return ContainerListResponse(
         username=user.username,

@@ -1,17 +1,129 @@
-"""AI-powered one-click application installer."""
+"""AI-powered one-click application installer.
+
+All shell work runs locally on the host via :mod:`subprocess`, pushed
+off the FastAPI event loop with
+``asyncio.get_running_loop().run_in_executor``. **Nothing** in this
+module talks to a remote agent on port 7080 -- previous revisions
+proxied every step through ``agent._request("POST", "/exec", ...)``;
+that has been replaced with direct ``subprocess.run`` calls so the
+panel works on a single host without any agent dependency.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import string
-from typing import Any
+import subprocess
+from typing import Any, Optional, Sequence, Union
 
 from api.core.ai_client import AIClient
 
 logger = logging.getLogger("hosthive.ai.installer")
 
+# Default subprocess timeout (seconds) so a hung command can never block
+# the API event loop indefinitely.
+_DEFAULT_TIMEOUT = 1800
+
+
+# ---------------------------------------------------------------------------
+# Subprocess helpers -- run blocking commands off the event loop
+# ---------------------------------------------------------------------------
+
+
+def _run_sync(
+    cmd: Union[str, Sequence[str]],
+    *,
+    shell: bool = False,
+    cwd: Optional[str] = None,
+    env: Optional[dict] = None,
+    timeout: int = _DEFAULT_TIMEOUT,
+    input_data: Optional[str] = None,
+) -> dict[str, Any]:
+    """Synchronous subprocess runner -- intended for ``run_in_executor``.
+
+    Returns a dict mirroring the old agent ``/exec`` response so the
+    rest of this module can stay shape-compatible:
+
+    ``{"exit_code": int, "stdout": str, "stderr": str}``
+    """
+    try:
+        completed = subprocess.run(
+            cmd,
+            shell=shell,
+            cwd=cwd,
+            env=env,
+            input=input_data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "exit_code": 124,
+            "stdout": "",
+            "stderr": f"Command timed out after {timeout}s: {exc}",
+        }
+    except FileNotFoundError as exc:
+        return {"exit_code": 127, "stdout": "", "stderr": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - surface any subprocess error
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+    return {
+        "exit_code": completed.returncode,
+        "stdout": (completed.stdout or "").strip(),
+        "stderr": (completed.stderr or "").strip(),
+    }
+
+
+async def _run(
+    cmd: Union[str, Sequence[str]],
+    *,
+    shell: bool = False,
+    cwd: Optional[str] = None,
+    env: Optional[dict] = None,
+    timeout: int = _DEFAULT_TIMEOUT,
+    input_data: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run a blocking subprocess off the event loop.
+
+    Wraps :func:`_run_sync` in
+    ``asyncio.get_running_loop().run_in_executor`` so the FastAPI event
+    loop stays responsive while installers (wget, tar, composer, npm,
+    docker, ...) do their work.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: _run_sync(
+            cmd,
+            shell=shell,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            input_data=input_data,
+        ),
+    )
+
+
+async def _run_shell(command: str, *, timeout: int = _DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """Run a free-form shell command line directly via /bin/sh.
+
+    The catalog below is full of pipelines, heredocs and ``&&``-chained
+    commands, so we shell-out for those rather than trying to tokenize
+    them into argv lists. The command still runs locally -- there is no
+    network hop to an agent.
+    """
+    return await _run(command, shell=True, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
 # Supported applications and their install configurations
+# ---------------------------------------------------------------------------
+
 APP_CONFIGS: dict[str, dict[str, Any]] = {
     "wordpress": {
         "display_name": "WordPress",
@@ -666,17 +778,113 @@ def _generate_password(length: int = 24) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+# ---------------------------------------------------------------------------
+# Local equivalents of the previously-proxied agent helpers
+# ---------------------------------------------------------------------------
+
+
+async def _local_create_database(
+    db_name: str,
+    db_user: str,
+    db_pass: str,
+    db_type: str,
+) -> None:
+    """Create a database + user locally via the mysql / psql CLI."""
+    if db_type == "mysql":
+        sql = (
+            f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
+            f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+            f"CREATE USER IF NOT EXISTS '{db_user}'@'localhost' "
+            f"IDENTIFIED BY '{db_pass}';\n"
+            f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'localhost';\n"
+            f"FLUSH PRIVILEGES;\n"
+        )
+        result = await _run(["mysql"], input_data=sql)
+    elif db_type in ("postgresql", "postgres"):
+        sql = (
+            f"CREATE USER \"{db_user}\" WITH PASSWORD '{db_pass}';\n"
+            f"CREATE DATABASE \"{db_name}\" OWNER \"{db_user}\";\n"
+            f"GRANT ALL PRIVILEGES ON DATABASE \"{db_name}\" TO \"{db_user}\";\n"
+        )
+        result = await _run(
+            ["sudo", "-u", "postgres", "psql"],
+            input_data=sql,
+        )
+    else:
+        raise RuntimeError(f"Unsupported db_type: {db_type}")
+
+    if result["exit_code"] != 0:
+        raise RuntimeError(
+            f"Database provisioning failed ({db_type}): "
+            f"{result['stderr'] or result['stdout']}"
+        )
+
+
+async def _local_issue_ssl(domain: str, email: str) -> None:
+    """Issue a Let's Encrypt certificate locally via certbot."""
+    result = await _run(
+        [
+            "certbot", "--nginx",
+            "--non-interactive", "--agree-tos",
+            "--redirect",
+            "-m", email,
+            "-d", domain,
+        ],
+        timeout=600,
+    )
+    if result["exit_code"] != 0:
+        raise RuntimeError(
+            f"certbot failed for {domain}: "
+            f"{result['stderr'] or result['stdout']}"
+        )
+
+
+async def _local_set_crontab(user: str, cron_line: str) -> None:
+    """Append a cron line to ``user``'s crontab via the local crontab CLI."""
+    list_result = await _run(["crontab", "-u", user, "-l"])
+    existing = list_result["stdout"] if list_result["exit_code"] == 0 else ""
+    new_crontab = existing.rstrip() + ("\n" if existing.strip() else "") + cron_line + "\n"
+
+    write_result = await _run(
+        ["crontab", "-u", user, "-"],
+        input_data=new_crontab,
+    )
+    if write_result["exit_code"] != 0:
+        raise RuntimeError(
+            f"crontab update failed for {user}: "
+            f"{write_result['stderr'] or write_result['stdout']}"
+        )
+
+
+async def _local_check_ssl(domain: str) -> bool:
+    """Return True if a Let's Encrypt cert exists for ``domain``."""
+    result = await _run(
+        ["test", "-f", f"/etc/letsencrypt/live/{domain}/cert.pem"],
+    )
+    return result["exit_code"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Public installer entry-point
+# ---------------------------------------------------------------------------
+
+
 async def install_app(
     domain: str,
     app_name: str,
-    agent_client: Any,
     ai_client: AIClient | None = None,
     user: str = "www-data",
     email: str | None = None,
+    **_legacy: Any,
 ) -> dict[str, Any]:
     """Install an application on the specified domain.
 
-    Returns dict with url, credentials, and status info.
+    All shell work runs locally via :mod:`subprocess` (wrapped in
+    ``run_in_executor``). The ``**_legacy`` catch-all swallows any
+    no-longer-used keyword arguments such as ``agent_client`` so older
+    callers do not break while they are being migrated.
+
+    Returns a dict with url, credentials, and status info.
     """
     app_key = app_name.lower().replace(".", "").replace("-", "")
     if app_key not in APP_CONFIGS:
@@ -692,7 +900,7 @@ async def install_app(
     db_pass = _generate_password(20)
     admin_pass = _generate_password(16)
 
-    credentials = {"admin_user": "admin", "admin_password": admin_pass}
+    credentials: dict[str, Any] = {"admin_user": "admin", "admin_password": admin_pass}
     template_vars = {
         "domain": domain,
         "doc_root": doc_root,
@@ -707,7 +915,7 @@ async def install_app(
     for step in config["install_steps"]:
         if step == "create_database" and config.get("db_type"):
             await _step_create_database(
-                agent_client, db_name, db_user, db_pass, config["db_type"],
+                db_name, db_user, db_pass, config["db_type"],
             )
             credentials["db_name"] = db_name
             credentials["db_user"] = db_user
@@ -715,20 +923,20 @@ async def install_app(
 
         elif step == "download_app":
             cmd = config["download_cmd"].format(**template_vars)
-            await _run_agent_command(agent_client, cmd)
+            await _run_local_command(cmd)
 
         elif step == "configure_app":
             cmd = config.get("configure_cmd", "")
             if cmd:
                 cmd = cmd.format(**template_vars)
-                await _run_agent_command(agent_client, cmd)
+                await _run_local_command(cmd)
 
         elif step == "set_permissions":
-            await _step_set_permissions(agent_client, doc_root, user)
+            await _step_set_permissions(doc_root, user)
 
         elif step == "setup_ssl":
             try:
-                await agent_client.issue_ssl(domain, email or f"admin@{domain}")
+                await _local_issue_ssl(domain, email or f"admin@{domain}")
             except Exception as exc:
                 logger.warning("SSL setup failed for %s: %s", domain, exc)
 
@@ -736,15 +944,11 @@ async def install_app(
             cron_cmd = config.get("cron_cmd", "")
             if cron_cmd:
                 cron_cmd = cron_cmd.format(**template_vars)
-                await _step_setup_cron(agent_client, user, cron_cmd)
+                await _step_setup_cron(user, cron_cmd)
 
     ssl_configured = False
     try:
-        # Check if SSL was configured
-        result = await agent_client._request("POST", "/exec", json_body={
-            "command": f"test -f /etc/letsencrypt/live/{domain}/cert.pem && echo yes || echo no",
-        })
-        ssl_configured = result.get("stdout", "").strip() == "yes"
+        ssl_configured = await _local_check_ssl(domain)
     except Exception:
         pass
 
@@ -760,40 +964,56 @@ async def install_app(
     }
 
 
+# ---------------------------------------------------------------------------
+# Per-step implementations -- all local subprocess, no agent proxy
+# ---------------------------------------------------------------------------
+
+
 async def _step_create_database(
-    agent: Any,
     db_name: str,
     db_user: str,
     db_pass: str,
     db_type: str,
 ) -> None:
-    """Create database and user via agent."""
-    await agent.create_database(db_name, db_user, db_pass, db_type)
+    """Create a database and user locally via the DB CLI."""
+    await _local_create_database(db_name, db_user, db_pass, db_type)
     logger.info("Created database %s for app install", db_name)
 
 
-async def _step_set_permissions(agent: Any, doc_root: str, user: str) -> None:
-    """Set correct file ownership and permissions."""
-    await _run_agent_command(agent, f"chown -R {user}:{user} {doc_root}")
-    await _run_agent_command(agent, f"find {doc_root} -type d -exec chmod 755 {{}} \\;")
-    await _run_agent_command(agent, f"find {doc_root} -type f -exec chmod 644 {{}} \\;")
+async def _step_set_permissions(doc_root: str, user: str) -> None:
+    """Set correct file ownership and permissions via local subprocess."""
+    await _run_local_command(f"chown -R {user}:{user} {doc_root}")
+    await _run_local_command(
+        f"find {doc_root} -type d -exec chmod 755 {{}} \\;"
+    )
+    await _run_local_command(
+        f"find {doc_root} -type f -exec chmod 644 {{}} \\;"
+    )
 
 
-async def _step_setup_cron(agent: Any, user: str, cron_cmd: str) -> None:
-    """Add a cron job for the application."""
+async def _step_setup_cron(user: str, cron_cmd: str) -> None:
+    """Add a cron job for the application via the local crontab CLI."""
     try:
-        await agent.set_crontab(user, [{"expression": cron_cmd}])
+        await _local_set_crontab(user, cron_cmd)
         logger.info("Cron job added for %s", user)
     except Exception as exc:
         logger.warning("Failed to setup cron: %s", exc)
 
 
-async def _run_agent_command(agent: Any, command: str) -> dict[str, Any]:
-    """Run a shell command via the agent."""
-    result = await agent._request("POST", "/exec", json_body={"command": command})
+async def _run_local_command(command: str) -> dict[str, Any]:
+    """Run a shell command locally (no agent proxy).
+
+    Replaces the previous ``agent._request("POST", "/exec", ...)`` call.
+    The command is executed via /bin/sh in a worker thread so the
+    FastAPI event loop stays responsive.
+    """
+    result = await _run_shell(command)
     exit_code = result.get("exit_code", -1)
     if exit_code != 0:
         stderr = result.get("stderr", "unknown error")
-        logger.error("Command failed (exit %d): %s\nStderr: %s", exit_code, command, stderr)
+        logger.error(
+            "Command failed (exit %d): %s\nStderr: %s",
+            exit_code, command, stderr,
+        )
         raise RuntimeError(f"Install command failed: {stderr}")
     return result

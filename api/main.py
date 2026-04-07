@@ -14,7 +14,6 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from api.core.config import settings
-from api.core.agent_client import AgentClient
 from api.core.database import engine
 from api.core.middleware import SecurityHeadersMiddleware, AuditLogMiddleware
 from api.core.rate_limit import limiter
@@ -87,8 +86,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         _logger.error("Redis connection FAILED: %s — login/sessions will not work!", exc)
 
-    # Agent client
-    app.state.agent = AgentClient()
+    # NOTE: ``app.state.agent`` is intentionally not initialized.
+    # All routers now perform privileged work directly via subprocess /
+    # in-process service modules; the legacy HostHive agent on port 7080
+    # is no longer required for any router endpoint to function.
 
     # Create tables if they don't exist yet (first run)
     _logger.info("Creating database tables (if not exist)...")
@@ -113,7 +114,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown ----------------------------------------------------------
-    await app.state.agent.close()
     await app.state.redis.aclose()  # type: ignore[union-attr]
     await engine.dispose()
 

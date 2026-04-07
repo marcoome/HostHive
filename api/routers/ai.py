@@ -1,11 +1,23 @@
-"""AI router -- /api/v1/ai."""
+"""AI router -- /api/v1/ai.
+
+The four "tool" endpoints (nginx optimize/apply, security scan, install-app)
+historically delegated server-side actions to the HostHive agent on port
+7080. They now use an in-process ``_DirectAgent`` shim that performs the
+same operations directly via subprocess / file I/O. This module never
+proxies to the HostHive agent on port 7080 and must not import or
+reference ``request.app.state.agent``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import shutil
+import subprocess
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -56,6 +68,176 @@ _admin = require_role("admin")
 _RATE_LIMIT_PREFIX = "hosthive:ai:ratelimit:"
 _RATE_LIMIT_MAX = 20  # requests per minute
 _RATE_LIMIT_WINDOW = 60  # seconds
+
+
+# --------------------------------------------------------------------------
+# Direct in-process agent shim
+# --------------------------------------------------------------------------
+#
+# The downstream AI service modules (api/services/ai_nginx.py,
+# ai_security.py, ai_installer.py) accept an ``agent_client`` argument
+# whose surface includes ``read_file``, ``write_file``, ``service_action``,
+# ``create_database``, ``issue_ssl``, ``set_crontab`` and the low-level
+# ``_request("POST", "/exec", json_body={"command": ...})`` shell escape.
+#
+# Historically that surface was provided by ``api.core.agent_client.AgentClient``
+# which forwarded each call over HTTP to the privileged agent on port 7080.
+# This shim implements the same surface using direct subprocess and file I/O
+# inside the API process so the AI features keep working even when no agent
+# is installed.
+
+class _DirectAgent:
+    """Subprocess/file based replacement for the legacy AgentClient surface."""
+
+    @staticmethod
+    async def _to_thread(func, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        from functools import partial
+        return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+
+    # ----- File I/O -------------------------------------------------------
+
+    async def read_file(self, path: str) -> dict[str, Any]:
+        def _read() -> dict[str, Any]:
+            try:
+                content = Path(path).read_text(encoding="utf-8", errors="replace")
+                return {"content": content, "path": path}
+            except Exception as exc:
+                raise RuntimeError(f"read_file({path}) failed: {exc}") from exc
+        return await self._to_thread(_read)
+
+    async def write_file(self, path: str, content: str) -> dict[str, Any]:
+        def _write() -> dict[str, Any]:
+            try:
+                p = Path(path)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(content, encoding="utf-8")
+                return {"ok": True, "path": path}
+            except Exception as exc:
+                raise RuntimeError(f"write_file({path}) failed: {exc}") from exc
+        return await self._to_thread(_write)
+
+    # ----- Generic _request shim used for /exec and /vhost/.../stats -----
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[dict[str, Any]] = None,
+        params: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        # Shell exec
+        if path == "/exec":
+            cmd = (json_body or {}).get("command", "")
+            if not cmd:
+                return {"exit_code": 1, "stdout": "", "stderr": "no command"}
+            return await self._exec_shell(cmd)
+
+        # vhost stats — best-effort, return empty payload when unavailable
+        if path.startswith("/vhost/") and path.endswith("/stats"):
+            return {
+                "requests_today": "unknown",
+                "bandwidth_bytes": "unknown",
+                "requests_30d": "unknown",
+            }
+
+        # Anything else is unsupported in direct mode
+        raise RuntimeError(
+            f"_DirectAgent does not support {method} {path}; the agent on "
+            f"port 7080 is no longer used and this code path must be "
+            f"reimplemented as a direct subprocess call."
+        )
+
+    async def _exec_shell(self, command: str) -> dict[str, Any]:
+        def _run() -> dict[str, Any]:
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", command],
+                    capture_output=True, text=True, timeout=120,
+                )
+                return {
+                    "exit_code": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+            except subprocess.TimeoutExpired as exc:
+                return {"exit_code": 124, "stdout": exc.stdout or "", "stderr": "timeout"}
+            except Exception as exc:
+                return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+        return await self._to_thread(_run)
+
+    # ----- Service / SSL / DB / cron --------------------------------------
+
+    async def service_action(self, service: str, action: str = "restart") -> dict[str, Any]:
+        if not shutil.which("systemctl"):
+            return {"ok": False, "active": False, "error": "systemctl not available"}
+
+        def _run() -> dict[str, Any]:
+            if action == "status":
+                r = subprocess.run(
+                    ["systemctl", "is-active", service],
+                    capture_output=True, text=True, timeout=10,
+                )
+                return {"ok": True, "active": r.stdout.strip() == "active"}
+            r = subprocess.run(
+                ["sudo", "-n", "systemctl", action, service],
+                capture_output=True, text=True, timeout=30,
+            )
+            return {
+                "ok": r.returncode == 0,
+                "stdout": r.stdout,
+                "stderr": r.stderr,
+            }
+        return await self._to_thread(_run)
+
+    async def issue_ssl(self, domain: str, email: str) -> dict[str, Any]:
+        try:
+            from api.services.nginx_service import issue_letsencrypt
+            return await issue_letsencrypt(domain=domain, email=email)
+        except ImportError:
+            # Fallback: call certbot directly
+            def _run() -> dict[str, Any]:
+                if not shutil.which("certbot"):
+                    raise RuntimeError("certbot not installed")
+                r = subprocess.run(
+                    [
+                        "sudo", "-n", "certbot", "--nginx", "-d", domain,
+                        "--non-interactive", "--agree-tos", "-m", email,
+                    ],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(f"certbot failed: {r.stderr}")
+                return {"ok": True, "stdout": r.stdout}
+            return await self._to_thread(_run)
+
+    async def create_database(
+        self, db_name: str, db_user: str, db_password: str, db_type: str = "mysql",
+    ) -> dict[str, Any]:
+        from agent.executors.database_executor import create_database as _create_db
+        return await self._to_thread(
+            _create_db,
+            db_name=db_name,
+            db_user=db_user,
+            db_password=db_password,
+            db_type=db_type,
+        )
+
+    async def set_crontab(self, username: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+        def _run() -> dict[str, Any]:
+            content = "\n".join(e.get("expression", "") for e in entries) + "\n"
+            r = subprocess.run(
+                ["sudo", "-n", "crontab", "-u", username, "-"],
+                input=content, capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(f"crontab install failed: {r.stderr}")
+            return {"ok": True}
+        return await self._to_thread(_run)
+
+
+_direct_agent_singleton = _DirectAgent()
 
 
 # --------------------------------------------------------------------------
@@ -567,7 +749,7 @@ async def nginx_optimize(
     try:
         result = await optimize_nginx(
             domain=body.domain,
-            agent_client=request.app.state.agent,
+            agent_client=_direct_agent_singleton,
             ai_client=ai_client,
         )
     except ValueError as exc:
@@ -611,7 +793,7 @@ async def nginx_apply(
         result = await apply_nginx_config(
             domain=body.domain,
             proposed_config=body.proposed_config,
-            agent_client=request.app.state.agent,
+            agent_client=_direct_agent_singleton,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -642,7 +824,7 @@ async def security_scan(
 
     try:
         result = await run_security_scan(
-            agent_client=request.app.state.agent,
+            agent_client=_direct_agent_singleton,
             ai_client=ai_client,
         )
     except Exception as exc:
@@ -683,10 +865,11 @@ async def install_app_endpoint(
     from api.services.ai_installer import install_app
 
     try:
+        # Runs locally via subprocess (wget, tar, composer, docker, npm);
+        # no proxying to an agent on port 7080.
         result = await install_app(
             domain=body.domain,
             app_name=body.app_name,
-            agent_client=request.app.state.agent,
             user=current_user.username,
             email=current_user.email,
         )

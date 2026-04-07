@@ -2,6 +2,11 @@
 
 Manages per-user CPU/RAM/IO cgroup limits, disk quotas, process limits,
 and per-domain PHP memory limits.
+
+All operations run directly on the host via subprocess / filesystem I/O --
+this router does NOT proxy to a privileged agent on port 7080. Blocking
+calls are dispatched through ``loop.run_in_executor`` so the event loop
+is never stalled.
 """
 
 from __future__ import annotations
@@ -9,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -282,15 +289,15 @@ async def set_domain_php_limits(
         raise HTTPException(status_code=400, detail="Invalid domain format.")
 
     pool_dir = Path(f"/etc/php/{body.php_version}/fpm/pool.d")
-    if not pool_dir.exists():
+    if not await _to_thread(pool_dir.exists):
         raise HTTPException(
             status_code=404,
             detail=f"PHP-FPM pool directory not found for PHP {body.php_version}.",
         )
 
     pool_conf = pool_dir / f"{domain}.conf"
-    if not pool_conf.exists():
-        candidates = list(pool_dir.glob(f"*{domain}*"))
+    if not await _to_thread(pool_conf.exists):
+        candidates = await _to_thread(lambda: list(pool_dir.glob(f"*{domain}*")))
         if candidates:
             pool_conf = candidates[0]
         else:
@@ -299,7 +306,7 @@ async def set_domain_php_limits(
                 detail=f"No PHP-FPM pool config found for domain '{domain}'.",
             )
 
-    content = pool_conf.read_text(encoding="utf-8")
+    content = await _to_thread(pool_conf.read_text, encoding="utf-8")
 
     # Update pm.max_children
     mc_pat = re.compile(r"^\s*pm\.max_children\s*=.*$", re.MULTILINE)
@@ -317,7 +324,7 @@ async def set_domain_php_limits(
     else:
         content = content.rstrip() + f"\n{ml_line}\n"
 
-    pool_conf.write_text(content, encoding="utf-8")
+    await _to_thread(pool_conf.write_text, content, encoding="utf-8")
 
     # Reload PHP-FPM
     await _run(f"systemctl reload php{body.php_version}-fpm")
@@ -375,19 +382,53 @@ async def resource_overview(
 # Disk quotas, process limits, per-domain PHP memory_limit
 # ==========================================================================
 
-async def _run(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
-    """Run a shell command and return (returncode, stdout, stderr)."""
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+_T = TypeVar("_T")
+
+
+async def _to_thread(func: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """Run a blocking callable in the default executor.
+
+    Uses ``asyncio.get_running_loop().run_in_executor`` to keep the
+    event loop responsive while sync operations (subprocess.run,
+    Path.read_text/write_text, Path.exists, etc.) are in flight.
+    """
+    loop = asyncio.get_running_loop()
+    if kwargs:
+        from functools import partial
+        return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+    return await loop.run_in_executor(None, func, *args)
+
+
+def _run_sync(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
+    """Blocking shell command runner used inside the executor."""
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
         return 1, "", "Command timed out"
-    return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
+    except Exception as exc:  # noqa: BLE001
+        return 1, "", str(exc)
+    return (
+        proc.returncode,
+        (proc.stdout or "").strip(),
+        (proc.stderr or "").strip(),
+    )
+
+
+async def _run(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
+    """Run a shell command in a thread executor (non-blocking).
+
+    Replaces the previous ``asyncio.create_subprocess_shell`` based
+    implementation with a synchronous ``subprocess.run`` dispatched
+    via ``loop.run_in_executor`` so we have a single, uniform pattern
+    for all blocking work in this module.
+    """
+    return await _to_thread(_run_sync, cmd, timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -574,8 +615,8 @@ LIMITS_CONF = Path("/etc/security/limits.conf")
 LIMITS_D_DIR = Path("/etc/security/limits.d")
 
 
-def _read_limits_for_user(username: str) -> dict[str, int]:
-    """Read current limits.conf entries for a user."""
+def _read_limits_for_user_sync(username: str) -> dict[str, int]:
+    """Blocking helper -- read current limits.conf entries for a user."""
     current: dict[str, int] = {
         "max_processes": 256,
         "max_open_files": 4096,
@@ -600,8 +641,13 @@ def _read_limits_for_user(username: str) -> dict[str, int]:
     return current
 
 
-def _write_limits_for_user(username: str, limits: ProcessLimitsUpdate) -> str:
-    """Write a per-user limits.d file. Returns the file path."""
+async def _read_limits_for_user(username: str) -> dict[str, int]:
+    """Async wrapper -- dispatch to executor."""
+    return await _to_thread(_read_limits_for_user_sync, username)
+
+
+def _write_limits_for_user_sync(username: str, limits: "ProcessLimitsUpdate") -> str:
+    """Blocking helper -- write a per-user limits.d file. Returns path."""
     LIMITS_D_DIR.mkdir(parents=True, exist_ok=True)
     user_limits_file = LIMITS_D_DIR / f"99-hosthive-{username}.conf"
 
@@ -617,6 +663,11 @@ def _write_limits_for_user(username: str, limits: ProcessLimitsUpdate) -> str:
     return str(user_limits_file)
 
 
+async def _write_limits_for_user(username: str, limits: "ProcessLimitsUpdate") -> str:
+    """Async wrapper -- dispatch to executor."""
+    return await _to_thread(_write_limits_for_user_sync, username, limits)
+
+
 @router.put("/users/{username}/process-limits", response_model=ProcessLimitsResponse)
 async def set_process_limits(
     username: str,
@@ -630,7 +681,7 @@ async def set_process_limits(
         raise HTTPException(status_code=400, detail="Invalid username format.")
 
     try:
-        config_path = _write_limits_for_user(username, body)
+        config_path = await _write_limits_for_user(username, body)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -662,7 +713,7 @@ async def get_process_limits(
     if not re.match(r"^[a-zA-Z0-9_-]+$", username):
         raise HTTPException(status_code=400, detail="Invalid username format.")
 
-    limits = _read_limits_for_user(username)
+    limits = await _read_limits_for_user(username)
     return ProcessLimitsResponse(
         username=username,
         max_processes=limits["max_processes"],
@@ -689,7 +740,7 @@ async def set_domain_php_memory(
     _require_admin(current_user)
 
     pool_dir = Path(f"/etc/php/{body.php_version}/fpm/pool.d")
-    if not pool_dir.exists():
+    if not await _to_thread(pool_dir.exists):
         raise HTTPException(
             status_code=404,
             detail=f"PHP-FPM pool directory not found for PHP {body.php_version}.",
@@ -697,9 +748,9 @@ async def set_domain_php_memory(
 
     # Find the pool config for this domain
     pool_conf = pool_dir / f"{domain}.conf"
-    if not pool_conf.exists():
+    if not await _to_thread(pool_conf.exists):
         # Try to find by pattern
-        candidates = list(pool_dir.glob(f"*{domain}*"))
+        candidates = await _to_thread(lambda: list(pool_dir.glob(f"*{domain}*")))
         if candidates:
             pool_conf = candidates[0]
         else:
@@ -708,7 +759,7 @@ async def set_domain_php_memory(
                 detail=f"No PHP-FPM pool config found for domain '{domain}'.",
             )
 
-    content = pool_conf.read_text(encoding="utf-8")
+    content = await _to_thread(pool_conf.read_text, encoding="utf-8")
 
     # Update or add memory_limit directive
     directive = f"php_admin_value[memory_limit] = {body.memory_limit}"
@@ -720,11 +771,11 @@ async def set_domain_php_memory(
         # Append before the end of the pool section or at the end
         content = content.rstrip() + f"\n{directive}\n"
 
-    # Create backup
+    # Create backup (copy original file via shutil in executor)
     backup_path = pool_conf.with_suffix(".conf.bak.hosthive")
-    backup_path.write_text(pool_conf.read_text(encoding="utf-8"), encoding="utf-8")
+    await _to_thread(shutil.copy2, str(pool_conf), str(backup_path))
 
-    pool_conf.write_text(content, encoding="utf-8")
+    await _to_thread(pool_conf.write_text, content, encoding="utf-8")
 
     # Reload PHP-FPM
     warnings: list[str] = []
